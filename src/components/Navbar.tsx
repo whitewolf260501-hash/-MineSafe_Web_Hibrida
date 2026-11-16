@@ -29,7 +29,8 @@ import {
   Sun,
   Moon,
   Building2,
-  Box
+  Box,
+  Router
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -135,6 +136,12 @@ export const Navbar: React.FC<NavbarProps> = ({
       label: 'Inspector 3D',
       shortLabel: 'Visor 3D',
       icon: <Box className="w-4 h-4 shrink-0 text-orange-400" />,
+    },
+    {
+      id: 'gateway_3d',
+      label: 'Gateway 3D',
+      shortLabel: 'Gateway 3D',
+      icon: <Router className="w-4 h-4 shrink-0 text-amber-400" />,
     },
   ];
 

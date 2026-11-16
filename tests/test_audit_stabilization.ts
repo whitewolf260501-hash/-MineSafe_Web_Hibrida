@@ -8,8 +8,10 @@ import {
   isUserSessionActive,
 } from '../src/utils/accessControl';
 import {
+  DEFAULT_PLATFORM_CONFIG,
   buildAlertBasePayload,
   buildRentalContractRTDBPayload,
+  isTabVisibleForUser,
   mapRTDBAlertRecord,
   mapRTDBContractToRental,
   resolveConfiguredRtdbUrl,
@@ -301,4 +303,76 @@ assert.ok(pkgJsonSrc.includes('rm -rf dist/assets/aistudio'), 'Build strips work
 assert.ok(deployWorkflowSrc.includes('npm test') && deployWorkflowSrc.includes('npm run lint'), 'CI executes tests and typecheck before deploying Pages');
 assert.ok(!envExampleSrc.includes('AIza'), '.env.example contains zero real secrets or API keys');
 console.log('✅ 5. Static audit & CI hygiene invariants passed');
+
+// -----------------------------------------------------------------------------
+// 6. Gateway 3D Role & Per-User Visibility Controls
+// -----------------------------------------------------------------------------
+assert.equal(
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin.gateway_3d,
+  true,
+  'gateway_3d defaults to visible for admin'
+);
+assert.equal(
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.gateway_3d,
+  false,
+  'gateway_3d defaults to hidden for operador'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', superadmin, DEFAULT_PLATFORM_CONFIG),
+  true,
+  'SuperAdmin always sees gateway_3d'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', adminAlpha, DEFAULT_PLATFORM_CONFIG),
+  true,
+  'Admin sees gateway_3d under default config'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', opAlpha, DEFAULT_PLATFORM_CONFIG),
+  false,
+  'Operador cannot see gateway_3d under default config'
+);
+
+const gatewayCustomConfig = {
+  ...DEFAULT_PLATFORM_CONFIG,
+  visibility: {
+    ...DEFAULT_PLATFORM_CONFIG.visibility,
+    rolePermissions: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+      operador: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
+        gateway_3d: true,
+      },
+    },
+    userOverrides: {
+      'adm-a': { gateway_3d: 'block' as const },
+    },
+    userOverridesByEmail: {
+      'op_special@minesafe_cl': { gateway_3d: 'allow' as const },
+    },
+  },
+};
+
+assert.equal(
+  isTabVisibleForUser('gateway_3d', opAlpha, gatewayCustomConfig),
+  true,
+  'Operador role toggle enables gateway_3d'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', adminAlpha, gatewayCustomConfig),
+  false,
+  'Per-user ID block override hides gateway_3d for specific admin'
+);
+const opSpecial = makeUser({ id: 'op-spec', email: 'op_special@minesafe.cl', role: 'operador' });
+assert.equal(
+  isTabVisibleForUser('gateway_3d', opSpecial, DEFAULT_PLATFORM_CONFIG),
+  false
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', opSpecial, gatewayCustomConfig),
+  true,
+  'Per-user email allow override grants gateway_3d access'
+);
+
+console.log('✅ 6. Gateway 3D role & individual visibility rules passed');
 console.log('\n🎉 All MineSafe Audit & Stabilization checks passed!');

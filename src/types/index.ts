@@ -265,7 +265,8 @@ export type ControllableTab =
   | 'reportes'
   | 'faenas'
   | 'usuarios'
-  | 'visor_3d';
+  | 'visor_3d'
+  | 'gateway_3d';
 
 export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
 

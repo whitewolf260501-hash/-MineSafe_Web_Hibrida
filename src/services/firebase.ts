@@ -2483,6 +2483,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         faenas: true,
         usuarios: true,
         visor_3d: true,
+        gateway_3d: true,
       },
       operador: {
         dashboard: true,
@@ -2494,6 +2495,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         faenas: true,
         usuarios: false,
         visor_3d: false,
+        gateway_3d: false,
       },
     },
     userOverrides: {},

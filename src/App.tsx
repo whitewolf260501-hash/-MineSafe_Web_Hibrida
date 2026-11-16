@@ -14,6 +14,7 @@ import { EmergencyModal, DrillType } from './components/EmergencyModal';
 import { alertEngine } from './services/alertEngine';
 
 const Node3DInspectorView = lazy(() => import('./components/Node3DInspectorView'));
+const Gateway3DInspectorView = lazy(() => import('./components/Gateway3DInspectorView'));
 
 
 import { 
@@ -1411,6 +1412,7 @@ export default function App({
     'equipos',
     'usuarios',
     'visor_3d',
+    'gateway_3d',
   ];
 
   // Proteger todas las ventanas según las reglas dinámicas del SuperAdministrador
@@ -1753,6 +1755,22 @@ export default function App({
                 }
               >
                 <Node3DInspectorView activeDevice={activeDevice} />
+              </Suspense>
+            )}
+
+            {currentTab === 'gateway_3d' && (
+              <Suspense
+                fallback={
+                  <div className="p-10 text-center bg-slate-900/80 border border-slate-800 rounded-2xl max-w-xl mx-auto my-12">
+                    <div className="w-8 h-8 rounded-full border-2 border-orange-500 border-t-transparent animate-spin mx-auto mb-3" />
+                    <p className="text-sm font-semibold text-slate-200">Cargando Inspector 3D del Gateway...</p>
+                  </div>
+                }
+              >
+                <Gateway3DInspectorView
+                  activeDevice={activeDevice}
+                  isFirebaseConnected={isFirebaseConnected}
+                />
               </Suspense>
             )}
 

@@ -214,6 +214,12 @@ assert.ok(navbarSrc.includes("id: 'visor_3d'"), 'Navbar includes visor_3d tab fi
 assert.ok(appSrc.includes("lazy(() => import('./components/Node3DInspectorView'))"), 'App.tsx lazy-loads Node3DInspectorView');
 assert.ok(appSrc.includes("currentTab === 'visor_3d'"), 'App.tsx renders visor_3d inside permission-gated branch');
 
-console.log('✅ 5. Inspector 3D integration & visibility control wiring passed');
+assert.ok(superAdminCtrlSrc.includes("id: 'gateway_3d'"), 'SuperAdminControlView lists gateway_3d in controllable windows');
+assert.ok(navbarSrc.includes("id: 'gateway_3d'"), 'Navbar includes gateway_3d tab filtered by visibility config');
+assert.ok(appSrc.includes("lazy(() => import('./components/Gateway3DInspectorView'))"), 'App.tsx lazy-loads Gateway3DInspectorView');
+assert.ok(appSrc.includes("currentTab === 'gateway_3d'"), 'App.tsx renders gateway_3d inside permission-gated branch');
+
+console.log('✅ 5. Inspector 3D (Nodo + Gateway) integration & visibility control wiring passed');
 console.log('\n🎉 All P013 + 3D Inspector checks passed!');
+
 

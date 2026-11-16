@@ -1,0 +1,1684 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>MineSafe Gateway 3D - Inspector de Nodo de Red</title>
+    <!-- Tailwind CSS -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Three.js r128 Global Script -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;600;700&display=swap');
+        
+        * { box-sizing: border-box; }
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0b0f19;
+            font-family: 'Inter', sans-serif;
+            color: #f1f5f9;
+        }
+        .font-mono-tech { font-family: 'JetBrains Mono', monospace; }
+        
+        #canvas-container {
+            width: 100%;
+            height: 100%;
+            min-height: 550px;
+            position: relative;
+            background: radial-gradient(circle at 50% 45%, #162038 0%, #0b0f19 75%);
+            overflow: hidden;
+        }
+        
+        canvas {
+            display: block;
+            width: 100% !important;
+            height: 100% !important;
+            outline: none;
+        }
+
+        .glass-panel {
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(16px);
+            -webkit-backdrop-filter: blur(16px);
+            border: 1px solid rgba(249, 115, 22, 0.22);
+        }
+
+        .glow-orange {
+            text-shadow: 0 0 14px rgba(249, 115, 22, 0.65);
+        }
+
+        /* Etiquetas flotantes 3D */
+        .label-3d {
+            position: absolute;
+            transform: translate(-50%, -50%);
+            pointer-events: auto;
+            cursor: pointer;
+            user-select: none;
+            transition: transform 0.15s ease, box-shadow 0.2s ease, border-color 0.2s ease;
+            z-index: 15;
+            white-space: nowrap;
+        }
+        .label-3d:hover {
+            transform: translate(-50%, -50%) scale(1.08);
+            z-index: 25;
+        }
+        .label-3d.active-label {
+            border-color: #f97316 !important;
+            box-shadow: 0 0 16px rgba(249, 115, 22, 0.55);
+            background: rgba(30, 41, 59, 0.96) !important;
+        }
+
+        /* Tarjetas laterales */
+        .comp-card {
+            transition: all 0.2s ease;
+        }
+        .comp-card.active-card {
+            border-color: #f97316 !important;
+            background: linear-gradient(135deg, rgba(249, 115, 22, 0.16) 0%, rgba(15, 23, 42, 0.9) 100%) !important;
+            box-shadow: 0 4px 20px -2px rgba(249, 115, 22, 0.25);
+        }
+
+        /* Scrollbar estilizado */
+        ::-webkit-scrollbar { width: 6px; height: 6px; }
+        ::-webkit-scrollbar-track { background: #0f172a; }
+        ::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+        ::-webkit-scrollbar-thumb:hover { background: #f97316; }
+
+        /* Tooltip flotante al pasar el mouse (Hover) */
+        #hover-tooltip {
+            position: fixed;
+            pointer-events: none;
+            z-index: 60;
+            transition: opacity 0.14s ease, transform 0.14s ease;
+            transform: translate(18px, 18px);
+            max-width: 315px;
+            box-shadow: 0 20px 35px -5px rgba(0, 0, 0, 0.8), 0 0 22px rgba(249, 115, 22, 0.28);
+        }
+
+        /* Badge de coordenadas durante el arrastre */
+        #drag-hud {
+            position: fixed;
+            pointer-events: none;
+            z-index: 70;
+            transform: translate(-50%, -135%);
+        }
+    </style>
+</head>
+<body class="flex flex-col h-screen w-screen select-none overflow-hidden">
+
+    <!-- HUD Flotante mientras se arrastra una pieza -->
+    <div id="drag-hud" class="hidden glass-panel px-3 py-1.5 rounded-lg border border-amber-400/80 shadow-xl text-[11px] font-mono-tech text-amber-300 flex items-center gap-2">
+        <span class="w-2 h-2 rounded-full bg-amber-400 animate-ping"></span>
+        <span id="drag-hud-name" class="font-bold text-white">Pieza</span>
+        <span id="drag-hud-coords" class="text-cyan-300">Δ(0.0, 0.0, 0.0)</span>
+    </div>
+
+    <!-- Tooltip Flotante Dinámico al pasar el Mouse -->
+    <div id="hover-tooltip" class="opacity-0 hidden glass-panel p-3.5 rounded-xl border border-orange-500/70 backdrop-blur-xl">
+        <div class="flex items-center justify-between gap-2 pb-1.5 border-b border-slate-700/80">
+            <div class="flex items-center gap-2">
+                <span id="tt-dot" class="w-2.5 h-2.5 rounded-full bg-orange-500 shadow-sm"></span>
+                <span id="tt-badge" class="text-[10px] font-mono-tech uppercase tracking-wider text-orange-300 font-bold">COMPONENTE</span>
+            </div>
+            <span id="tt-dims" class="text-[10px] font-mono-tech text-slate-400 bg-slate-900/90 px-1.5 py-0.5 rounded border border-slate-700">1:1</span>
+        </div>
+        <h4 id="tt-title" class="text-xs md:text-sm font-extrabold text-white mt-2">Nombre del Componente</h4>
+        <p id="tt-desc" class="text-[11px] text-slate-300 mt-1 leading-relaxed">Descripción de la función que cumple en el Gateway.</p>
+        <div id="tt-specs" class="mt-2 pt-1.5 border-t border-slate-800/90 text-[10px] font-mono-tech text-cyan-300 space-y-0.5"></div>
+        <div class="mt-2 text-[9px] text-orange-400/90 font-semibold flex items-center justify-between">
+            <span>✋ Arrastra para mover • Doble clic: devolver</span>
+            <span>Shift: Altura Y</span>
+        </div>
+    </div>
+
+    <!-- Barra Superior -->
+    <header class="glass-panel z-30 px-4 lg:px-6 py-3 flex flex-wrap justify-between items-center gap-3 shadow-2xl border-b border-orange-500/25 shrink-0">
+        <div class="flex items-center space-x-3">
+            <div class="relative flex items-center justify-center w-4 h-4">
+                <span class="animate-ping absolute inline-flex h-full w-full rounded-full bg-orange-400 opacity-75"></span>
+                <span class="relative inline-flex rounded-full h-3 w-3 bg-orange-500"></span>
+            </div>
+            <div>
+                <div class="flex items-center gap-2.5">
+                    <h1 class="text-lg md:text-xl font-extrabold tracking-wider text-orange-400 glow-orange">MINESAFE GATEWAY 3D</h1>
+                    <span class="text-xs px-2.5 py-0.5 rounded-md bg-orange-950/80 text-orange-300 border border-orange-500/40 font-mono-tech font-semibold">
+                        ESP32-C3 SuperMini + Bridge
+                    </span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Botones de Acción 3D -->
+        <div class="flex flex-wrap items-center gap-2">
+            <!-- NUEVO BOTÓN PRINCIPAL: Extraer y Ordenar Componentes -->
+            <button id="btnShowcase" class="px-4 py-2 bg-gradient-to-r from-orange-600 via-amber-600 to-orange-500 hover:from-orange-500 hover:to-amber-400 text-white font-bold rounded-lg shadow-lg shadow-orange-950/60 transition transform active:scale-95 flex items-center space-x-2 border border-orange-300/50 text-xs md:text-sm cursor-pointer">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2V6zM14 6a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2V6zM4 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2H6a2 2 0 01-2-2v-2zM14 16a2 2 0 012-2h2a2 2 0 012 2v2a2 2 0 01-2 2h-2a2 2 0 01-2-2v-2z"/></svg>
+                <span id="txtBtnShowcase">Extraer y Ordenar Piezas</span>
+            </button>
+
+            <!-- Botón de Modo de Arrastre (Plano Horizontal XZ vs Altura Vertical Y) -->
+            <button id="btnDragAxis" class="px-3.5 py-2 bg-emerald-950/80 hover:bg-emerald-900/80 text-emerald-300 font-semibold rounded-lg border border-emerald-500/50 transition transform active:scale-95 flex items-center space-x-1.5 text-xs md:text-sm cursor-pointer" title="También puedes mantener presionada la tecla Shift mientras arrastras para mover en vertical">
+                <svg class="w-4 h-4 text-emerald-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M7 11.5V14m0-2.5v-6a1.5 1.5 0 113 0m-3 6a1.5 1.5 0 00-3 0v2a7.5 7.5 0 0015 0v-5a1.5 1.5 0 00-3 0m-6-3V11m0-5.5v-1a1.5 1.5 0 013 0v1m0 0V11m0-5.5a1.5 1.5 0 013 0v3m0 0V11"/></svg>
+                <span id="txtDragAxis">Arrastre: Plano XZ</span>
+            </button>
+
+            <button id="btnToggleBox" class="px-3.5 py-2 bg-slate-800/90 hover:bg-slate-700 text-orange-300 font-semibold rounded-lg border border-orange-500/40 transition transform active:scale-95 flex items-center space-x-2 text-xs md:text-sm cursor-pointer">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 8h14M5 8a2 2 0 110-4h14a2 2 0 110 4M5 8v10a2 2 0 002 2h10a2 2 0 002-2V8m-9 4h4"/></svg>
+                <span id="txtBtnBox">Abrir Tapa</span>
+            </button>
+
+            <button id="btnExplode" class="px-3.5 py-2 bg-slate-800/90 hover:bg-slate-700 text-amber-300 rounded-lg border border-amber-500/30 transition flex items-center space-x-1.5 font-medium text-xs md:text-sm cursor-pointer">
+                <svg class="w-4 h-4 text-amber-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 8V4m0 0h4M4 4l5 5m11-1V4m0 0h-4m4 0l-5 5M4 16v4m0 0h4m-4 0l5-5m11 5l-5-5m5 5v-4m0 4h-4"/></svg>
+                <span id="txtExplode">Capas Verticales: OFF</span>
+            </button>
+
+            <button id="btnTransparent" class="px-3.5 py-2 bg-slate-800/90 hover:bg-slate-700 text-slate-200 rounded-lg border border-slate-700 transition flex items-center space-x-1.5 font-medium text-xs md:text-sm cursor-pointer">
+                <svg class="w-4 h-4 text-cyan-400" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z"/><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M2.458 12C3.732 7.943 7.523 5 12 5c4.478 0 8.268 2.943 9.542 7-1.274 4.057-5.064 7-9.542 7-4.477 0-8.268-2.943-9.542-7z"/></svg>
+                <span id="txtTransparent">Transparente: OFF</span>
+            </button>
+
+            <button id="btnToggleLabels" class="px-3 py-2 bg-slate-800/90 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition text-xs md:text-sm cursor-pointer">
+                Etiquetas: ON
+            </button>
+
+            <button id="btnResetCam" class="px-3.5 py-2 bg-slate-800/90 hover:bg-slate-700 text-slate-300 rounded-lg border border-slate-700 transition text-xs md:text-sm cursor-pointer">
+                Ensamblar / Restaurar
+            </button>
+        </div>
+    </header>
+
+    <!-- Contenedor Principal (Visor 3D + Barra Lateral) -->
+    <div class="flex flex-1 relative overflow-hidden min-h-0">
+        
+        <!-- Lienzo 3D -->
+        <div id="canvas-container" class="flex-1 cursor-grab active:cursor-grabbing relative">
+            
+            <!-- Guía rápida superior izquierda -->
+            <div class="absolute top-4 left-4 z-10 pointer-events-none hidden sm:flex flex-col gap-1.5 bg-slate-900/80 backdrop-blur-md px-3.5 py-3 rounded-xl border border-slate-700/80 text-xs text-slate-300 shadow-lg">
+                <div class="font-semibold text-orange-400 flex items-center gap-1.5">
+                    <span>🖐️ Control Interactivo y Arrastre 3D</span>
+                </div>
+                <div>• <b>Arrastrar Pieza (Clic Izq.):</b> Mover componente libremente</div>
+                <div>• <b>Shift + Arrastrar:</b> Subir / Bajar altura (Eje Y)</div>
+                <div>• <b>Doble Clic en Pieza:</b> Devolver a su sitio original</div>
+                <div>• <b>Arrastrar Fondo:</b> Orbitar cámara 360° • <b>Rueda:</b> Zoom</div>
+            </div>
+
+            <!-- Contenedor de Etiquetas Flotantes 3D -->
+            <div id="labels-container" class="absolute inset-0 pointer-events-none overflow-hidden z-10"></div>
+
+            <!-- Barra Inferior de Telemetría del Gateway -->
+            <div class="absolute bottom-4 left-4 right-4 xl:right-auto glass-panel px-4 py-2.5 rounded-xl border border-slate-700/80 shadow-2xl flex flex-wrap items-center gap-4 md:gap-6 text-xs z-20">
+                <div>
+                    <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Enlace ESP-NOW (M2)</span>
+                    <span class="text-emerald-400 font-bold flex items-center mt-0.5 font-mono-tech">
+                        <span class="w-2 h-2 rounded-full bg-emerald-500 mr-1.5 animate-pulse"></span>Activo (&lt; 0.45s)
+                    </span>
+                </div>
+                <div class="border-l border-slate-700/80 pl-4">
+                    <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Latencia Gateway → Web (M3)</span>
+                    <span class="text-cyan-400 font-bold mt-0.5 block font-mono-tech">1.15s (Meta &lt; 3.0s OK)</span>
+                </div>
+                <div class="border-l border-slate-700/80 pl-4">
+                    <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Batería LiPo 105568</span>
+                    <span class="text-amber-400 font-bold mt-0.5 block font-mono-tech">5000mAh • 4.18V (98%)</span>
+                </div>
+                <div class="border-l border-slate-700/80 pl-4 hidden sm:block">
+                    <span class="text-slate-400 block text-[10px] uppercase tracking-wider">Cloud Firebase RTDB</span>
+                    <span class="text-orange-400 font-bold mt-0.5 block font-mono-tech">ONLINE (99.4% Disp.)</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Panel Lateral Derecho de Inspección -->
+        <aside class="w-80 md:w-96 glass-panel z-20 p-5 flex flex-col justify-between overflow-y-auto border-l border-slate-800 shadow-2xl shrink-0">
+            <div>
+                <div class="flex items-center justify-between pb-3 border-b border-slate-800">
+                    <div>
+                        <h2 class="text-base md:text-lg font-bold text-orange-400">Componentes del Gateway</h2>
+                        <p class="text-xs text-slate-400 mt-0.5">Selecciona una pieza para ver sus detalles</p>
+                    </div>
+                    <span class="px-2 py-1 bg-orange-500/10 text-orange-400 text-xs font-mono-tech rounded border border-orange-500/30">GTW-C3</span>
+                </div>
+
+                <!-- Lista de los 5 Componentes -->
+                <div id="component-list" class="mt-3.5 space-y-2.5">
+                    
+                    <div id="card-enclosure" onclick="selectComponent('enclosure')" class="comp-card p-3 rounded-xl bg-slate-900/65 border border-slate-800 hover:border-orange-500/60 cursor-pointer group">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-sm text-slate-100 group-hover:text-orange-300 transition">1. Carcasa Impresa en 3D</span>
+                            <span class="w-3 h-3 rounded-full bg-orange-500 shadow-sm shadow-orange-500/50"></span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Caja naranja industrial con tapa articulada y marco visor para LCD 1.8".</p>
+                    </div>
+
+                    <div id="card-esp32c3" onclick="selectComponent('esp32c3')" class="comp-card p-3 rounded-xl bg-slate-900/65 border border-slate-800 hover:border-orange-500/60 cursor-pointer group">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-sm text-slate-100 group-hover:text-orange-300 transition">2. ESP32-C3 SuperMini</span>
+                            <span class="w-3 h-3 rounded-full bg-emerald-500 shadow-sm shadow-emerald-500/50"></span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Microcontrolador RISC-V ultra compacto con USB-C, recepción ESP-NOW y salida Wi-Fi.</p>
+                    </div>
+
+                    <div id="card-shield" onclick="selectComponent('shield')" class="comp-card p-3 rounded-xl bg-slate-900/65 border border-slate-800 hover:border-orange-500/60 cursor-pointer group">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-sm text-slate-100 group-hover:text-orange-300 transition">3. Placa de Expansión de Pines</span>
+                            <span class="w-3 h-3 rounded-full bg-blue-500 shadow-sm shadow-blue-500/50"></span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Base de 37.4×22.5 mm con conector JST blanco de batería y regletas de colores.</p>
+                    </div>
+
+                    <div id="card-battery" onclick="selectComponent('battery')" class="comp-card p-3 rounded-xl bg-slate-900/65 border border-slate-800 hover:border-orange-500/60 cursor-pointer group">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-sm text-slate-100 group-hover:text-orange-300 transition">4. Batería LiPo 5000mAh (105568)</span>
+                            <span class="w-3 h-3 rounded-full bg-cyan-400 shadow-sm shadow-cyan-400/50"></span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Polímero de litio recargable (3.7V / 4.2V, 10×55×68 mm) de alta autonomía.</p>
+                    </div>
+
+                    <div id="card-tft18" onclick="selectComponent('tft18')" class="comp-card p-3 rounded-xl bg-slate-900/65 border border-slate-800 hover:border-orange-500/60 cursor-pointer group">
+                        <div class="flex justify-between items-center">
+                            <span class="font-bold text-sm text-slate-100 group-hover:text-orange-300 transition">5. Pantalla TFT LCD 1.8"</span>
+                            <span class="w-3 h-3 rounded-full bg-purple-500 shadow-sm shadow-purple-500/50"></span>
+                        </div>
+                        <p class="text-xs text-slate-400 mt-1">Módulo SPI a color (128×160 px) para estado del enlace, paquetes y batería.</p>
+                    </div>
+
+                </div>
+
+                <!-- Ficha Técnica Detallada del Componente Seleccionado -->
+                <div id="inspector-card" class="mt-4 p-4 rounded-xl bg-gradient-to-b from-orange-950/40 to-slate-900/95 border border-orange-500/40 shadow-inner">
+                    <div class="flex items-center justify-between">
+                        <span id="insp-badge" class="text-[10px] font-mono-tech uppercase px-2 py-0.5 rounded bg-orange-500/20 text-orange-300 border border-orange-500/30">RESUMEN DEL SISTEMA</span>
+                        <span id="insp-dims" class="text-[11px] font-mono-tech text-slate-400">Escala Real 1:1</span>
+                    </div>
+                    <h3 id="insp-title" class="text-sm font-bold text-orange-400 uppercase tracking-wide mt-2">Pasarela MineSafe Gateway</h3>
+                    <p id="insp-desc" class="text-xs text-slate-200 mt-1.5 leading-relaxed">
+                        El Gateway concentra los paquetes enviados por los nodos sensores vía <b>ESP-NOW</b> en galerías subterráneas y los sube por <b>Wi-Fi a Firebase RTDB</b>, además de sincronizar las órdenes de control del SuperAdmin.
+                    </p>
+                    <div id="insp-specs" class="mt-3 pt-2.5 border-t border-slate-800/90 text-[11px] text-slate-300 space-y-1 font-mono-tech">
+                        <div>• <b>MCU:</b> ESP32-C3 SuperMini (RISC-V 160MHz)</div>
+                        <div>• <b>Energía:</b> LiPo 105568 3.7V 5000mAh reales</div>
+                        <div>• <b>Expansión:</b> Shield 37.4mm × 22.5mm con JST</div>
+                        <div>• <b>Display:</b> ST7735 TFT 1.8" (128×160 px SPI)</div>
+                    </div>
+                </div>
+            </div>
+
+            <div class="mt-4 text-center text-[11px] text-slate-500 border-t border-slate-800/80 pt-3">
+                Proyecto de Título MineSafe • Ingeniería en Informática
+            </div>
+        </aside>
+    </div>
+
+    <!-- Script de Escena 3D e Interactividad -->
+    <script>
+        window.addEventListener('DOMContentLoaded', () => {
+            const container = document.getElementById('canvas-container');
+            const labelsContainer = document.getElementById('labels-container');
+
+            // 1. Inicializar Escena, Cámara y Renderizador
+            const scene = new THREE.Scene();
+            scene.background = new THREE.Color(0x0b0f19);
+
+            const width = container.clientWidth || 800;
+            const height = container.clientHeight || 600;
+
+            const camera = new THREE.PerspectiveCamera(42, width / height, 0.1, 1000);
+            const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: 'high-performance' });
+            renderer.setSize(width, height);
+            renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+            renderer.shadowMap.enabled = true;
+            renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+            container.appendChild(renderer.domElement);
+
+            // 2. Iluminación Clara de Alto Contraste
+            const ambientLight = new THREE.AmbientLight(0xffffff, 0.85);
+            scene.add(ambientLight);
+
+            const hemiLight = new THREE.HemisphereLight(0xe2e8f0, 0x1e293b, 0.65);
+            hemiLight.position.set(0, 25, 0);
+            scene.add(hemiLight);
+
+            const dirLight = new THREE.DirectionalLight(0xffffff, 1.35);
+            dirLight.position.set(14, 24, 18);
+            dirLight.castShadow = true;
+            dirLight.shadow.mapSize.width = 2048;
+            dirLight.shadow.mapSize.height = 2048;
+            scene.add(dirLight);
+
+            const rimLight1 = new THREE.PointLight(0xf97316, 1.4, 30);
+            rimLight1.position.set(-12, 8, -10);
+            scene.add(rimLight1);
+
+            const rimLight2 = new THREE.PointLight(0x38bdf8, 1.2, 30);
+            rimLight2.position.set(12, 6, 12);
+            scene.add(rimLight2);
+
+            // 3. Piso Técnico con Grilla Visible
+            const gridHelper = new THREE.GridHelper(36, 36, 0xf97316, 0x1e293b);
+            gridHelper.position.y = -3.2;
+            scene.add(gridHelper);
+
+            // =====================================================
+            // GENERADORES DE TEXTURAS EN CANVAS (SIN URLS EXTERNAS)
+            // =====================================================
+            function createTFTDashboardTexture() {
+                const c = document.createElement('canvas');
+                c.width = 256;
+                c.height = 320;
+                const ctx = c.getContext('2d');
+
+                // Fondo oscuro tipo ST7735 128x160
+                ctx.fillStyle = '#040914';
+                ctx.fillRect(0, 0, 256, 320);
+
+                // Barra superior naranja
+                ctx.fillStyle = '#ea580c';
+                ctx.fillRect(0, 0, 256, 40);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = 'bold 18px monospace';
+                ctx.fillText('MINESAFE GATEWAY', 16, 26);
+
+                // Estado de enlace ESP-NOW
+                ctx.fillStyle = '#0f172a';
+                ctx.strokeStyle = '#10b981';
+                ctx.lineWidth = 2;
+                ctx.fillRect(14, 52, 228, 58);
+                ctx.strokeRect(14, 52, 228, 58);
+
+                ctx.fillStyle = '#10b981';
+                ctx.font = 'bold 15px monospace';
+                ctx.fillText('● ESP-NOW: ACTIVO', 26, 76);
+                ctx.fillStyle = '#cbd5e1';
+                ctx.font = '13px monospace';
+                ctx.fillText('Nodo: 38A839E81F84', 26, 98);
+
+                // Telemetría retransmitida
+                ctx.fillStyle = '#0f172a';
+                ctx.strokeStyle = '#0284c7';
+                ctx.fillRect(14, 122, 228, 92);
+                ctx.strokeRect(14, 122, 228, 92);
+
+                ctx.fillStyle = '#38bdf8';
+                ctx.font = 'bold 14px monospace';
+                ctx.fillText('DATOS PUENTE -> CLOUD', 24, 144);
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = '14px monospace';
+                ctx.fillText('CO: 45 ppm  | PM: 25', 24, 168);
+                ctx.fillText('T: 21.5 C   | H: 48%', 24, 190);
+                ctx.fillStyle = '#4ade80';
+                ctx.fillText('Firebase RTDB: OK', 24, 208);
+
+                // Estado de Batería LiPo 105568
+                ctx.fillStyle = '#0f172a';
+                ctx.strokeStyle = '#f59e0b';
+                ctx.fillRect(14, 226, 228, 76);
+                ctx.strokeRect(14, 226, 228, 76);
+
+                ctx.fillStyle = '#fbbf24';
+                ctx.font = 'bold 14px monospace';
+                ctx.fillText('BATERIA LIPO 105568', 24, 248);
+                ctx.fillStyle = '#ffffff';
+                ctx.font = '14px monospace';
+                ctx.fillText('Cap: 5000mAh (98%)', 24, 270);
+                ctx.fillStyle = '#34d399';
+                ctx.fillText('Voltaje: 4.18V / 3.7V', 24, 292);
+
+                const tex = new THREE.CanvasTexture(c);
+                tex.needsUpdate = true;
+                return tex;
+            }
+
+            function createBatteryLabelTexture() {
+                const c = document.createElement('canvas');
+                c.width = 512;
+                c.height = 256;
+                const ctx = c.getContext('2d');
+
+                ctx.fillStyle = '#cbd5e1';
+                ctx.fillRect(0, 0, 512, 256);
+
+                // Borde técnico
+                ctx.strokeStyle = '#475569';
+                ctx.lineWidth = 8;
+                ctx.strokeRect(12, 12, 488, 232);
+
+                ctx.fillStyle = '#0f172a';
+                ctx.font = 'bold 34px sans-serif';
+                ctx.fillText('Li-Polymer Battery', 36, 65);
+
+                ctx.fillStyle = '#ea580c';
+                ctx.font = 'bold 30px monospace';
+                ctx.fillText('MODELO: 105568', 36, 110);
+
+                ctx.fillStyle = '#1e293b';
+                ctx.font = 'bold 26px monospace';
+                ctx.fillText('Capacidad: 5000mAh (Reales)', 36, 152);
+                ctx.fillText('Nominal: 3.7V | Carga: 4.2V', 36, 190);
+                ctx.fillStyle = '#334155';
+                ctx.font = '22px monospace';
+                ctx.fillText('Dim: 10mm × 55mm × 68mm | -20°~50°C', 36, 226);
+
+                return new THREE.CanvasTexture(c);
+            }
+
+            function createShieldSilkscreenTexture() {
+                const c = document.createElement('canvas');
+                c.width = 256;
+                c.height = 384;
+                const ctx = c.getContext('2d');
+
+                ctx.fillStyle = '#111827';
+                ctx.fillRect(0, 0, 256, 384);
+
+                ctx.strokeStyle = '#374151';
+                ctx.lineWidth = 4;
+                ctx.strokeRect(6, 6, 244, 372);
+
+                ctx.fillStyle = '#f8fafc';
+                ctx.font = 'bold 18px monospace';
+                ctx.fillText('ESP32-C3 SHIELD', 48, 340);
+                ctx.font = '15px monospace';
+                ctx.fillStyle = '#fbbf24';
+                ctx.fillText('37.4mm x 22.5mm', 58, 362);
+
+                ctx.fillStyle = '#94a3b8';
+                ctx.font = 'bold 14px monospace';
+                ctx.fillText('BAT+  BAT-', 88, 105);
+                ctx.fillText('GND VCC1 VCC2 3V3 5V', 44, 310);
+
+                return new THREE.CanvasTexture(c);
+            }
+
+            // =====================================================
+            // CONSTRUCCIÓN DE LOS 5 COMPONENTES DEL GATEWAY (1mm = 0.1u)
+            // =====================================================
+            const gatewayRoot = new THREE.Group();
+            scene.add(gatewayRoot);
+
+            // Materiales Principales
+            const caseOrangeMat = new THREE.MeshStandardMaterial({
+                color: 0xf97316,
+                roughness: 0.38,
+                metalness: 0.1
+            });
+            const caseDarkTrimMat = new THREE.MeshStandardMaterial({
+                color: 0xc2410c,
+                roughness: 0.45,
+                metalness: 0.15
+            });
+            const caseTransparentMat = new THREE.MeshPhysicalMaterial({
+                color: 0xf97316,
+                roughness: 0.2,
+                metalness: 0.05,
+                transparent: true,
+                opacity: 0.24,
+                side: THREE.DoubleSide
+            });
+
+            const darkPcbMat = new THREE.MeshStandardMaterial({ color: 0x111827, roughness: 0.4, metalness: 0.2 });
+            const redPcbMat = new THREE.MeshStandardMaterial({ color: 0x991b1b, roughness: 0.4, metalness: 0.2 });
+            const metalMat = new THREE.MeshStandardMaterial({ color: 0xe2e8f0, roughness: 0.2, metalness: 0.88 });
+            const goldPinMat = new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.25, metalness: 0.85 });
+
+            // ---------------------------------------------------------
+            // 1. CARCASA IMPRESA EN 3D (Base + Tapa Superior con Ventana)
+            // Dimensiones externas aprox: 66mm ancho x 28mm alto x 80mm largo (6.6 x 2.8 x 8.0 u)
+            // ---------------------------------------------------------
+            const enclosureBaseGroup = new THREE.Group();
+            enclosureBaseGroup.userData = { componentId: 'enclosure' };
+            gatewayRoot.add(enclosureBaseGroup);
+
+            const caseMeshes = [];
+            function addCasePart(geo, x, y, z, parentGroup, mat = caseOrangeMat) {
+                const m = new THREE.Mesh(geo, mat);
+                m.position.set(x, y, z);
+                m.castShadow = true;
+                m.receiveShadow = true;
+                m.userData = { componentId: 'enclosure' };
+                parentGroup.add(m);
+                caseMeshes.push(m);
+                return m;
+            }
+
+            // Piso de la caja
+            addCasePart(new THREE.BoxGeometry(6.6, 0.25, 8.2), 0, -1.25, 0, enclosureBaseGroup);
+            // Pared Izquierda y Derecha
+            addCasePart(new THREE.BoxGeometry(0.28, 2.2, 8.2), -3.16, -0.25, 0, enclosureBaseGroup);
+            addCasePart(new THREE.BoxGeometry(0.28, 2.2, 8.2),  3.16, -0.25, 0, enclosureBaseGroup);
+            // Pared Trasera y Delantera (con calado para USB-C)
+            addCasePart(new THREE.BoxGeometry(6.04, 2.2, 0.28), 0, -0.25, -3.96, enclosureBaseGroup);
+            addCasePart(new THREE.BoxGeometry(6.04, 2.2, 0.28), 0, -0.25,  3.96, enclosureBaseGroup);
+
+            // Pilares esquineros con tornillos Allen M3
+            const cornerPositions = [
+                [-2.85, -0.25, -3.65], [2.85, -0.25, -3.65],
+                [-2.85, -0.25,  3.65], [2.85, -0.25,  3.65]
+            ];
+            cornerPositions.forEach(([cx, cy, cz]) => {
+                addCasePart(new THREE.CylinderGeometry(0.28, 0.28, 2.15, 16), cx, cy, cz, enclosureBaseGroup, caseDarkTrimMat);
+            });
+
+            // Tapa Superior Articulada (con ventana rectangular para la pantalla TFT 1.8")
+            const lidPivotGroup = new THREE.Group();
+            lidPivotGroup.position.set(-3.3, 0.85, 0); // Bisagra en el borde izquierdo superior
+            lidPivotGroup.userData = { componentId: 'enclosure' };
+            gatewayRoot.add(lidPivotGroup);
+
+            // Construimos la tapa alrededor de la ventana de la pantalla (x local de 0 a 6.6, centro en +3.3)
+            // Margen izquierdo y derecho de la tapa
+            addCasePart(new THREE.BoxGeometry(1.4, 0.26, 8.2), 0.7, 0, 0, lidPivotGroup);
+            addCasePart(new THREE.BoxGeometry(1.4, 0.26, 8.2), 5.9, 0, 0, lidPivotGroup);
+            // Travesaño superior e inferior de la ventana
+            addCasePart(new THREE.BoxGeometry(3.8, 0.26, 1.8), 3.3, 0, -3.2, lidPivotGroup);
+            addCasePart(new THREE.BoxGeometry(3.8, 0.26, 1.8), 3.3, 0,  3.2, lidPivotGroup);
+
+            // Bisel impreso en 3D que enmarca la ventana TFT
+            addCasePart(new THREE.BoxGeometry(4.0, 0.12, 0.2), 3.3, 0.16, -2.2, lidPivotGroup, caseDarkTrimMat);
+            addCasePart(new THREE.BoxGeometry(4.0, 0.12, 0.2), 3.3, 0.16,  2.2, lidPivotGroup, caseDarkTrimMat);
+            addCasePart(new THREE.BoxGeometry(0.2, 0.12, 4.6), 1.4, 0.16,  0.0, lidPivotGroup, caseDarkTrimMat);
+            addCasePart(new THREE.BoxGeometry(0.2, 0.12, 4.6), 5.2, 0.16,  0.0, lidPivotGroup, caseDarkTrimMat);
+
+            // Tornillos negros M3 en las 4 esquinas de la tapa
+            const screwMat = new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.8, roughness: 0.25 });
+            [
+                [0.45, 0.18, -3.65], [6.15, 0.18, -3.65],
+                [0.45, 0.18,  3.65], [6.15, 0.18,  3.65]
+            ].forEach(([sx, sy, sz]) => {
+                const screw = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.15, 16), screwMat);
+                screw.position.set(sx, sy, sz);
+                screw.userData = { componentId: 'enclosure' };
+                lidPivotGroup.add(screw);
+            });
+
+            // ---------------------------------------------------------
+            // 4. BATERÍA LIPO 5000mAh (MODELO 105568: 10mm x 55mm x 68mm)
+            // Escala 3D: 5.5 ancho x 1.0 alto x 6.8 largo
+            // ---------------------------------------------------------
+            const batteryGroup = new THREE.Group();
+            batteryGroup.position.set(0, -0.62, 0);
+            batteryGroup.userData = { componentId: 'battery' };
+            gatewayRoot.add(batteryGroup);
+
+            const batLabelTex = createBatteryLabelTexture();
+            const batMaterials = [
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 }),
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 }),
+                new THREE.MeshStandardMaterial({ map: batLabelTex, roughness: 0.35, metalness: 0.2 }), // Cara superior con etiqueta
+                new THREE.MeshStandardMaterial({ color: 0x64748b, metalness: 0.7, roughness: 0.3 }),
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 }),
+                new THREE.MeshStandardMaterial({ color: 0x94a3b8, metalness: 0.7, roughness: 0.3 })
+            ];
+            const batBody = new THREE.Mesh(new THREE.BoxGeometry(5.3, 0.95, 6.6), batMaterials);
+            batBody.castShadow = true;
+            batBody.receiveShadow = true;
+            batBody.userData = { componentId: 'battery' };
+            batteryGroup.add(batBody);
+
+            // Cinta Kapton amarilla de protección en el cabezal de la batería LiPo
+            const kaptonMat = new THREE.MeshStandardMaterial({ color: 0xd97706, transparent: true, opacity: 0.85, roughness: 0.3 });
+            const kaptonMesh = new THREE.Mesh(new THREE.BoxGeometry(5.34, 0.98, 0.8), kaptonMat);
+            kaptonMesh.position.set(0, 0, -2.9);
+            kaptonMesh.userData = { componentId: 'battery' };
+            batteryGroup.add(kaptonMesh);
+
+            // Cables rojo y negro desde la batería LiPo hacia el conector JST del Shield
+            const wireRedCurve = new THREE.CatmullRomCurve3([
+                new THREE.Vector3(-0.3, 0.3, -3.2),
+                new THREE.Vector3(-0.4, 0.7, -3.4),
+                new THREE.Vector3(-0.2, 0.95, -2.0)
+            ]);
+            const wireRed = new THREE.Mesh(
+                new THREE.TubeGeometry(wireRedCurve, 20, 0.06, 8, false),
+                new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.4 })
+            );
+            wireRed.userData = { componentId: 'battery' };
+            batteryGroup.add(wireRed);
+
+            const wireBlkCurve = new THREE.CatmullRomCurve3([
+                new THREE.Vector3(0.3, 0.3, -3.2),
+                new THREE.Vector3(0.4, 0.7, -3.4),
+                new THREE.Vector3(0.2, 0.95, -2.0)
+            ]);
+            const wireBlk = new THREE.Mesh(
+                new THREE.TubeGeometry(wireBlkCurve, 20, 0.06, 8, false),
+                new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.4 })
+            );
+            wireBlk.userData = { componentId: 'battery' };
+            batteryGroup.add(wireBlk);
+
+            // ---------------------------------------------------------
+            // 3. PLACA DE EXPANSIÓN DE PINES (SHIELD: 22.5mm x 37.4mm)
+            // Con regletas verdes hembra, conector blanco JST BAT y pines de colores
+            // ---------------------------------------------------------
+            const shieldGroup = new THREE.Group();
+            shieldGroup.position.set(0, 0.12, -0.3);
+            shieldGroup.userData = { componentId: 'shield' };
+            gatewayRoot.add(shieldGroup);
+
+            const shieldTex = createShieldSilkscreenTexture();
+            const shieldPcb = new THREE.Mesh(
+                new THREE.BoxGeometry(2.6, 0.16, 3.8),
+                new THREE.MeshStandardMaterial({ map: shieldTex, roughness: 0.45 })
+            );
+            shieldPcb.castShadow = true;
+            shieldPcb.userData = { componentId: 'shield' };
+            shieldGroup.add(shieldPcb);
+
+            // Conector Blanco JST de Batería (BAT) en la parte superior central
+            const jstMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.3 });
+            const jstBody = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.38, 0.65), jstMat);
+            jstBody.position.set(0, 0.25, -1.35);
+            jstBody.userData = { componentId: 'shield' };
+            shieldGroup.add(jstBody);
+
+            // 2 Bloques Verdes de Headers Hembra (donde encaja el ESP32-C3 SuperMini)
+            const greenHeaderMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.35 });
+            [-0.62, 0.62].forEach((hx) => {
+                const greenBlock = new THREE.Mesh(new THREE.BoxGeometry(0.24, 0.42, 2.3), greenHeaderMat);
+                greenBlock.position.set(hx, 0.28, -0.1);
+                greenBlock.userData = { componentId: 'shield' };
+                shieldGroup.add(greenBlock);
+            });
+
+            // Regletas de Pines Macho de Colores a los lados (Amarillo, Rojo, Negro, Azul como en tu foto)
+            const colorRowMats = {
+                yellow: new THREE.MeshStandardMaterial({ color: 0xfacc15, roughness: 0.3 }),
+                red:    new THREE.MeshStandardMaterial({ color: 0xef4444, roughness: 0.3 }),
+                black:  new THREE.MeshStandardMaterial({ color: 0x171717, roughness: 0.4 }),
+                blue:   new THREE.MeshStandardMaterial({ color: 0x2563eb, roughness: 0.3 })
+            };
+
+            // Lado Izquierdo: 3 columnas (Amarillo, Rojo, Negro) x 8 pines
+            const leftCols = [
+                { x: -1.16, mat: colorRowMats.yellow },
+                { x: -0.98, mat: colorRowMats.red },
+                { x: -0.80, mat: colorRowMats.black }
+            ];
+            leftCols.forEach(col => {
+                const baseStrip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.14, 2.2), col.mat);
+                baseStrip.position.set(col.x, 0.15, -0.1);
+                baseStrip.userData = { componentId: 'shield' };
+                shieldGroup.add(baseStrip);
+
+                for (let i = 0; i < 8; i++) {
+                    const pin = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 0.04), goldPinMat);
+                    pin.position.set(col.x, 0.32, -1.05 + i * 0.27);
+                    pin.userData = { componentId: 'shield' };
+                    shieldGroup.add(pin);
+                }
+            });
+
+            // Lado Derecho: Pines de señal y rieles de energía (Azul, Negro, Rojo, Amarillo)
+            const rightCols = [
+                { x: 0.80, mat: colorRowMats.black },
+                { x: 0.98, mat: colorRowMats.red },
+                { x: 1.16, mat: colorRowMats.yellow }
+            ];
+            rightCols.forEach(col => {
+                const baseStrip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.14, 1.5), col.mat);
+                baseStrip.position.set(col.x, 0.15, 0.25);
+                baseStrip.userData = { componentId: 'shield' };
+                shieldGroup.add(baseStrip);
+
+                const blueStrip = new THREE.Mesh(new THREE.BoxGeometry(0.16, 0.14, 0.65), colorRowMats.blue);
+                blueStrip.position.set(col.x, 0.15, -0.85);
+                blueStrip.userData = { componentId: 'shield' };
+                shieldGroup.add(blueStrip);
+
+                for (let i = 0; i < 8; i++) {
+                    const pin = new THREE.Mesh(new THREE.BoxGeometry(0.04, 0.32, 0.04), goldPinMat);
+                    pin.position.set(col.x, 0.32, -1.05 + i * 0.27);
+                    pin.userData = { componentId: 'shield' };
+                    shieldGroup.add(pin);
+                }
+            });
+
+            // ---------------------------------------------------------
+            // 2. ESP32-C3 SUPERMINI (Montado sobre las regletas verdes del Shield)
+            // Dimensiones reales: 22.5mm x 18mm
+            // ---------------------------------------------------------
+            const espGroup = new THREE.Group();
+            espGroup.position.set(0, 0.58, -0.4);
+            espGroup.userData = { componentId: 'esp32c3' };
+            gatewayRoot.add(espGroup);
+
+            // PCB negro del ESP32-C3 SuperMini
+            const espPcb = new THREE.Mesh(new THREE.BoxGeometry(1.5, 0.14, 2.35), darkPcbMat);
+            espPcb.castShadow = true;
+            espPcb.userData = { componentId: 'esp32c3' };
+            espGroup.add(espPcb);
+
+            // Chip SoC ESP32-C3 central
+            const socMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.65, 0.1, 0.65),
+                new THREE.MeshStandardMaterial({ color: 0x1e293b, metalness: 0.5, roughness: 0.25 })
+            );
+            socMesh.position.set(0, 0.11, 0.05);
+            socMesh.userData = { componentId: 'esp32c3' };
+            espGroup.add(socMesh);
+
+            // Conector USB-C metálico en el extremo
+            const usbcMesh = new THREE.Mesh(new THREE.BoxGeometry(0.75, 0.26, 0.6), metalMat);
+            usbcMesh.position.set(0, 0.16, 0.98);
+            usbcMesh.userData = { componentId: 'esp32c3' };
+            espGroup.add(usbcMesh);
+
+            // Micro-botones BOOT y RST a los lados del USB-C
+            const btnBoot = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.1, 0.16), metalMat);
+            btnBoot.position.set(-0.5, 0.11, 0.55);
+            btnBoot.userData = { componentId: 'esp32c3' };
+            espGroup.add(btnBoot);
+
+            const btnRst = new THREE.Mesh(new THREE.BoxGeometry(0.22, 0.1, 0.16), metalMat);
+            btnRst.position.set(0.5, 0.11, 0.55);
+            btnRst.userData = { componentId: 'esp32c3' };
+            espGroup.add(btnRst);
+
+            // Antena Cerámica 2.4GHz SMD (Roja/Blanca característica del C3 SuperMini)
+            const antMesh = new THREE.Mesh(
+                new THREE.BoxGeometry(0.45, 0.12, 0.22),
+                new THREE.MeshStandardMaterial({ color: 0xdc2626, roughness: 0.3 })
+            );
+            antMesh.position.set(0, 0.12, -0.92);
+            antMesh.userData = { componentId: 'esp32c3' };
+            espGroup.add(antMesh);
+
+            // LED Azul de estado encendido
+            const ledMesh = new THREE.Mesh(
+                new THREE.SphereGeometry(0.06, 12, 12),
+                new THREE.MeshBasicMaterial({ color: 0x38bdf8 })
+            );
+            ledMesh.position.set(0.35, 0.12, -0.45);
+            espGroup.add(ledMesh);
+
+            // ---------------------------------------------------------
+            // 5. PANTALLA LCD TFT 1.8" (128x160 px, controlador ST7735)
+            // Alojada bajo la ventana de la tapa para visualización directa
+            // ---------------------------------------------------------
+            const tftGroup = new THREE.Group();
+            tftGroup.position.set(0, 0.92, 0.1);
+            tftGroup.userData = { componentId: 'tft18' };
+            gatewayRoot.add(tftGroup);
+
+            // PCB rojo del módulo TFT 1.8"
+            const tftPcb = new THREE.Mesh(new THREE.BoxGeometry(3.5, 0.12, 4.6), redPcbMat);
+            tftPcb.castShadow = true;
+            tftPcb.userData = { componentId: 'tft18' };
+            tftGroup.add(tftPcb);
+
+            // Marco negro del LCD 1.8"
+            const tftFrame = new THREE.Mesh(
+                new THREE.BoxGeometry(3.2, 0.1, 4.0),
+                new THREE.MeshStandardMaterial({ color: 0x090d16, roughness: 0.2 })
+            );
+            tftFrame.position.set(0, 0.1, 0);
+            tftFrame.userData = { componentId: 'tft18' };
+            tftGroup.add(tftFrame);
+
+            // Superficie luminosa activa con el Dashboard de Gateway
+            const tftScreenTex = createTFTDashboardTexture();
+            const tftScreen = new THREE.Mesh(
+                new THREE.PlaneGeometry(2.9, 3.65),
+                new THREE.MeshBasicMaterial({ map: tftScreenTex })
+            );
+            tftScreen.rotation.x = -Math.PI / 2;
+            tftScreen.position.set(0, 0.16, 0);
+            tftScreen.userData = { componentId: 'tft18' };
+            tftGroup.add(tftScreen);
+
+            // Pines SPI de conexión en el borde de la pantalla (VCC, GND, SCL, SDA, RES, DC, CS)
+            for (let i = 0; i < 8; i++) {
+                const spiPin = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.25, 8), goldPinMat);
+                spiPin.position.set(-1.05 + i * 0.3, -0.12, 2.1);
+                spiPin.userData = { componentId: 'tft18' };
+                tftGroup.add(spiPin);
+            }
+
+            // =====================================================
+            // ETIQUETAS FLOTANTES 3D EN TIEMPO REAL
+            // =====================================================
+            const calloutDefinitions = [
+                { id: 'enclosure', text: 'Carcasa 3D Naranja', color: '#f97316', targetGroup: lidPivotGroup, localOffset: new THREE.Vector3(3.3, 0.45, -2.6) },
+                { id: 'tft18',     text: 'TFT LCD 1.8" (128×160)', color: '#a855f7', targetGroup: tftGroup, localOffset: new THREE.Vector3(1.4, 0.3, 0.5) },
+                { id: 'esp32c3',   text: 'ESP32-C3 SuperMini', color: '#10b981', targetGroup: espGroup, localOffset: new THREE.Vector3(0, 0.35, 0.2) },
+                { id: 'shield',    text: 'Placa Expansión (37.4×22.5mm)', color: '#3b82f6', targetGroup: shieldGroup, localOffset: new THREE.Vector3(-1.3, 0.25, 0.4) },
+                { id: 'battery',   text: 'LiPo 5000mAh (105568)', color: '#06b6d4', targetGroup: batteryGroup, localOffset: new THREE.Vector3(1.8, 0.1, 1.5) }
+            ];
+
+            let showLabels = true;
+            const labelElements = {};
+
+            calloutDefinitions.forEach(def => {
+                const el = document.createElement('div');
+                el.className = 'label-3d px-2.5 py-1 rounded-full bg-slate-900/90 border border-slate-700 text-[11px] font-semibold text-slate-100 shadow-lg flex items-center gap-1.5';
+                el.innerHTML = `<span class="w-2 h-2 rounded-full" style="background:${def.color}"></span><span>${def.text}</span>`;
+                el.addEventListener('click', (e) => {
+                    e.stopPropagation();
+                    window.selectComponent(def.id);
+                });
+                labelsContainer.appendChild(el);
+                labelElements[def.id] = el;
+            });
+
+            function updateFloatingLabels() {
+                const cw = container.clientWidth;
+                const ch = container.clientHeight;
+                const tempVec = new THREE.Vector3();
+
+                calloutDefinitions.forEach(def => {
+                    const el = labelElements[def.id];
+                    if (!showLabels) {
+                        el.style.display = 'none';
+                        return;
+                    }
+                    tempVec.copy(def.localOffset);
+                    def.targetGroup.localToWorld(tempVec);
+                    tempVec.project(camera);
+
+                    if (tempVec.z > 1) {
+                        el.style.display = 'none';
+                    } else {
+                        const x = (tempVec.x * 0.5 + 0.5) * cw;
+                        const y = (-(tempVec.y * 0.5) + 0.5) * ch;
+                        el.style.display = 'flex';
+                        el.style.left = `${x}px`;
+                        el.style.top = `${y}px`;
+                    }
+                });
+            }
+
+            // =====================================================
+            // DATOS TÉCNICOS DE INSPECCIÓN DE LOS 5 COMPONENTES
+            // =====================================================
+            const componentSpecs = {
+                enclosure: {
+                    badge: 'CHASIS IMPRESO EN 3D',
+                    color: '#f97316',
+                    dims: '66mm × 82mm × 28mm',
+                    title: 'Carcasa Impresa en 3D (PETG / PLA Naranja)',
+                    desc: 'Gabinete protector diseñado a medida para el nodo Gateway de MineSafe. Dispone de base con cuna para la celda LiPo 105568, pilares para tornillos M3 y tapa articulada con marco visor para la pantalla TFT de 1.8".',
+                    specs: [
+                        '• Material: Filamento Naranja de Alta Visibilidad Minera',
+                        '• Tapa: Abatible con bisel protector para pantalla 1.8"',
+                        '• Puertos: Calado frontal para conector USB-C del C3',
+                        '• Fijación: 4 postes internos con tornillería Allen M3'
+                    ],
+                    camView: { theta: 0.55, phi: 0.95, radius: 15.0, target: new THREE.Vector3(-8.2, -0.5, -2.5) },
+                    assembledCam: { theta: 0.65, phi: 0.95, radius: 14.5, target: new THREE.Vector3(0, 0, 0) }
+                },
+                esp32c3: {
+                    badge: 'NÚCLEO DE COMUNICACIONES',
+                    color: '#10b981',
+                    dims: '22.5mm × 18.0mm',
+                    title: 'ESP32-C3 SuperMini (Wi-Fi + BLE + ESP-NOW)',
+                    desc: 'Microcontrolador de arquitectura RISC-V single-core a 160 MHz. Recibe los paquetes de telemetría enviados por los nodos sensores vía protocolo ESP-NOW (< 1s) y los sincroniza con Firebase RTDB mediante Wi-Fi.',
+                    specs: [
+                        '• Procesador: RISC-V 32-bit @ 160 MHz (4MB Flash)',
+                        '• Radio: Wi-Fi 802.11b/g/n + ESP-NOW bidireccional',
+                        '• Interfaz: Puerto USB-C integrado + Antena cerámica SMD',
+                        '• Rol MineSafe: Puente Nodo Sensor ↔ Cloud y órdenes Web'
+                    ],
+                    camView: { theta: 0.15, phi: 0.85, radius: 10.5, target: new THREE.Vector3(4.2, -0.5, 1.5) },
+                    assembledCam: { theta: 0.35, phi: 0.82, radius: 10.5, target: new THREE.Vector3(0, 1.0, 0) }
+                },
+                shield: {
+                    badge: 'DISTRIBUCIÓN Y ENERGÍA',
+                    color: '#3b82f6',
+                    dims: '37.4mm × 22.5mm',
+                    title: 'Placa de Expansión de Pines (Shield C3)',
+                    desc: 'Tarjeta base donde se inserta el ESP32-C3 SuperMini sobre dos regletas hembra verdes. Incorpora conector blanco JST para la batería LiPo, circuito de gestión de energía y filas de pines macho codificados por colores.',
+                    specs: [
+                        '• Dimensiones exactas: 37.4 mm × 22.5 mm',
+                        '• Conector Batería: Puerto JST blanco 2 pines (BAT+ / BAT-)',
+                        '• Regletas laterales: Amarillo (GPIO), Rojo (VCC), Negro (GND), Azul',
+                        '• Ventaja: Conexión limpia hacia la pantalla TFT sin soldaduras sueltas'
+                    ],
+                    camView: { theta: 0.0, phi: 0.85, radius: 11.0, target: new THREE.Vector3(0.2, -0.5, 1.5) },
+                    assembledCam: { theta: -0.55, phi: 0.88, radius: 11.0, target: new THREE.Vector3(0, 0.2, 0) }
+                },
+                battery: {
+                    badge: 'RESPALDO ENERGÉTICO',
+                    color: '#06b6d4',
+                    dims: '10mm × 55mm × 68mm',
+                    title: 'Batería de Polímero de Litio 5000mAh (Modelo 105568)',
+                    desc: 'Celda LiPo recargable de alta densidad energética que dota al Gateway de autonomía total frente a cortes eléctricos en galerías subterráneas, manteniendo activo el enlace ESP-NOW y Wi-Fi.',
+                    specs: [
+                        '• Modelo: 105568 (Polímero de Litio Recargable)',
+                        '• Capacidad real: 5000 mAh | Tensión nominal: 3.7 V',
+                        '• Voltaje de carga: 4.2 V | Temp. operación: -20°C a 50°C',
+                        '• Dimensiones físicas: 10 mm × 55 mm × 68 mm'
+                    ],
+                    camView: { theta: -0.2, phi: 0.88, radius: 12.5, target: new THREE.Vector3(-4.2, -0.5, 1.5) },
+                    assembledCam: { theta: 0.85, phi: 1.05, radius: 12.0, target: new THREE.Vector3(0, -1.4, 0) }
+                },
+                tft18: {
+                    badge: 'VISUALIZACIÓN LOCAL',
+                    color: '#a855f7',
+                    dims: '1.8 Pulgadas (128×160 px)',
+                    title: 'Pantalla LCD TFT a Todo Color de 1.8"',
+                    desc: 'Módulo gráfico SPI (controlador ST7735) con resolución de 128×160 píxeles. Muestra en terreno el estado del enlace ESP-NOW, los valores recibidos del nodo minero, la subida a Firebase y el nivel de la batería LiPo.',
+                    specs: [
+                        '• Tamaño y Resolución: 1.8" Diagonal • 128 × 160 píxeles RGB',
+                        '• Interfaz: Bus SPI (pines VCC, GND, SCL, SDA, RES, DC, CS)',
+                        '• Alimentación: 3.3V directos desde la placa de expansión',
+                        '• Función: Diagnóstico inmediato en terreno sin usar PC'
+                    ],
+                    camView: { theta: 0.25, phi: 0.85, radius: 11.5, target: new THREE.Vector3(8.2, -0.5, 1.5) },
+                    assembledCam: { theta: 0.15, phi: 0.65, radius: 11.2, target: new THREE.Vector3(0, 2.1, 0) }
+                }
+            };
+
+            // Pedestales luminosos de exhibición en la mesa técnica (visibles al extraer y ordenar)
+            const showcasePadsGroup = new THREE.Group();
+            scene.add(showcasePadsGroup);
+
+            const showcaseLayout = [
+                { id: 'enclosure', x: -8.5, z: -2.0, w: 7.4, d: 9.0, color: 0xf97316 },
+                { id: 'battery',   x: -3.2, z:  1.2, w: 6.0, d: 7.4, color: 0x06b6d4 },
+                { id: 'shield',    x:  1.8, z:  1.2, w: 3.6, d: 4.8, color: 0x3b82f6 },
+                { id: 'esp32c3',   x:  5.4, z:  1.2, w: 2.6, d: 3.6, color: 0x10b981 },
+                { id: 'tft18',     x:  9.2, z:  1.2, w: 4.4, d: 5.6, color: 0xa855f7 }
+            ];
+
+            const padMeshes = [];
+            showcaseLayout.forEach(item => {
+                const padGeo = new THREE.PlaneGeometry(item.w, item.d);
+                const padMat = new THREE.MeshBasicMaterial({
+                    color: item.color,
+                    transparent: true,
+                    opacity: 0.0,
+                    side: THREE.DoubleSide
+                });
+                const pad = new THREE.Mesh(padGeo, padMat);
+                pad.rotation.x = -Math.PI / 2;
+                pad.position.set(item.x, -3.15, item.z);
+                showcasePadsGroup.add(pad);
+
+                const borderEdges = new THREE.EdgesGeometry(padGeo);
+                const borderMat = new THREE.LineBasicMaterial({ color: item.color, transparent: true, opacity: 0.0 });
+                const borderLine = new THREE.LineSegments(borderEdges, borderMat);
+                pad.add(borderLine);
+
+                padMeshes.push({ padMat, borderMat });
+            });
+
+            // =====================================================
+            // SISTEMA DE ARRASTRE LIBRE DE COMPONENTES (DRAG & DROP 3D)
+            // Y CONTROLADOR DE ÓRBITA DE CÁMARA
+            // =====================================================
+            let camState = {
+                theta: 0.68,
+                phi: 0.98,
+                radius: 15.0,
+                target: new THREE.Vector3(0, 0.2, 0)
+            };
+            let desiredCam = {
+                theta: 0.68,
+                phi: 0.98,
+                radius: 15.0,
+                target: new THREE.Vector3(0, 0.2, 0)
+            };
+
+            // Offsets personalizados cuando el usuario arrastra cualquier pieza con el mouse
+            const userOffsets = {
+                enclosureBase: new THREE.Vector3(0, 0, 0),
+                lid:           new THREE.Vector3(0, 0, 0),
+                battery:       new THREE.Vector3(0, 0, 0),
+                shield:        new THREE.Vector3(0, 0, 0),
+                esp32c3:       new THREE.Vector3(0, 0, 0),
+                tft18:         new THREE.Vector3(0, 0, 0)
+            };
+
+            // Mapa de grupos arrastrables de manera independiente (incluso tapa y base por separado)
+            const draggableParts = {
+                enclosureBase: { group: enclosureBaseGroup, compId: 'enclosure', name: 'Base Carcasa 3D' },
+                lid:           { group: lidPivotGroup,      compId: 'enclosure', name: 'Tapa Articulada 3D' },
+                battery:       { group: batteryGroup,       compId: 'battery',   name: 'Batería LiPo 5000mAh' },
+                shield:        { group: shieldGroup,        compId: 'shield',    name: 'Shield Expansión Pines' },
+                esp32c3:       { group: espGroup,           compId: 'esp32c3',   name: 'ESP32-C3 SuperMini' },
+                tft18:         { group: tftGroup,           compId: 'tft18',     name: 'Pantalla TFT 1.8"' }
+            };
+
+            // Etiquetar cada sub-grupo para identificar si se agarró la tapa o la base
+            enclosureBaseGroup.traverse(o => { o.userData.dragKey = 'enclosureBase'; });
+            lidPivotGroup.traverse(o => { o.userData.dragKey = 'lid'; });
+            batteryGroup.traverse(o => { o.userData.dragKey = 'battery'; });
+            shieldGroup.traverse(o => { o.userData.dragKey = 'shield'; });
+            espGroup.traverse(o => { o.userData.dragKey = 'esp32c3'; });
+            tftGroup.traverse(o => { o.userData.dragKey = 'tft18'; });
+
+            // Caja luminosa de selección cuando se arrastra una pieza
+            const selectionBoxHelper = new THREE.BoxHelper(espGroup, 0xfbbf24);
+            selectionBoxHelper.material.transparent = true;
+            selectionBoxHelper.material.opacity = 0.85;
+            selectionBoxHelper.visible = false;
+            scene.add(selectionBoxHelper);
+
+            let dragModeVertical = false; // false = Plano Horizontal XZ, true = Altura Vertical Y
+            let isDraggingPiece = false;
+            let draggedKey = null;
+            const dragPlane = new THREE.Plane();
+            const dragIntersectPoint = new THREE.Vector3();
+            const dragStartWorldPos = new THREE.Vector3();
+            const dragStartOffset = new THREE.Vector3();
+
+            const dragHud = document.getElementById('drag-hud');
+            const dragHudName = document.getElementById('drag-hud-name');
+            const dragHudCoords = document.getElementById('drag-hud-coords');
+            const btnDragAxis = document.getElementById('btnDragAxis');
+            const txtDragAxis = document.getElementById('txtDragAxis');
+
+            btnDragAxis.addEventListener('click', () => {
+                dragModeVertical = !dragModeVertical;
+                txtDragAxis.innerText = dragModeVertical ? 'Arrastre: Altura Y' : 'Arrastre: Plano XZ';
+                btnDragAxis.classList.toggle('bg-amber-950/80', dragModeVertical);
+                btnDragAxis.classList.toggle('text-amber-300', dragModeVertical);
+                btnDragAxis.classList.toggle('border-amber-500/60', dragModeVertical);
+            });
+
+            let isPointerDown = false;
+            let pointerButton = 0;
+            let startPointer = { x: 0, y: 0 };
+            let prevPointer = { x: 0, y: 0 };
+
+            const raycaster = new THREE.Raycaster();
+            const mouse = new THREE.Vector2();
+
+            function getRayIntersection(clientX, clientY) {
+                const rect = renderer.domElement.getBoundingClientRect();
+                mouse.x = ((clientX - rect.left) / rect.width) * 2 - 1;
+                mouse.y = -((clientY - rect.top) / rect.height) * 2 + 1;
+                raycaster.setFromCamera(mouse, camera);
+                return raycaster.intersectObjects(gatewayRoot.children, true);
+            }
+
+            function setupDragPlane(worldPos, useVerticalPlane) {
+                if (useVerticalPlane) {
+                    // Plano vertical mirando hacia la cámara para subir/bajar en eje Y
+                    const camDir = new THREE.Vector3();
+                    camera.getWorldDirection(camDir);
+                    camDir.y = 0;
+                    if (camDir.lengthSq() < 0.001) camDir.set(0, 0, 1);
+                    camDir.normalize();
+                    dragPlane.setFromNormalAndCoplanarPoint(camDir, worldPos);
+                } else {
+                    // Plano horizontal paralelo a la mesa (XZ)
+                    dragPlane.setFromNormalAndCoplanarPoint(new THREE.Vector3(0, 1, 0), worldPos);
+                }
+            }
+
+            container.addEventListener('contextmenu', e => e.preventDefault());
+
+            container.addEventListener('mousedown', (e) => {
+                isPointerDown = true;
+                pointerButton = e.button;
+                startPointer.x = prevPointer.x = e.clientX;
+                startPointer.y = prevPointer.y = e.clientY;
+                hideHoverTooltip();
+
+                // Si hace clic izquierdo sobre un componente 3D, iniciamos el arrastre de esa pieza
+                if (e.button === 0 && e.target === renderer.domElement) {
+                    const hits = getRayIntersection(e.clientX, e.clientY);
+                    if (hits.length > 0) {
+                        let obj = hits[0].object;
+                        while (obj && !obj.userData?.dragKey && obj.parent) {
+                            obj = obj.parent;
+                        }
+                        const dKey = obj?.userData?.dragKey;
+                        if (dKey && draggableParts[dKey]) {
+                            isDraggingPiece = true;
+                            draggedKey = dKey;
+                            const partInfo = draggableParts[dKey];
+
+                            const useVertical = e.shiftKey || dragModeVertical;
+                            setupDragPlane(hits[0].point, useVertical);
+
+                            if (raycaster.ray.intersectPlane(dragPlane, dragIntersectPoint)) {
+                                dragStartWorldPos.copy(dragIntersectPoint);
+                            } else {
+                                dragStartWorldPos.copy(hits[0].point);
+                            }
+                            dragStartOffset.copy(userOffsets[dKey]);
+
+                            // Mostrar caja envolvente luminosa alrededor del componente agarrado
+                            selectionBoxHelper.setFromObject(partInfo.group);
+                            selectionBoxHelper.visible = true;
+
+                            dragHudName.innerText = partInfo.name;
+                            dragHud.classList.remove('hidden');
+                            dragHud.style.left = `${e.clientX}px`;
+                            dragHud.style.top = `${e.clientY}px`;
+                            container.style.cursor = 'grabbing';
+                        }
+                    }
+                }
+            });
+
+            window.addEventListener('mousemove', (e) => {
+                // Caso 1: Arrastrando un componente 3D con el mouse
+                if (isDraggingPiece && draggedKey) {
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    mouse.x = ((e.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((e.clientY - rect.top) / rect.height) * 2 + 1;
+                    raycaster.setFromCamera(mouse, camera);
+
+                    const useVertical = e.shiftKey || dragModeVertical;
+                    // Actualizar orientación del plano si el usuario presionó/soltó Shift en pleno vuelo
+                    if (e.shiftKey !== undefined) {
+                        const currentGroup = draggableParts[draggedKey].group;
+                        setupDragPlane(currentGroup.position, useVertical);
+                    }
+
+                    if (raycaster.ray.intersectPlane(dragPlane, dragIntersectPoint)) {
+                        const delta = new THREE.Vector3().subVectors(dragIntersectPoint, dragStartWorldPos);
+                        if (useVertical) {
+                            userOffsets[draggedKey].y = Math.max(-4.5, Math.min(9.0, dragStartOffset.y + delta.y));
+                        } else {
+                            userOffsets[draggedKey].x = Math.max(-16.0, Math.min(16.0, dragStartOffset.x + delta.x));
+                            userOffsets[draggedKey].z = Math.max(-14.0, Math.min(14.0, dragStartOffset.z + delta.z));
+                        }
+                        // Actualizar inicio para transición fluida entre Shift y Plano XZ
+                        dragStartWorldPos.copy(dragIntersectPoint);
+                        dragStartOffset.copy(userOffsets[draggedKey]);
+
+                        const off = userOffsets[draggedKey];
+                        dragHudCoords.innerText = `Δ(${off.x.toFixed(1)}, ${off.y.toFixed(1)}, ${off.z.toFixed(1)})`;
+                        dragHud.style.left = `${e.clientX}px`;
+                        dragHud.style.top = `${e.clientY}px`;
+                    }
+                    return;
+                }
+
+                // Caso 2: Sin clic presionado -> Mostrar Tooltip de Hover
+                if (!isPointerDown) {
+                    handlePointerHover(e);
+                    return;
+                }
+
+                // Caso 3: Arrastrando el fondo -> Orbitar o Panear la cámara
+                const dx = e.clientX - prevPointer.x;
+                const dy = e.clientY - prevPointer.y;
+                prevPointer.x = e.clientX;
+                prevPointer.y = e.clientY;
+
+                if (pointerButton === 0) {
+                    desiredCam.theta -= dx * 0.008;
+                    desiredCam.phi = Math.max(0.18, Math.min(Math.PI / 2 - 0.04, desiredCam.phi - dy * 0.008));
+                } else if (pointerButton === 2) {
+                    desiredCam.target.x = Math.max(-12.0, Math.min(12.0, desiredCam.target.x - dx * 0.015));
+                    desiredCam.target.y = Math.max(-3.5, Math.min(5.0, desiredCam.target.y + dy * 0.015));
+                }
+            });
+
+            window.addEventListener('mouseup', (e) => {
+                if (!isPointerDown) return;
+                const movedDist = Math.hypot(e.clientX - startPointer.x, e.clientY - startPointer.y);
+
+                if (isDraggingPiece) {
+                    const clickedCompId = draggableParts[draggedKey]?.compId;
+                    isDraggingPiece = false;
+                    draggedKey = null;
+                    selectionBoxHelper.visible = false;
+                    dragHud.classList.add('hidden');
+                    container.style.cursor = 'pointer';
+
+                    // Si fue un clic rápido sin arrastrar, seleccionamos la pieza en el panel lateral
+                    if (movedDist < 5 && clickedCompId) {
+                        window.selectComponent(clickedCompId, false);
+                    }
+                    isPointerDown = false;
+                    return;
+                }
+
+                isPointerDown = false;
+                if (movedDist < 5 && e.target === renderer.domElement) {
+                    handleCanvasClick(e);
+                }
+            });
+
+            // Doble clic sobre cualquier pieza para devolverla automáticamente a su sitio
+            container.addEventListener('dblclick', (e) => {
+                const hits = getRayIntersection(e.clientX, e.clientY);
+                if (hits.length > 0) {
+                    let obj = hits[0].object;
+                    while (obj && !obj.userData?.dragKey && obj.parent) {
+                        obj = obj.parent;
+                    }
+                    const dKey = obj?.userData?.dragKey;
+                    if (dKey && userOffsets[dKey]) {
+                        userOffsets[dKey].set(0, 0, 0);
+                    }
+                }
+            });
+
+            container.addEventListener('mouseleave', () => {
+                hideHoverTooltip();
+                if (!isDraggingPiece) setHoveredComponent(null);
+            });
+
+            container.addEventListener('wheel', (e) => {
+                e.preventDefault();
+                desiredCam.radius = Math.max(6.0, Math.min(36, desiredCam.radius + e.deltaY * 0.012));
+            }, { passive: false });
+
+            // Soporte táctil móvil (Arrastre de piezas + Órbita)
+            container.addEventListener('touchstart', (e) => {
+                if (e.touches.length === 1) {
+                    const t = e.touches[0];
+                    isPointerDown = true;
+                    startPointer.x = prevPointer.x = t.clientX;
+                    startPointer.y = prevPointer.y = t.clientY;
+
+                    const hits = getRayIntersection(t.clientX, t.clientY);
+                    if (hits.length > 0) {
+                        let obj = hits[0].object;
+                        while (obj && !obj.userData?.dragKey && obj.parent) {
+                            obj = obj.parent;
+                        }
+                        const dKey = obj?.userData?.dragKey;
+                        if (dKey && draggableParts[dKey]) {
+                            isDraggingPiece = true;
+                            draggedKey = dKey;
+                            setupDragPlane(hits[0].point, dragModeVertical);
+                            if (raycaster.ray.intersectPlane(dragPlane, dragIntersectPoint)) {
+                                dragStartWorldPos.copy(dragIntersectPoint);
+                            }
+                            dragStartOffset.copy(userOffsets[dKey]);
+                            selectionBoxHelper.setFromObject(draggableParts[dKey].group);
+                            selectionBoxHelper.visible = true;
+                        }
+                    }
+                }
+            }, { passive: true });
+
+            container.addEventListener('touchmove', (e) => {
+                if (!isPointerDown || e.touches.length !== 1) return;
+                const t = e.touches[0];
+
+                if (isDraggingPiece && draggedKey) {
+                    const rect = renderer.domElement.getBoundingClientRect();
+                    mouse.x = ((t.clientX - rect.left) / rect.width) * 2 - 1;
+                    mouse.y = -((t.clientY - rect.top) / rect.height) * 2 + 1;
+                    raycaster.setFromCamera(mouse, camera);
+
+                    if (raycaster.ray.intersectPlane(dragPlane, dragIntersectPoint)) {
+                        const delta = new THREE.Vector3().subVectors(dragIntersectPoint, dragStartWorldPos);
+                        if (dragModeVertical) {
+                            userOffsets[draggedKey].y = Math.max(-4.5, Math.min(9.0, dragStartOffset.y + delta.y));
+                        } else {
+                            userOffsets[draggedKey].x = Math.max(-16.0, Math.min(16.0, dragStartOffset.x + delta.x));
+                            userOffsets[draggedKey].z = Math.max(-14.0, Math.min(14.0, dragStartOffset.z + delta.z));
+                        }
+                    }
+                    return;
+                }
+
+                const dx = t.clientX - prevPointer.x;
+                const dy = t.clientY - prevPointer.y;
+                prevPointer.x = t.clientX;
+                prevPointer.y = t.clientY;
+
+                desiredCam.theta -= dx * 0.008;
+                desiredCam.phi = Math.max(0.2, Math.min(Math.PI / 2 - 0.04, desiredCam.phi - dy * 0.008));
+            }, { passive: true });
+
+            container.addEventListener('touchend', () => {
+                isPointerDown = false;
+                isDraggingPiece = false;
+                draggedKey = null;
+                selectionBoxHelper.visible = false;
+            });
+
+            // =====================================================
+            // ESTADOS DE ANIMACIÓN (EXTRAER Y ORDENAR, ABRIR, EXPLOSIVA, TRANSPARENTE)
+            // =====================================================
+            let isShowcaseExtracted = false;
+            let isBoxOpen = false;
+            let isExploded = false;
+            let isTransparent = false;
+            let activeComponentId = null;
+            let hoveredComponentId = null;
+
+            function resetAllUserOffsets() {
+                Object.keys(userOffsets).forEach(k => userOffsets[k].set(0, 0, 0));
+            }
+
+            const btnShowcase = document.getElementById('btnShowcase');
+            const txtBtnShowcase = document.getElementById('txtBtnShowcase');
+            const btnToggleBox = document.getElementById('btnToggleBox');
+            const txtBtnBox = document.getElementById('txtBtnBox');
+            const btnExplode = document.getElementById('btnExplode');
+            const txtExplode = document.getElementById('txtExplode');
+            const btnTransparent = document.getElementById('btnTransparent');
+            const txtTransparent = document.getElementById('txtTransparent');
+            const btnToggleLabels = document.getElementById('btnToggleLabels');
+
+            function updateButtonLabels() {
+                txtBtnShowcase.innerText = isShowcaseExtracted ? 'Guardar en Carcasa' : 'Extraer y Ordenar Piezas';
+                btnShowcase.classList.toggle('ring-2', isShowcaseExtracted);
+                btnShowcase.classList.toggle('ring-amber-300', isShowcaseExtracted);
+
+                txtBtnBox.innerText = isBoxOpen ? 'Cerrar Tapa' : 'Abrir Tapa';
+                txtExplode.innerText = isExploded ? 'Capas Verticales: ON' : 'Capas Verticales: OFF';
+                btnExplode.classList.toggle('bg-amber-950/80', isExploded);
+                btnExplode.classList.toggle('border-amber-400', isExploded);
+
+                txtTransparent.innerText = isTransparent ? 'Transparente: ON' : 'Transparente: OFF';
+                btnTransparent.classList.toggle('bg-cyan-950/80', isTransparent);
+                btnTransparent.classList.toggle('border-cyan-400', isTransparent);
+
+                caseMeshes.forEach(m => {
+                    m.material = isTransparent ? caseTransparentMat : caseOrangeMat;
+                });
+            }
+
+            // Botón principal: Extraer componentes de la carcasa y ordenarlos en fila sobre la mesa
+            btnShowcase.addEventListener('click', () => {
+                isShowcaseExtracted = !isShowcaseExtracted;
+                resetAllUserOffsets();
+                if (isShowcaseExtracted) {
+                    isBoxOpen = true;
+                    isExploded = false;
+                    // Ajustar cámara panorámica para ver todos los componentes alineados
+                    desiredCam.theta = 0.08;
+                    desiredCam.phi = 0.92;
+                    desiredCam.radius = 22.5;
+                    desiredCam.target.set(0.5, -0.8, 0.2);
+                } else {
+                    isBoxOpen = false;
+                    desiredCam.theta = 0.68;
+                    desiredCam.phi = 0.98;
+                    desiredCam.radius = 15.0;
+                    desiredCam.target.set(0, 0.2, 0);
+                }
+                updateButtonLabels();
+            });
+
+            btnToggleBox.addEventListener('click', () => {
+                isBoxOpen = !isBoxOpen;
+                updateButtonLabels();
+            });
+
+            btnExplode.addEventListener('click', () => {
+                isExploded = !isExploded;
+                resetAllUserOffsets();
+                if (isExploded) {
+                    isShowcaseExtracted = false;
+                    isBoxOpen = true;
+                    desiredCam.theta = 0.58;
+                    desiredCam.phi = 0.95;
+                    desiredCam.radius = 16.5;
+                    desiredCam.target.set(0, 0.6, 0);
+                }
+                updateButtonLabels();
+            });
+
+            btnTransparent.addEventListener('click', () => {
+                isTransparent = !isTransparent;
+                updateButtonLabels();
+            });
+
+            btnToggleLabels.addEventListener('click', () => {
+                showLabels = !showLabels;
+                btnToggleLabels.innerText = showLabels ? 'Etiquetas: ON' : 'Etiquetas: OFF';
+            });
+
+            document.getElementById('btnResetCam').addEventListener('click', () => {
+                isShowcaseExtracted = false;
+                isBoxOpen = false;
+                isExploded = false;
+                isTransparent = false;
+                activeComponentId = null;
+                resetAllUserOffsets();
+                updateButtonLabels();
+                desiredCam.theta = 0.68;
+                desiredCam.phi = 0.98;
+                desiredCam.radius = 15.0;
+                desiredCam.target.set(0, 0.2, 0);
+
+                document.querySelectorAll('.comp-card').forEach(c => c.classList.remove('active-card'));
+                document.querySelectorAll('.label-3d').forEach(l => l.classList.remove('active-label'));
+            });
+
+            // Selección de un componente desde la lista, etiqueta o clic 3D
+            window.selectComponent = function(id, autoMoveCamera = true) {
+                const spec = componentSpecs[id];
+                if (!spec) return;
+                activeComponentId = id;
+
+                // Actualizar textos de la tarjeta de inspección lateral
+                document.getElementById('insp-badge').innerText = spec.badge;
+                document.getElementById('insp-dims').innerText = spec.dims;
+                document.getElementById('insp-title').innerText = spec.title;
+                document.getElementById('insp-desc').innerText = spec.desc;
+                document.getElementById('insp-specs').innerHTML = spec.specs.map(s => `<div>${s}</div>`).join('');
+
+                // Resaltar tarjeta activa y etiqueta 3D
+                document.querySelectorAll('.comp-card').forEach(c => c.classList.remove('active-card'));
+                const activeCard = document.getElementById('card-' + id);
+                if (activeCard) activeCard.classList.add('active-card');
+
+                document.querySelectorAll('.label-3d').forEach(l => l.classList.remove('active-label'));
+                if (labelElements[id]) labelElements[id].classList.add('active-label');
+
+                if (autoMoveCamera) {
+                    const view = isShowcaseExtracted ? spec.camView : spec.assembledCam;
+                    desiredCam.theta = view.theta;
+                    desiredCam.phi = view.phi;
+                    desiredCam.radius = view.radius;
+                    desiredCam.target.copy(view.target);
+                }
+            };
+
+            // =====================================================
+            // DETECCIÓN DE HOVER CON EL MOUSE (RAYCASTING + TOOLTIP)
+            // =====================================================
+            const hoverTooltip = document.getElementById('hover-tooltip');
+            const ttDot = document.getElementById('tt-dot');
+            const ttBadge = document.getElementById('tt-badge');
+            const ttDims = document.getElementById('tt-dims');
+            const ttTitle = document.getElementById('tt-title');
+            const ttDesc = document.getElementById('tt-desc');
+            const ttSpecs = document.getElementById('tt-specs');
+
+            function setHoveredComponent(id) {
+                if (hoveredComponentId === id) return;
+                hoveredComponentId = id;
+
+                // Restaurar etiquetas
+                Object.keys(labelElements).forEach(k => {
+                    labelElements[k].classList.toggle('active-label', k === id || k === activeComponentId);
+                });
+
+                container.style.cursor = id ? 'grab' : 'default';
+            }
+
+            function hideHoverTooltip() {
+                hoverTooltip.classList.add('opacity-0', 'hidden');
+            }
+
+            function handlePointerHover(event) {
+                const rect = renderer.domElement.getBoundingClientRect();
+                if (
+                    event.clientX < rect.left ||
+                    event.clientX > rect.right ||
+                    event.clientY < rect.top ||
+                    event.clientY > rect.bottom
+                ) {
+                    hideHoverTooltip();
+                    setHoveredComponent(null);
+                    return;
+                }
+
+                mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(gatewayRoot.children, true);
+
+                if (intersects.length > 0) {
+                    let obj = intersects[0].object;
+                    while (obj && !obj.userData?.componentId && obj.parent) {
+                        obj = obj.parent;
+                    }
+                    const compId = obj?.userData?.componentId;
+                    if (compId && componentSpecs[compId]) {
+                        const spec = componentSpecs[compId];
+                        setHoveredComponent(compId);
+
+                        // Rellenar datos del Tooltip flotante
+                        ttDot.style.backgroundColor = spec.color;
+                        ttBadge.innerText = spec.badge;
+                        ttDims.innerText = spec.dims;
+                        ttTitle.innerText = spec.title;
+                        ttDesc.innerText = spec.desc;
+                        ttSpecs.innerHTML = spec.specs.slice(0, 2).map(s => `<div>${s}</div>`).join('');
+
+                        hoverTooltip.classList.remove('hidden', 'opacity-0');
+
+                        // Posicionar el tooltip sin que se salga de la pantalla
+                        const maxX = window.innerWidth - 335;
+                        const maxY = window.innerHeight - 230;
+                        const posX = Math.min(event.clientX, maxX);
+                        const posY = Math.min(event.clientY, maxY);
+                        hoverTooltip.style.left = `${posX}px`;
+                        hoverTooltip.style.top = `${posY}px`;
+                        return;
+                    }
+                }
+
+                hideHoverTooltip();
+                setHoveredComponent(null);
+            }
+
+            function handleCanvasClick(event) {
+                const rect = renderer.domElement.getBoundingClientRect();
+                mouse.x = ((event.clientX - rect.left) / rect.width) * 2 - 1;
+                mouse.y = -((event.clientY - rect.top) / rect.height) * 2 + 1;
+
+                raycaster.setFromCamera(mouse, camera);
+                const intersects = raycaster.intersectObjects(gatewayRoot.children, true);
+
+                if (intersects.length > 0) {
+                    let obj = intersects[0].object;
+                    while (obj && !obj.userData?.componentId && obj.parent) {
+                        obj = obj.parent;
+                    }
+                    if (obj && obj.userData?.componentId) {
+                        window.selectComponent(obj.userData.componentId);
+                    }
+                }
+            }
+
+            // Observer para adaptar el lienzo automáticamente a cualquier cambio de tamaño
+            const resizeObserver = new ResizeObserver(() => {
+                const w = container.clientWidth;
+                const h = container.clientHeight;
+                if (w > 0 && h > 0) {
+                    camera.aspect = w / h;
+                    camera.updateProjectionMatrix();
+                    renderer.setSize(w, h);
+                }
+            });
+            resizeObserver.observe(container);
+
+            // =====================================================
+            // POSICIONES DE ENSAMBLAJE, CAPAS VERTICALES Y EXHIBICIÓN ORDENADA
+            // =====================================================
+            const targetBasePos    = new THREE.Vector3();
+            const targetLidPos     = new THREE.Vector3();
+            const targetBatPos     = new THREE.Vector3();
+            const targetShieldPos  = new THREE.Vector3();
+            const targetEspPos     = new THREE.Vector3();
+            const targetTftPos     = new THREE.Vector3();
+
+            // BUCLE PRINCIPAL DE ANIMACIÓN (60 FPS)
+            function animate() {
+                requestAnimationFrame(animate);
+
+                // 1. Interpolación suave de la cámara orbital y actualización de posición 3D
+                camState.theta += (desiredCam.theta - camState.theta) * 0.09;
+                camState.phi += (desiredCam.phi - camState.phi) * 0.09;
+                camState.radius += (desiredCam.radius - camState.radius) * 0.09;
+                camState.target.lerp(desiredCam.target, 0.09);
+
+                camera.position.x = camState.target.x + camState.radius * Math.sin(camState.phi) * Math.sin(camState.theta);
+                camera.position.y = camState.target.y + camState.radius * Math.cos(camState.phi);
+                camera.position.z = camState.target.z + camState.radius * Math.sin(camState.phi) * Math.cos(camState.theta);
+                camera.lookAt(camState.target);
+
+                // Efecto de elevación sutil cuando el mouse pasa sobre un componente (y no se está arrastrando)
+                const hoverLift = (id) => (!isDraggingPiece && hoveredComponentId === id ? 0.25 : 0.0);
+
+                // 2. Calcular coordenadas destino según el modo activo + el desplazamiento libre con el mouse (userOffsets):
+                // MODO A: Extraer y Ordenar Componentes en fila sobre la mesa técnica
+                if (isShowcaseExtracted) {
+                    targetBasePos.set(-8.5, -1.75 + hoverLift('enclosure'), -2.0).add(userOffsets.enclosureBase);
+                    targetLidPos.set(-11.8, 0.35 + hoverLift('enclosure'), -2.0).add(userOffsets.lid);
+
+                    targetBatPos.set(-3.2, -2.1 + hoverLift('battery'), 1.2).add(userOffsets.battery);
+                    targetShieldPos.set(1.8, -2.35 + hoverLift('shield'), 1.2).add(userOffsets.shield);
+                    targetEspPos.set(5.4, -2.35 + hoverLift('esp32c3'), 1.2).add(userOffsets.esp32c3);
+                    targetTftPos.set(9.2, -2.35 + hoverLift('tft18'), 1.2).add(userOffsets.tft18);
+                }
+                // MODO B: Vista Explosiva en Capas Verticales
+                else if (isExploded) {
+                    targetBasePos.set(0, -1.4 + hoverLift('enclosure'), 0).add(userOffsets.enclosureBase);
+                    targetLidPos.set(-3.3, 2.15 + hoverLift('enclosure'), 0).add(userOffsets.lid);
+
+                    targetBatPos.set(0, -1.35 + hoverLift('battery'), 0).add(userOffsets.battery);
+                    targetShieldPos.set(0, 0.15 + hoverLift('shield'), -0.3).add(userOffsets.shield);
+                    targetEspPos.set(0, 1.35 + hoverLift('esp32c3'), -0.4).add(userOffsets.esp32c3);
+                    targetTftPos.set(0, 2.55 + hoverLift('tft18'), 0.1).add(userOffsets.tft18);
+                }
+                // MODO C: Ensamblado dentro de la Carcasa (pero permitiendo sacar piezas manualmente con el mouse)
+                else {
+                    targetBasePos.set(0, 0 + hoverLift('enclosure'), 0).add(userOffsets.enclosureBase);
+                    targetLidPos.set(-3.3, 0.85 + hoverLift('enclosure'), 0).add(userOffsets.lid);
+
+                    targetBatPos.set(0, -0.62 + hoverLift('battery'), 0).add(userOffsets.battery);
+                    targetShieldPos.set(0, 0.12 + hoverLift('shield'), -0.3).add(userOffsets.shield);
+                    targetEspPos.set(0, 0.58 + hoverLift('esp32c3'), -0.4).add(userOffsets.esp32c3);
+                    targetTftPos.set(0, (isBoxOpen ? 1.35 : 0.92) + hoverLift('tft18'), 0.1).add(userOffsets.tft18);
+                }
+
+                // Aplicar movimiento suave (lerp más rápido si se está arrastrando en vivo)
+                const lerpFactor = isDraggingPiece ? 0.35 : 0.1;
+                enclosureBaseGroup.position.lerp(targetBasePos, lerpFactor);
+                lidPivotGroup.position.lerp(targetLidPos, lerpFactor);
+                batteryGroup.position.lerp(targetBatPos, lerpFactor);
+                shieldGroup.position.lerp(targetShieldPos, lerpFactor);
+                espGroup.position.lerp(targetEspPos, lerpFactor);
+                tftGroup.position.lerp(targetTftPos, lerpFactor);
+
+                if (selectionBoxHelper.visible && draggedKey && draggableParts[draggedKey]) {
+                    selectionBoxHelper.setFromObject(draggableParts[draggedKey].group);
+                }
+
+                // 3. Animación de apertura de la tapa
+                const targetLidRotZ = (isBoxOpen || isShowcaseExtracted) ? Math.PI * 0.62 : 0;
+                lidPivotGroup.rotation.z += (targetLidRotZ - lidPivotGroup.rotation.z) * 0.1;
+
+                // 4. Mostrar u ocultar los pedestales luminosos en la mesa cuando las piezas están ordenadas afuera
+                const targetPadOpacity = isShowcaseExtracted ? 0.16 : 0.0;
+                const targetBorderOpacity = isShowcaseExtracted ? 0.65 : 0.0;
+                padMeshes.forEach(p => {
+                    p.padMat.opacity += (targetPadOpacity - p.padMat.opacity) * 0.1;
+                    p.borderMat.opacity += (targetBorderOpacity - p.borderMat.opacity) * 0.1;
+                });
+
+                // 5. Actualizar posición de etiquetas HTML 3D
+                updateFloatingLabels();
+
+                renderer.render(scene, camera);
+            }
+
+            animate();
+        });
+    </script>
+</body>
+</html>

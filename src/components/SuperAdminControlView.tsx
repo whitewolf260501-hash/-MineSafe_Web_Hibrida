@@ -122,6 +122,11 @@ const CONTROLLABLE_WINDOWS: Array<{
     label: 'Inspector 3D del Nodo',
     description: 'Visor 3D interactivo de hardware ESP32, sensores, carcasa y simulación de gases',
   },
+  {
+    id: 'gateway_3d',
+    label: 'Gateway 3D Inspector',
+    description: 'Visor 3D interactivo del Gateway ESP32-C3 SuperMini, Shield, LiPo 105568 y TFT 1.8"',
+  },
 ];
 
 const EQUIPOS_SUB_WINDOWS: Array<{
@@ -292,6 +297,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       faenas: allowed,
       usuarios: allowed,
       visor_3d: allowed,
+      gateway_3d: allowed,
     };
     commitVisibilityChange((prev) => ({
       ...prev,

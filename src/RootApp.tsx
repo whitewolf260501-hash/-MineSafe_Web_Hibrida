@@ -3,6 +3,8 @@ import { UserProfile } from './types';
 import {
   subscribeToFirebaseAuth,
   logoutFromFirebaseAuth,
+  subscribeToCurrentUserStatus,
+  auth,
 } from './services/firebase';
 import {
   AppRoute,
@@ -88,6 +90,32 @@ export const RootApp: React.FC = () => {
 
     return () => unsubAuth();
   }, []);
+
+  // Escucha directa sobre el nodo propio /usuarios/{uid} para revocación inmediata (incluso para operadores)
+  useEffect(() => {
+    if (!currentUser) return;
+    const authUid = auth.currentUser?.uid || null;
+    const unsubStatus = subscribeToCurrentUserStatus(
+      currentUser.id,
+      authUid,
+      (status, updatedProfile) => {
+        if (status === 'inactivo') {
+          logoutFromFirebaseAuth().catch(() => {});
+          setCurrentUser(null);
+          setAuthError('Tu cuenta fue desactivada por administración. La sesión se cerró inmediatamente.');
+          if (routeState.route === 'panel') {
+            navigateToAppRoute('login', { replace: true });
+            setRouteState({ route: 'login' });
+          }
+          return;
+        }
+        if (updatedProfile) {
+          setCurrentUser((prev) => (prev ? { ...prev, ...updatedProfile } : updatedProfile));
+        }
+      }
+    );
+    return () => unsubStatus();
+  }, [currentUser?.id, routeState.route]);
 
   // Redirecciones de control de ruta:
   // - /panel sin sesión activa -> /acceso

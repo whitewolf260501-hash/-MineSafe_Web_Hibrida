@@ -102,3 +102,52 @@ export function filterScopedUsers(
     (u) => u.role !== 'superadmin' && belongsToOrganization(u.organizationId, actorOrg)
   );
 }
+
+export function isUserSessionActive(user: UserProfile | null | undefined): boolean {
+  return Boolean(user && user.status === 'activo');
+}
+
+export function assertActiveSession(user: UserProfile | null | undefined): void {
+  if (!isUserSessionActive(user)) {
+    throw new Error('Tu sesión se encuentra inactiva o revocada. Inicia sesión nuevamente con una cuenta autorizada.');
+  }
+}
+
+export function canManageContractsAndPayments(
+  actingUser: UserProfile | null | undefined,
+  targetOrgId?: string
+): { allowed: boolean; reason?: string } {
+  if (!isUserSessionActive(actingUser)) {
+    return { allowed: false, reason: 'La sesión actual está inactiva o cerrada.' };
+  }
+  if (actingUser!.role !== 'superadmin' && actingUser!.role !== 'admin') {
+    return {
+      allowed: false,
+      reason: 'Permisos insuficientes: solo Administradores o SuperAdministrador pueden gestionar contratos y pagos.',
+    };
+  }
+  if (actingUser!.role === 'admin' && targetOrgId) {
+    const actorOrg = actingUser!.organizationId || DEFAULT_ORGANIZATION_ID;
+    if ((targetOrgId || DEFAULT_ORGANIZATION_ID) !== actorOrg) {
+      return {
+        allowed: false,
+        reason: 'Acción denegada: no puedes gestionar contratos o pagos de otra organización.',
+      };
+    }
+  }
+  return { allowed: true };
+}
+
+export function filterScopedEntities<T extends { organizationId?: string }>(
+  items: T[],
+  actingUser: UserProfile | null,
+  effectiveOrgId: string
+): T[] {
+  if (!actingUser) return [];
+  const targetOrg =
+    actingUser.role === 'superadmin'
+      ? effectiveOrgId || 'all'
+      : actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+  return items.filter((item) => belongsToOrganization(item.organizationId, targetOrg));
+}
+

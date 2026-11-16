@@ -83,7 +83,8 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
       const uploaded = await uploadAlertAttachmentToStorage(
         alert.id,
         file,
-        supervisorName.trim() || currentUser?.name || 'Operador'
+        supervisorName.trim() || currentUser?.name || 'Operador',
+        alert.organizationId || currentUser?.organizationId
       );
       setAttachments((prev) => [...prev, uploaded]);
     } catch (err: any) {

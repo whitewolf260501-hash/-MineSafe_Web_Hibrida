@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useMemo } from 'react';
+import React, { useState, useEffect, useCallback, useMemo, Suspense, lazy } from 'react';
 import { Navbar } from './components/Navbar';
 import { DashboardView } from './components/DashboardView';
 import { MonitoringView } from './components/MonitoringView';
@@ -12,6 +12,8 @@ import { SuperAdminControlView } from './components/SuperAdminControlView';
 import { LoginModal } from './components/LoginModal';
 import { EmergencyModal, DrillType } from './components/EmergencyModal';
 import { alertEngine } from './services/alertEngine';
+
+const Node3DInspectorView = lazy(() => import('./components/Node3DInspectorView'));
 
 
 import { 
@@ -32,6 +34,10 @@ import {
   TelemetryHistoryPoint,
   AlertEventRecord
 } from './types';
+import {
+  TelemetryRangeWindow,
+  computeTelemetryWindow,
+} from './components/HistoricalReportsView';
 
 import { 
   INITIAL_VARIABLES, 
@@ -44,6 +50,7 @@ import {
 import {
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  canManageContractsAndPayments,
   filterScopedUsers,
   DEFAULT_ORGANIZATION_ID,
 } from './utils/accessControl';
@@ -86,7 +93,8 @@ import {
   loadCachedSites,
   mergeMiningSites,
   saveSiteToRTDB,
-  subscribeToRTDBSites
+  subscribeToRTDBSites,
+  RTDBSubscriptionScope
 } from './services/firebase';
 
 import { soundAlert } from './services/audioAlert';
@@ -162,6 +170,9 @@ export default function App({
 
   const [selectedSensorId, setSelectedSensorId] = useState<string | null>(null);
   const [activeTelemetryDeviceId, setActiveTelemetryDeviceId] = useState<string>('device_38A839E81F84');
+  const [telemetryWindow, setTelemetryWindow] = useState<TelemetryRangeWindow>(() =>
+    computeTelemetryWindow('24h')
+  );
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
   const [showEmergencyModal, setShowEmergencyModal] = useState<boolean>(false);
@@ -191,46 +202,62 @@ export default function App({
   // Keep timeout ref synchronized with SuperAdmin platform metrics
   timeoutSecondsRef.current = platformConfig.metrics.gatewayTimeoutSeconds || 20;
 
-  // Initialize and connect to user's Firebase Realtime Database
+  // Multi-organization scoping: SuperAdmin can switch orgs or inspect all ('all'); Admin/Operador see their own org
+  const effectiveOrgId =
+    currentUser?.role === 'superadmin'
+      ? activeOrganizationId
+      : currentUser?.organizationId || DEFAULT_ORGANIZATION.id;
+
+  const matchesOrg = useCallback(
+    (orgId?: string) =>
+      effectiveOrgId === 'all' || (orgId || DEFAULT_ORGANIZATION.id) === effectiveOrgId,
+    [effectiveOrgId]
+  );
+
+  const scopedDeviceIdsKey = useMemo(() => {
+    const regList = platformConfig.registeredDevices || DEFAULT_PLATFORM_CONFIG.registeredDevices;
+    const ids = regList
+      .filter((r) => r.enabled !== false && matchesOrg(r.organizationId))
+      .map((r) => r.id);
+    if (ids.length === 0 && (effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id)) {
+      ids.push('device_38A839E81F84');
+    }
+    return Array.from(new Set(ids)).sort().join(',');
+  }, [platformConfig.registeredDevices, matchesOrg, effectiveOrgId]);
+
+  const subscriptionScope = useMemo<RTDBSubscriptionScope>(
+    () => ({
+      role: currentUser?.role,
+      organizationId: effectiveOrgId,
+      deviceIds: scopedDeviceIdsKey ? scopedDeviceIdsKey.split(',').filter(Boolean) : [],
+    }),
+    [currentUser?.role, effectiveOrgId, scopedDeviceIdsKey]
+  );
+
+  const recomputeDevicesFromRaw = useCallback(() => {
+    const raw = rawDevicesRef.current || {};
+    const keys = Object.keys(raw);
+    if (keys.length === 0) return;
+    const timeout = timeoutSecondsRef.current || 20;
+    const mapped = keys.map((key) => mapRTDBDeviceToSensorDevice(key, raw[key], timeout));
+    setDevices(mapped);
+    mapped.forEach((dev) => {
+      recordTelemetryHistoryPoint(dev).catch(() => {});
+    });
+  }, []);
+
+  // Suscripciones globales de plataforma, umbrales, simulacros y chequeo de conexión/latencia
   useEffect(() => {
-    let unsubDevices: (() => void) | null = null;
-    let unsubUsers: (() => void) | null = null;
-    let unsubRentals: (() => void) | null = null;
-    let unsubAlerts: (() => void) | null = null;
     let unsubDrill: (() => void) | null = null;
     let unsubPlatform: (() => void) | null = null;
-    let unsubSites: (() => void) | null = null;
     let unsubThresholds: (() => void) | null = null;
-    let unsubAlertEvents: (() => void) | null = null;
-    let unsubOrgs: (() => void) | null = null;
-    let unsubAssignments: (() => void) | null = null;
-
-    const recomputeDevicesFromRaw = () => {
-      const raw = rawDevicesRef.current || {};
-      const keys = Object.keys(raw);
-      if (keys.length === 0) return;
-      const timeout = timeoutSecondsRef.current || 20;
-      const mapped = keys.map((key) => mapRTDBDeviceToSensorDevice(key, raw[key], timeout));
-      setDevices(mapped);
-      mapped.forEach((dev) => {
-        recordTelemetryHistoryPoint(dev).catch(() => {});
-      });
-    };
 
     const staleCheckInterval = setInterval(recomputeDevicesFromRaw, 2000);
 
-    async function initRealtimeDatabase() {
+    async function initGlobalListeners() {
       const connected = await testConnection();
       setIsFirebaseConnected(connected);
 
-      // Realtime raw listener for Devices & live measurements
-      unsubDevices = subscribeToRTDBDevicesRaw((incoming) => {
-        rawDevicesRef.current = incoming || {};
-        setIsFirebaseConnected(true);
-        recomputeDevicesFromRaw();
-      });
-
-      // Global & per-device dynamic threshold configs fed directly to alertEngine
       unsubThresholds = subscribeToAllThresholdConfigs((configs) => {
         if (configs.global) {
           alertEngine.setGlobalConfig(configs.global);
@@ -242,78 +269,6 @@ export default function App({
         });
       });
 
-      // Real threshold event log stream for Sernageomin reports
-      unsubAlertEvents = subscribeToAlertEvents((events) => {
-        setAlertEvents(events);
-      });
-
-      // Organizations stream for multi-tenant isolation
-      unsubOrgs = subscribeToRTDBOrganizations((orgs) => {
-        setOrganizations(orgs);
-      });
-
-      // Worker assignments stream
-      unsubAssignments = subscribeToRTDBAssignments((remoteAssigns) => {
-        if (remoteAssigns && remoteAssigns.length > 0) {
-          setAssignments(remoteAssigns);
-        }
-      });
-
-      // Realtime listener for Users (syncs role/status updates and revokes access immediately if deactivated)
-      unsubUsers = subscribeToRTDBUsers((remoteUsers) => {
-        if (remoteUsers && remoteUsers.length > 0) {
-          setUsersList(remoteUsers);
-          setCurrentUser((prev) => {
-            const updated = remoteUsers.find(
-              (u) => u.id === prev.id || u.email.toLowerCase() === prev.email.toLowerCase()
-            );
-            if (!updated) return prev;
-            if (updated.status === 'inactivo') {
-              onLogoutRequest().catch(() => {});
-              return prev;
-            }
-            return updated;
-          });
-        }
-      });
-
-      // Realtime listener for Rentals
-      unsubRentals = subscribeToRTDBRentals((remoteRentals) => {
-        if (remoteRentals && remoteRentals.length > 0) {
-          setRentals(remoteRentals);
-        }
-      });
-
-      // Realtime listener for Alerts & Incident Descriptions (/alertas + /bitacora_contingencias)
-      unsubAlerts = subscribeToRTDBAlerts((remoteAlerts) => {
-        const mockById = new Map(INITIAL_ALERTS.map((m) => [m.id, m]));
-        const enrichedRemote = remoteAlerts.map((a) => {
-          const mock = mockById.get(a.id);
-          if (!mock) return a;
-          const isFallbackTitle =
-            a.title === 'Alerta de Seguridad' || a.title.startsWith('Contingencia Registrada (');
-          return {
-            ...a,
-            code: a.code === a.id ? mock.code : a.code,
-            title: isFallbackTitle ? mock.title : a.title,
-            severity: a.severity === 'advertencia' && mock.severity ? mock.severity : a.severity,
-            variableName: a.variableName === 'Variable Ambiental' ? mock.variableName : a.variableName,
-            sensorId: a.sensorId === 'device_38A839E81F84' && mock.sensorId ? mock.sensorId : a.sensorId,
-            sensorCode: a.sensorCode === 'device_38A839E81F84' || a.sensorCode === 'ESP32' ? mock.sensorCode : a.sensorCode,
-            sectorName: a.sectorName === 'Mina Chuquicamata - Rampa Principal' && mock.sectorName ? mock.sectorName : a.sectorName,
-            recordedValue: a.recordedValue === '-' ? mock.recordedValue : a.recordedValue,
-            safeLimit: a.safeLimit === '-' ? mock.safeLimit : a.safeLimit,
-            suggestedAction:
-              a.suggestedAction === 'Verificar condiciones del sector y registrar medidas de control.'
-                ? mock.suggestedAction
-                : a.suggestedAction,
-          };
-        });
-        alertEngine.syncExistingActiveAlerts(enrichedRemote);
-        setAlerts(enrichedRemote);
-      });
-
-      // Realtime listener for Drill & Emergency broadcasts (e.g., triggered from Android app)
       unsubDrill = subscribeToRTDBDrill((drillState) => {
         if (drillState.active) {
           setIsDrillActive(true);
@@ -329,58 +284,127 @@ export default function App({
         }
       });
 
-      // Realtime listener for SuperAdmin master platform configuration
       unsubPlatform = subscribeToPlatformConfig((cfg) => {
         setPlatformConfig(cfg);
         timeoutSecondsRef.current = cfg.metrics.gatewayTimeoutSeconds || 20;
         recomputeDevicesFromRaw();
       });
-
-      // Realtime listener for Mining Sites, Sectors & Assigned Crews (/faenas)
-      unsubSites = subscribeToRTDBSites((remoteSites) => {
-        if (remoteSites && remoteSites.length > 0) {
-          setSites((prev) => {
-            const merged = mergeMiningSites(mergeMiningSites(MINING_SITES, prev), remoteSites);
-            setCurrentSite((curr) => merged.find((s) => s.id === curr.id) || merged[0] || curr);
-            return merged;
-          });
-        }
-      });
     }
 
-    initRealtimeDatabase();
+    initGlobalListeners();
 
     return () => {
       clearInterval(staleCheckInterval);
-      if (unsubDevices) unsubDevices();
-      if (unsubUsers) unsubUsers();
-      if (unsubRentals) unsubRentals();
-      if (unsubAlerts) unsubAlerts();
       if (unsubDrill) unsubDrill();
       if (unsubPlatform) unsubPlatform();
-      if (unsubSites) unsubSites();
       if (unsubThresholds) unsubThresholds();
-      if (unsubAlertEvents) unsubAlertEvents();
-      if (unsubOrgs) unsubOrgs();
-      if (unsubAssignments) unsubAssignments();
       soundAlert.stopContinuousAlarm();
       rawDevicesRef.current = {};
       alertsRef.current = [];
-      alertEngine.syncExistingActiveAlerts([]);
+      alertEngine.clearActiveIncidents();
     };
-  }, [onLogoutRequest]);
+  }, [recomputeDevicesFromRaw]);
 
-  // Multi-organization scoping: SuperAdmin can switch orgs or inspect all ('all'); Admin/Operador see their own org
-  const effectiveOrgId =
-    currentUser?.role === 'superadmin'
-      ? activeOrganizationId
-      : currentUser?.organizationId || DEFAULT_ORGANIZATION.id;
+  // Suscripciones operativas en RTDB estrictamente acotadas por rol y organización activa
+  useEffect(() => {
+    const unsubDevices = subscribeToRTDBDevicesRaw((incoming) => {
+      rawDevicesRef.current = incoming || {};
+      setIsFirebaseConnected(true);
+      recomputeDevicesFromRaw();
+    }, subscriptionScope);
 
-  const matchesOrg = useCallback(
-    (orgId?: string) =>
-      effectiveOrgId === 'all' || (orgId || DEFAULT_ORGANIZATION.id) === effectiveOrgId,
-    [effectiveOrgId]
-  );
+    const unsubAlertEvents = subscribeToAlertEvents((events) => {
+      setAlertEvents(events);
+    }, subscriptionScope);
+
+    const unsubOrgs = subscribeToRTDBOrganizations((orgs) => {
+      setOrganizations(orgs);
+    }, subscriptionScope);
+
+    const unsubAssignments = subscribeToRTDBAssignments((remoteAssigns) => {
+      if (remoteAssigns && remoteAssigns.length > 0) {
+        setAssignments(remoteAssigns);
+      } else {
+        setAssignments([]);
+      }
+    }, subscriptionScope);
+
+    const unsubUsers = subscribeToRTDBUsers((remoteUsers) => {
+      if (remoteUsers && remoteUsers.length > 0) {
+        setUsersList(remoteUsers);
+        setCurrentUser((prev) => {
+          const updated = remoteUsers.find(
+            (u) => u.id === prev.id || u.email.toLowerCase() === prev.email.toLowerCase()
+          );
+          if (!updated) return prev;
+          if (updated.status === 'inactivo') {
+            onLogoutRequest().catch(() => {});
+            return prev;
+          }
+          return updated;
+        });
+      } else if (subscriptionScope.role === 'operador') {
+        setUsersList([]);
+      }
+    }, subscriptionScope);
+
+    const unsubRentals = subscribeToRTDBRentals((remoteRentals) => {
+      if (remoteRentals && remoteRentals.length > 0) {
+        setRentals(remoteRentals);
+      } else {
+        setRentals([]);
+      }
+    }, subscriptionScope);
+
+    const unsubAlerts = subscribeToRTDBAlerts((remoteAlerts) => {
+      const mockById = new Map(INITIAL_ALERTS.map((m) => [m.id, m]));
+      const enrichedRemote = remoteAlerts.map((a) => {
+        const mock = mockById.get(a.id);
+        if (!mock) return a;
+        const isFallbackTitle =
+          a.title === 'Alerta de Seguridad' || a.title.startsWith('Contingencia Registrada (');
+        return {
+          ...a,
+          code: a.code === a.id ? mock.code : a.code,
+          title: isFallbackTitle ? mock.title : a.title,
+          severity: a.severity === 'advertencia' && mock.severity ? mock.severity : a.severity,
+          variableName: a.variableName === 'Variable Ambiental' ? mock.variableName : a.variableName,
+          sensorId: a.sensorId === 'device_38A839E81F84' && mock.sensorId ? mock.sensorId : a.sensorId,
+          sensorCode: a.sensorCode === 'device_38A839E81F84' || a.sensorCode === 'ESP32' ? mock.sensorCode : a.sensorCode,
+          sectorName: a.sectorName === 'Mina Chuquicamata - Rampa Principal' && mock.sectorName ? mock.sectorName : a.sectorName,
+          recordedValue: a.recordedValue === '-' ? mock.recordedValue : a.recordedValue,
+          safeLimit: a.safeLimit === '-' ? mock.safeLimit : a.safeLimit,
+          suggestedAction:
+            a.suggestedAction === 'Verificar condiciones del sector y registrar medidas de control.'
+              ? mock.suggestedAction
+              : a.suggestedAction,
+        };
+      });
+      alertEngine.syncExistingActiveAlerts(enrichedRemote);
+      setAlerts(enrichedRemote);
+    }, subscriptionScope);
+
+    const unsubSites = subscribeToRTDBSites((remoteSites) => {
+      if (remoteSites && remoteSites.length > 0) {
+        setSites((prev) => {
+          const merged = mergeMiningSites(mergeMiningSites(MINING_SITES, prev), remoteSites);
+          setCurrentSite((curr) => merged.find((s) => s.id === curr.id) || merged[0] || curr);
+          return merged;
+        });
+      }
+    }, subscriptionScope);
+
+    return () => {
+      unsubDevices();
+      unsubAlertEvents();
+      unsubOrgs();
+      unsubAssignments();
+      unsubUsers();
+      unsubRentals();
+      unsubAlerts();
+      unsubSites();
+    };
+  }, [subscriptionScope, recomputeDevicesFromRaw, onLogoutRequest]);
 
   // Lista controlada de dispositivos visibles (filtrada además por organización activa)
   const visibleDevices = useMemo<SensorDevice[]>(() => {
@@ -480,17 +504,36 @@ export default function App({
     }
   }, [visibleDevices, activeTelemetryDeviceId]);
 
-  // Suscripción a historial real de telemetría para el nodo activo (últimas 24h)
+  const handleReportRangeChange = useCallback((nextWindow: TelemetryRangeWindow) => {
+    setTelemetryWindow((prev) =>
+      prev.key === nextWindow.key &&
+      Math.abs(prev.startMs - nextWindow.startMs) < 5000 &&
+      Math.abs(prev.endMs - nextWindow.endMs) < 5000
+        ? prev
+        : nextWindow
+    );
+  }, []);
+
+  // Suscripción a historial real de telemetría para el nodo activo y rango seleccionado
   useEffect(() => {
     if (!activeTelemetryDeviceId) {
       setTelemetryHistory([]);
       return;
     }
-    const unsubHist = subscribeToTelemetryHistory(activeTelemetryDeviceId, 24, (points) => {
-      setTelemetryHistory(points);
-    });
+    const limit = telemetryWindow.key === '24h' ? 2500 : telemetryWindow.key === '6h' || telemetryWindow.key === '1h' ? 2500 : 15000;
+    const unsubHist = subscribeToTelemetryHistory(
+      activeTelemetryDeviceId,
+      {
+        startMs: telemetryWindow.startMs,
+        endMs: telemetryWindow.endMs,
+        limit,
+      },
+      (points) => {
+        setTelemetryHistory(points);
+      }
+    );
     return () => unsubHist();
-  }, [activeTelemetryDeviceId]);
+  }, [activeTelemetryDeviceId, telemetryWindow]);
 
   // Evaluar mediciones en tiempo real únicamente sobre los dispositivos visibles
   useEffect(() => {
@@ -696,7 +739,7 @@ export default function App({
   const handleRefreshData = useCallback(async () => {
     soundAlert.playFeedbackBeep();
     try {
-      const res = await forceRefreshDevicesFromRTDB(timeoutSecondsRef.current || 20);
+      const res = await forceRefreshDevicesFromRTDB(timeoutSecondsRef.current || 20, subscriptionScope);
       rawDevicesRef.current = res.raw || {};
       if (res.devices.length > 0) {
         setDevices(res.devices);
@@ -711,7 +754,7 @@ export default function App({
         lastUpdateSeconds: 0,
       }))
     );
-  }, []);
+  }, [subscriptionScope]);
 
   const handleAcknowledgeAlert = useCallback(async (alertId: string) => {
     soundAlert.playFeedbackBeep();
@@ -823,6 +866,9 @@ export default function App({
     const newAlert: SafetyAlert = {
       id: `alt-${now}`,
       code: `ALT-SIM-${Math.floor(Math.random() * 900 + 100)}`,
+      organizationId:
+        targetDev.organizationId ||
+        (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId),
       title: 'Detección Crítica de Monóxido de Carbono (CO > 50 ppm)',
       severity: 'critico',
       variableName: 'Monóxido de Carbono (CO)',
@@ -847,8 +893,10 @@ export default function App({
     setAlerts((prev) => [newAlert, ...prev]);
 
     // Broadcast alert to Firebase RTDB so hardware ESP32 immediately reacts
-    await broadcastAlertToRTDB(newAlert);
-  }, [visibleDevices]);
+    await broadcastAlertToRTDB(newAlert).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al emitir alerta crítica hacia Firebase RTDB.', 'error');
+    });
+  }, [visibleDevices, effectiveOrgId, showAlarmFeedback]);
 
   const handleResetSensor = useCallback(async (sensorId: string) => {
     soundAlert.playFeedbackBeep();
@@ -994,6 +1042,9 @@ export default function App({
     const newAlert: SafetyAlert = {
       id: `alt-drill-${now}`,
       code: `SIM-DRILL-${Math.floor(Math.random() * 800 + 100)}`,
+      organizationId:
+        dev?.organizationId ||
+        (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId),
       title: titleMap[type],
       severity: 'critico',
       variableName: type === 'gas_critico' ? 'Monóxido de Carbono (CO)' : type === 'incendio_polvo' ? 'Polvo PM2.5' : 'Alarma General',
@@ -1018,9 +1069,11 @@ export default function App({
     setAlerts(prev => [newAlert, ...prev]);
 
     // Broadcast drill and save drill alert to Firebase Realtime Database (/simulacro + /alertas)
-    await broadcastDrillToRTDB(true, type, dev?.id || 'device_38A839E81F84');
-    await broadcastAlertToRTDB(newAlert);
-  }, [visibleDevices, activeTelemetryDeviceId]);
+    await broadcastDrillToRTDB(true, type, dev?.id || 'device_38A839E81F84').catch(() => {});
+    await broadcastAlertToRTDB(newAlert).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al guardar alerta de simulacro en Firebase RTDB.', 'error');
+    });
+  }, [visibleDevices, activeTelemetryDeviceId, effectiveOrgId, showAlarmFeedback]);
 
   const handleStopDrill = useCallback(async () => {
     const isVerifiedSuper = currentUser?.role === 'superadmin' && await verifySuperAdminPrivileges(currentUser);
@@ -1092,42 +1145,70 @@ export default function App({
     await toggleGatewayLightInRTDB(activeTelemetryDeviceId, next);
   }, [isLightActive, activeTelemetryDeviceId]);
 
-  const handleAddAssignment = useCallback((newAsg: Omit<WorkerAssignment, 'id'>) => {
+  const handleAddAssignment = useCallback(async (newAsg: Omit<WorkerAssignment, 'id'>) => {
     const fallbackOrg =
       effectiveOrgId === 'all' ? currentSite.organizationId || DEFAULT_ORGANIZATION.id : effectiveOrgId;
+    const targetOrg = newAsg.organizationId || fallbackOrg;
+    const access = canManageContractsAndPayments(currentUser, targetOrg);
+    if (!access.allowed) {
+      throw new Error(access.reason || 'Permisos insuficientes para crear asignaciones.');
+    }
     const created: WorkerAssignment = {
       ...newAsg,
-      organizationId: newAsg.organizationId || fallbackOrg,
-      id: `asg-${Date.now()}`,
+      organizationId: targetOrg,
+      id: `asg-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     };
-    setAssignments((prev) => [created, ...prev]);
-    saveAssignmentToRTDB(created).catch(() => {});
-  }, [effectiveOrgId, currentSite.organizationId]);
+    await saveAssignmentToRTDB(created);
+    setAssignments((prev) => (prev.some((a) => a.id === created.id) ? prev : [created, ...prev]));
+    showAlarmFeedback(`Asignación de ${created.workerName} guardada en Firebase RTDB.`, 'success');
+  }, [effectiveOrgId, currentSite.organizationId, currentUser, showAlarmFeedback]);
 
-  const handleAddRentalContract = useCallback((newRent: Omit<DeviceRental, 'id'>) => {
+  const handleAddRentalContract = useCallback(async (newRent: Omit<DeviceRental, 'id'>) => {
     const fallbackOrg =
       effectiveOrgId === 'all' ? currentSite.organizationId || DEFAULT_ORGANIZATION.id : effectiveOrgId;
+    const targetOrg = newRent.organizationId || fallbackOrg;
+    const access = canManageContractsAndPayments(currentUser, targetOrg);
+    if (!access.allowed) {
+      throw new Error(access.reason || 'Permisos insuficientes para registrar contratos.');
+    }
     const created: DeviceRental = {
       ...newRent,
-      organizationId: newRent.organizationId || fallbackOrg,
-      id: `rent-${Date.now()}`,
+      organizationId: targetOrg,
+      id: `rent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     };
-    setRentals((prev) => [created, ...prev]);
-    addRentalContractToRTDB(created);
-  }, [effectiveOrgId, currentSite.organizationId]);
+    await addRentalContractToRTDB(created, currentUser);
+    setRentals((prev) => (prev.some((r) => r.id === created.id) ? prev : [created, ...prev]));
+    showAlarmFeedback(`Contrato ${created.contractNumber} registrado en Firebase RTDB.`, 'success');
+  }, [effectiveOrgId, currentSite.organizationId, currentUser, showAlarmFeedback]);
 
-  const handleRecordPayment = useCallback((contractId: string) => {
+  const handleRecordPayment = useCallback(async (contractId: string) => {
+    const targetRental = rentals.find((r) => r.id === contractId);
+    const targetOrg = targetRental?.organizationId || (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId);
+    const access = canManageContractsAndPayments(currentUser, targetOrg);
+    if (!access.allowed) {
+      showAlarmFeedback(access.reason || 'Permisos insuficientes para registrar pagos.', 'error');
+      throw new Error(access.reason || 'Permisos insuficientes para registrar pagos.');
+    }
+    const amount = targetRental?.monthlyCostClp && targetRental.monthlyCostClp > 0
+      ? targetRental.monthlyCostClp
+      : 185000;
+    const res = await recordPaymentInRTDB(contractId, amount, {
+      organizationId: targetOrg,
+      actingUser: currentUser,
+    });
     soundAlert.playFeedbackBeep();
-    const today = new Date().toISOString().split('T')[0];
     setRentals((prev) =>
       prev.map((r) =>
         r.id === contractId
-          ? { ...r, paymentStatus: 'al_dia', lastPaymentDate: today }
+          ? { ...r, paymentStatus: 'al_dia', lastPaymentDate: res.fechaPago }
           : r
       )
     );
-    recordPaymentInRTDB(contractId, 25000);
-  }, []);
+    showAlarmFeedback(
+      `Pago de $${amount.toLocaleString('es-CL')} CLP (${res.pagoId}) registrado en Firebase RTDB.`,
+      'success'
+    );
+  }, [rentals, effectiveOrgId, currentUser, showAlarmFeedback]);
 
   const handleAddSite = useCallback((newSite: MiningSite) => {
     const fallbackOrg = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
@@ -1173,7 +1254,9 @@ export default function App({
           : 'Usuario Normal / Operador de Faena',
     };
     setUsersList((prev) => [safeUser, ...prev]);
-    addUserToRTDB(safeUser, currentUser);
+    addUserToRTDB(safeUser, currentUser).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al registrar usuario en Firebase RTDB.', 'error');
+    });
   }, [currentUser, showAlarmFeedback]);
 
   const handleUpdateUserRole = useCallback((userId: string, newRole: UserRole) => {
@@ -1266,6 +1349,7 @@ export default function App({
 
   const handleLogout = useCallback(async () => {
     soundAlert.stopContinuousAlarm();
+    alertEngine.clearActiveIncidents();
     setShowLoginModal(false);
     setShowEmergencyModal(false);
     setAlerts([]);
@@ -1299,6 +1383,10 @@ export default function App({
     () => alerts.filter((a) => matchesOrg(a.organizationId)),
     [alerts, matchesOrg]
   );
+  const scopedAlertEvents = useMemo(
+    () => alertEvents.filter((ev) => matchesOrg(ev.organizationId)),
+    [alertEvents, matchesOrg]
+  );
   const activeAlerts = scopedAlerts.filter(a => !a.resolved);
 
   // Check if gas or dust in the active device is in critical threshold (Prompt Req 4)
@@ -1322,6 +1410,7 @@ export default function App({
     'configuracion_alertas',
     'equipos',
     'usuarios',
+    'visor_3d',
   ];
 
   // Proteger todas las ventanas según las reglas dinámicas del SuperAdministrador
@@ -1617,9 +1706,12 @@ export default function App({
               <HistoricalReportsView
                 variables={variables}
                 currentSite={scopedCurrentSite}
+                activeDeviceId={activeDevice?.id}
+                activeDeviceName={activeDevice?.name}
                 telemetryHistory={telemetryHistory}
-                alertEvents={alertEvents}
+                alertEvents={scopedAlertEvents}
                 alerts={scopedAlerts}
+                onRangeChange={handleReportRangeChange}
               />
             )}
 
@@ -1649,6 +1741,19 @@ export default function App({
                 onUpdateUserRole={handleUpdateUserRole}
                 onToggleUserStatus={handleToggleUserStatus}
               />
+            )}
+
+            {currentTab === 'visor_3d' && (
+              <Suspense
+                fallback={
+                  <div className="p-10 text-center bg-slate-900/80 border border-slate-800 rounded-2xl max-w-xl mx-auto my-12">
+                    <div className="w-8 h-8 rounded-full border-2 border-orange-500 border-t-transparent animate-spin mx-auto mb-3" />
+                    <p className="text-sm font-semibold text-slate-200">Cargando Inspector 3D del Nodo...</p>
+                  </div>
+                }
+              >
+                <Node3DInspectorView activeDevice={activeDevice} />
+              </Suspense>
             )}
 
             {currentTab === 'superadmin_panel' && currentUser.role === 'superadmin' && (

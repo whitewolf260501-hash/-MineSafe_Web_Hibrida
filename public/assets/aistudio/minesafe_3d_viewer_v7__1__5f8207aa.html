@@ -1,0 +1,922 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>MineSafe 3D - Inspector Interactivo del Nodo IoT</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.128.0/examples/js/controls/OrbitControls.js"></script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+<style>
+  html, body { height: 100%; }
+  body { margin: 0; overflow: hidden; background: #060913; font-family: 'Inter', system-ui, sans-serif; }
+  .glass-panel { background: rgba(15, 23, 42, 0.72); backdrop-filter: blur(12px); border: 1px solid rgba(100, 116, 139, 0.2); }
+  .glow-orange { text-shadow: 0 0 10px rgba(249, 115, 22, 0.6); }
+  .btn { padding: .5rem .85rem; border-radius: .6rem; font-size: .8rem; font-weight: 600; border: 1px solid rgba(100,116,139,.35);
+         background: rgba(30,41,59,.8); color: #cbd5e1; transition: all .15s; display: inline-flex; align-items: center; gap: .4rem; }
+  .btn:hover { background: rgba(51,65,85,.9); }
+  .btn:active { transform: scale(.96); }
+  .btn.on { background: #ea580c; border-color: #fb923c; color: #fff; }
+  .btn.danger.on { background: #dc2626; border-color: #f87171; }
+  .comp-card { transition: all .15s; }
+  .comp-card.active { border-color: rgba(249,115,22,.8) !important; background: rgba(124,45,18,.25) !important; }
+  #tooltip { position: fixed; left: 0; top: 0; pointer-events: none; z-index: 50; width: max-content; max-width: 270px;
+             padding: .65rem .8rem; border-radius: .75rem; background: rgba(15,23,42,.96);
+             border: 1px solid rgba(249,115,22,.55); box-shadow: 0 10px 30px rgba(0,0,0,.5), 0 0 0 1px rgba(0,0,0,.4);
+             opacity: 0; transform: translateY(4px); transition: opacity .12s, transform .12s; }
+  #tooltip.show { opacity: 1; transform: translateY(0); }
+  #tooltip .tt-head { display: flex; align-items: center; gap: .5rem; }
+  #tooltip .tt-dot { width: .6rem; height: .6rem; border-radius: 9999px; flex: none; box-shadow: 0 0 8px currentColor; }
+  #tooltip .tt-name { font-size: .85rem; font-weight: 700; color: #f1f5f9; }
+  #tooltip .tt-type { display: inline-block; margin-top: .3rem; font-size: .65rem; font-weight: 600; letter-spacing: .04em;
+                      text-transform: uppercase; padding: .05rem .4rem; border-radius: .35rem; background: rgba(249,115,22,.15); color: #fdba74; }
+  #tooltip .tt-desc { margin: .45rem 0 0; font-size: .75rem; line-height: 1.35; color: #cbd5e1; }
+  #tooltip .tt-hint { margin-top: .5rem; font-size: .65rem; color: #64748b; }
+  @keyframes alarmPulse { 0%,100% { opacity: 1 } 50% { opacity: .35 } }
+  .alarm-pulse { animation: alarmPulse .8s infinite; }
+  aside::-webkit-scrollbar { width: 6px; } aside::-webkit-scrollbar-thumb { background: #334155; border-radius: 3px; }
+</style>
+</head>
+<body class="text-slate-100 flex flex-col h-screen select-none">
+
+<!-- Header -->
+<header class="glass-panel z-10 px-4 lg:px-6 py-3 flex flex-wrap gap-3 justify-between items-center shadow-lg">
+  <div class="flex items-center gap-3">
+    <div id="statusDot" class="w-3.5 h-3.5 rounded-full bg-emerald-500 animate-pulse"></div>
+    <h1 class="text-lg lg:text-xl font-bold tracking-wider text-orange-400 glow-orange">MINESAFE 3D INSPECTOR</h1>
+    <span class="hidden sm:inline text-xs px-2 py-0.5 rounded bg-slate-800 text-slate-400 border border-slate-700">Nodo: device_38A839E81F84</span>
+  </div>
+  <div class="flex flex-wrap gap-2">
+    <button id="btnOpen" class="btn on" aria-pressed="false">
+      <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 11V7a4 4 0 118 0m-4 8v2m-6 4h12a2 2 0 002-2v-6a2 2 0 00-2-2H6a2 2 0 00-2 2v6a2 2 0 002 2z"/></svg>
+      <span id="txtOpen">Abrir carcasa</span>
+    </button>
+    <button id="btnExplode" class="btn">Vista explosionada</button>
+    <button id="btnAlarm" class="btn danger">⚠ Simular alerta de gas</button>
+    <button id="btnRotate" class="btn">Auto‑rotar</button>
+    <button id="btnReturn" class="btn" title="Devuelve las piezas extraídas a su lugar">↺ Devolver piezas</button>
+    <button id="btnReset" class="btn">Restablecer vista</button>
+  </div>
+</header>
+
+<!-- Main -->
+<div class="flex flex-col lg:flex-row flex-1 relative overflow-hidden min-h-0">
+  <div id="canvas-container" class="relative flex-1 min-h-[45vh] cursor-grab active:cursor-grabbing">
+    <div class="absolute bottom-3 left-4 text-[11px] text-slate-500 pointer-events-none z-10">
+      Arrastra el fondo para orbitar · rueda para zoom · arrastra un componente o la tapa para sacarlos (Shift o clic derecho: girar) · doble clic: devolver
+    </div>
+    <div id="alarmBanner" class="hidden absolute top-4 left-1/2 -translate-x-1/2 z-10 px-4 py-2 rounded-lg bg-red-600/90 border border-red-300 text-white text-sm font-bold tracking-wide alarm-pulse">
+      ⚠ ALERTA: CONCENTRACIÓN DE CO SOBRE EL UMBRAL
+    </div>
+  </div>
+
+  <aside class="w-full lg:w-96 max-h-[48vh] lg:max-h-none glass-panel z-10 p-5 flex flex-col gap-5 overflow-y-auto border-t lg:border-t-0 lg:border-l border-slate-800/80 shadow-2xl">
+    <!-- About -->
+    <section>
+      <p class="text-xs text-slate-400 leading-relaxed"><span class="text-orange-400 font-semibold">MineSafe</span> es un nodo sensor IoT autónomo y robusto para la seguridad en faenas mineras subterráneas. Vigila de forma continua los gases nocivos, el material particulado, la temperatura y la humedad; muestra los datos en terreno (pantalla TFT) y en una interfaz web en la nube, y activa alarmas acústicas y lumínicas, de forma local o remota, ante una emergencia.</p>
+    </section>
+
+    <!-- Telemetry -->
+    <section>
+      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+        <h2 class="text-sm font-semibold text-orange-400 uppercase tracking-wide">Telemetría simulada</h2>
+        <span id="telStatus" class="text-[11px] px-2 py-0.5 rounded-full bg-emerald-900/50 text-emerald-300 border border-emerald-700/50">NORMAL</span>
+      </div>
+      <div class="grid grid-cols-2 gap-2 mt-3">
+        <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800"><div class="text-[10px] text-slate-500 uppercase">Temperatura</div><div class="text-lg font-bold text-sky-300"><span id="vTemp">--</span> <span class="text-xs font-normal text-slate-400">°C</span></div></div>
+        <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800"><div class="text-[10px] text-slate-500 uppercase">Humedad</div><div class="text-lg font-bold text-sky-300"><span id="vHum">--</span> <span class="text-xs font-normal text-slate-400">%</span></div></div>
+        <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800"><div class="text-[10px] text-slate-500 uppercase">CO</div><div id="vCoBox" class="text-lg font-bold text-amber-300"><span id="vCo">--</span> <span class="text-xs font-normal text-slate-400">ppm</span></div></div>
+        <div class="p-2.5 rounded-lg bg-slate-900/60 border border-slate-800"><div class="text-[10px] text-slate-500 uppercase">PM2.5</div><div class="text-lg font-bold text-amber-300"><span id="vPm">--</span> <span class="text-xs font-normal text-slate-400">µg/m³</span></div></div>
+      </div>
+      <label class="flex items-center gap-2 mt-3 text-xs text-slate-400 cursor-pointer">
+        <input id="chkSound" type="checkbox" class="accent-orange-500"> Sonido de alarma al simular alerta
+      </label>
+    </section>
+
+    <!-- Components -->
+    <section>
+      <div class="flex items-center justify-between pb-2 border-b border-slate-800">
+        <h2 class="text-sm font-semibold text-orange-400 uppercase tracking-wide">Componentes del nodo</h2>
+        <span class="text-[11px] text-slate-500">Clic para inspeccionar</span>
+      </div>
+      <div id="component-list" class="mt-3 space-y-2"></div>
+    </section>
+
+    <!-- Inspector -->
+    <section id="inspector-card" class="p-4 rounded-xl bg-orange-950/20 border border-orange-500/30">
+      <h3 id="insp-title" class="text-sm font-bold text-orange-400 uppercase tracking-wide">Selecciona un componente</h3>
+      <p id="insp-desc" class="text-xs text-slate-300 mt-2 leading-relaxed">Haz clic sobre un elemento de la lista o directamente sobre el modelo 3D para ver su especificación técnica y su rol en MineSafe.</p>
+      <ul id="insp-specs" class="mt-3 space-y-1 text-xs text-slate-400"></ul>
+    </section>
+
+    <div class="mt-auto text-center text-[11px] text-slate-500">Proyecto de Título MineSafe • IT / Ciberseguridad TIHI84</div>
+  </aside>
+</div>
+
+<div id="tooltip" role="tooltip">
+  <div class="tt-head"><span class="tt-dot" id="ttDot"></span><span class="tt-name" id="ttName"></span></div>
+  <span class="tt-type" id="ttType"></span>
+  <p class="tt-desc" id="ttDesc"></p>
+  <div class="tt-hint" id="ttHint">Clic para ver las especificaciones</div>
+</div>
+
+<script>
+(() => {
+  // ───────────────────────── Datos de componentes ─────────────────────────
+  const componentData = {
+    esp32: {
+      name: 'ESP32 DevKit V1', dot: 'bg-emerald-500', short: 'Cerebro del sistema: lógica en tiempo real, Wi-Fi y Firebase.',
+      title: 'ESP32 DevKit V1 (MCU central)',
+      desc: 'El cerebro del sistema. Procesa la lógica en tiempo real, gestiona la conexión Wi-Fi al hotspot y sincroniza las órdenes con Firebase RTDB. Corre FreeRTOS, lee los sensores y controla la sirena y la baliza.',
+      specs: ['CPU: Xtensa LX6 dual-core @ 240 MHz', 'Wi-Fi 802.11 b/g/n (conexión al hotspot) + Bluetooth', 'SO: FreeRTOS (tareas concurrentes)', 'Nube: Firebase Realtime Database (RTDB)']
+    },
+    tft: {
+      name: 'Pantalla ST7789 (TFT 1.3")', dot: 'bg-cyan-500', short: 'Panel gráfico local incrustado en la tapa.',
+      title: 'Pantalla ST7789 TFT LCD (1.3")',
+      desc: 'Muestra el panel gráfico principal del nodo, incrustado en la tapa de la caja impresa en 3D. Presenta en terreno temperatura, humedad, CO y PM2.5, y cambia a rojo cuando hay una alerta. En este modelo muestra telemetría simulada.',
+      specs: ['Controlador: ST7789 · 1.3" · interfaz SPI', 'Resolución típica: 240 × 240 px', 'Ubicación: tapa de la caja impresa en 3D', 'Muestra: temperatura, humedad, CO y PM2.5']
+    },
+    dht11: {
+      name: 'Sensor DHT11 (Pin D22)', dot: 'bg-blue-500', short: 'Temperatura y humedad ambiental con caché de retención.',
+      title: 'Sensor DHT11 (Pin D22 / GPIO 22)',
+      desc: 'Mide la temperatura y la humedad ambiental. Usa un algoritmo no bloqueante y una caché de retención del último valor válido, para evitar caídas a cero cuando una lectura falla o el Wi-Fi interfiere.',
+      specs: ['Pin: D22 (GPIO 22)', 'Rango: 0–50 °C · 20–90 %HR', 'Lectura no bloqueante', 'Caché de retención de la última lectura válida']
+    },
+    mq2: {
+      name: 'Sensor MQ-2 / MQ-135 (ADC 34)', dot: 'bg-amber-500', short: 'Monóxido de carbono y gases combustibles.',
+      title: 'Sensor de gas MQ-2 / MQ-135 (ADC Pin 34)',
+      desc: 'Detecta la concentración de monóxido de carbono y de gases combustibles en la galería. Su salida analógica entra por el ADC del Pin 34 del ESP32, y al superar el umbral se activan la sirena y la baliza.',
+      specs: ['Mide: monóxido de carbono (CO) y gases combustibles', 'Salida analógica → ADC Pin 34', 'Tipo: semiconductor (SnO₂) con calefactor', 'Requiere precalentamiento']
+    },
+    pm25: {
+      name: 'Sensor Sharp GP2Y10 (PM2.5)', dot: 'bg-violet-500', short: 'Polvo y material particulado por pulsos ópticos IR.',
+      title: 'Sensor de polvo Sharp GP2Y10 (PM2.5)',
+      desc: 'Mide el polvo y el material particulado en suspensión mediante pulsos ópticos infrarrojos: un LED IR ilumina el aire que pasa por el orificio del sensor y un fotodetector mide la luz dispersada por las partículas.',
+      specs: ['Modelo: Sharp GP2Y10 (sensor óptico de polvo)', 'Mide: polvo / material particulado (PM2.5)', 'Principio: pulsos ópticos infrarrojos (LED IR + fotodetector)', 'Salida: analógica, proporcional a la densidad de polvo']
+    },
+    speaker: {
+      name: 'Módulo I2S y parlante', dot: 'bg-rose-500', short: 'Sirena con tonos variables para alertar al personal.',
+      title: 'Módulo de audio I2S y parlante',
+      desc: 'Emite tonos de sirena variables para alertar al personal en terreno ante un evento crítico. Puede activarse de forma local, por los sensores, o de forma remota, desde la nube.',
+      specs: ['Interfaz: I2S (audio digital)', 'Salida: amplificador + parlante', 'Sonido: tonos de sirena variables', 'Disparo: local o remoto']
+    },
+    beacon: {
+      name: 'Baliza 12 V con MOSFET', dot: 'bg-yellow-400', short: 'Luz estroboscópica de alta visibilidad.',
+      title: 'Baliza de 12 V con MOSFET',
+      desc: 'Luz estroboscópica de alta visibilidad para señalizar el peligro. Funciona a 12 V y el ESP32 la enciende y apaga a través de un MOSFET, ya que sus pines no pueden alimentarla directamente. Complementa a la sirena con una alarma lumínica.',
+      specs: ['Alimentación: 12 V', 'Conmutación: MOSFET controlado por el ESP32', 'Efecto: luz estroboscópica de alta visibilidad', 'Disparo: local o remoto']
+    },
+    case: {
+      name: 'Carcasa impresa en 3D', dot: 'bg-orange-500', short: 'Estructura modular PETG/PLA naranja.',
+      title: 'Carcasa impresa en 3D (PETG / PLA naranja)',
+      desc: 'Estructura modular diseñada a medida e impresa en 3D. Tiene espacio para alojar la tornillería, ventilación y los componentes electrónicos de forma segura, y lleva la pantalla incrustada en la tapa.',
+      specs: ['Material: PETG / PLA naranja', 'Fabricación: impresión 3D a medida', 'Diseño modular con espacio para tornillería', 'Ventilación para la electrónica']
+    }
+  };
+
+  // Escena base
+  const container = document.getElementById('canvas-container');
+  const scene = new THREE.Scene();
+  scene.background = new THREE.Color(0x060913);
+  scene.fog = new THREE.FogExp2(0x060913, 0.014);
+
+  const camera = new THREE.PerspectiveCamera(42, 1, 0.1, 200);
+  const DEFAULT_CAM = new THREE.Vector3(11, 7, 15);
+  const DEFAULT_TARGET = new THREE.Vector3(0, 0, 0);
+  camera.position.copy(DEFAULT_CAM);
+
+  const renderer = new THREE.WebGLRenderer({ antialias: true });
+  renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2));
+  renderer.outputEncoding = THREE.sRGBEncoding;
+  renderer.shadowMap.enabled = true;
+  renderer.shadowMap.type = THREE.PCFSoftShadowMap;
+  renderer.domElement.style.cssText = 'position:absolute;inset:0;display:block;';
+  container.prepend(renderer.domElement);
+
+  const controls = new THREE.OrbitControls(camera, renderer.domElement);
+  controls.enableDamping = true;
+  controls.dampingFactor = 0.08;
+  controls.minDistance = 5;
+  controls.maxDistance = 40;
+  controls.maxPolarAngle = Math.PI * 0.52;
+  controls.autoRotateSpeed = 1.2;
+  controls.target.copy(DEFAULT_TARGET);
+
+  function resize() {
+    const w = Math.max(container.clientWidth, 1), h = Math.max(container.clientHeight, 1);
+    camera.aspect = w / h;
+    camera.updateProjectionMatrix();
+    renderer.setSize(w, h);
+  }
+  new ResizeObserver(resize).observe(container);
+  resize();
+
+  // Luces
+  scene.add(new THREE.HemisphereLight(0xdbeafe, 0x1e1b4b, 0.65));
+  const dirLight = new THREE.DirectionalLight(0xffffff, 1.0);
+  dirLight.position.set(10, 18, 14);
+  dirLight.castShadow = true;
+  dirLight.shadow.mapSize.set(2048, 2048);
+  Object.assign(dirLight.shadow.camera, { left: -14, right: 14, top: 14, bottom: -14, near: 1, far: 60 });
+  dirLight.shadow.bias = -0.0005;
+  scene.add(dirLight);
+  const blueLight = new THREE.PointLight(0x2563eb, 1.4, 40);
+  blueLight.position.set(-10, 5, -8);
+  scene.add(blueLight);
+  const orangeLight = new THREE.PointLight(0xf97316, 1.2, 40);
+  orangeLight.position.set(9, -2, 9);
+  scene.add(orangeLight);
+
+  // Suelo
+  const floor = new THREE.Mesh(new THREE.PlaneGeometry(60, 60), new THREE.ShadowMaterial({ opacity: 0.35 }));
+  floor.rotation.x = -Math.PI / 2; floor.position.y = -4.3; floor.receiveShadow = true;
+  scene.add(floor);
+  const grid = new THREE.GridHelper(60, 60, 0x1e293b, 0x111827);
+  grid.position.y = -4.29; scene.add(grid);
+
+  // ───────────────────────── Helpers de modelado ─────────────────────────
+  const mat = (color, o = {}) => new THREE.MeshStandardMaterial(Object.assign({ color, roughness: 0.5, metalness: 0.1 }, o));
+  function box(w, h, d, m, x = 0, y = 0, z = 0, parent) {
+    const mesh = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), m);
+    mesh.position.set(x, y, z); mesh.castShadow = true; mesh.receiveShadow = true;
+    if (parent) parent.add(mesh);
+    return mesh;
+  }
+  function cyl(rt, rb, h, m, x, y, z, parent, axisZ = true, seg = 32) {
+    const mesh = new THREE.Mesh(new THREE.CylinderGeometry(rt, rb, h, seg), m);
+    if (axisZ) mesh.rotation.x = Math.PI / 2;
+    mesh.position.set(x, y, z); mesh.castShadow = true; mesh.receiveShadow = true;
+    parent.add(mesh);
+    return mesh;
+  }
+  function ledMat(hex) {
+    const m = mat(hex, { emissive: hex, emissiveIntensity: 1, roughness: 0.3 });
+    m.userData.led = true; return m;
+  }
+
+  const deviceGroup = new THREE.Group();
+  scene.add(deviceGroup);
+  // luz interior: ilumina los componentes cuando se abre la carcasa
+  const innerLight = new THREE.PointLight(0xffffff, 0, 16);
+  innerLight.position.set(0, 0.5, 2.2);
+  deviceGroup.add(innerLight);
+
+  // ───────────────────────── Carcasa hueca ─────────────────────────
+  const orangeMat = mat(0xe65c00, { roughness: 0.45 });
+  const darkMat = mat(0x111827, { roughness: 0.35, metalness: 0.5 });
+  const metalMat = mat(0x94a3b8, { metalness: 0.9, roughness: 0.2 });
+  const T = 0.2;
+  const housing = new THREE.Group();
+  deviceGroup.add(housing);
+  const occluders = [];
+  [
+    [6, 8, T, 0, 0, -1.5],            // fondo
+    [T, 8, 3.2, -2.9, 0, 0],          // izquierda
+    [T, 8, 3.2, 2.9, 0, 0],           // derecha
+    [6, T, 3.2, 0, 3.9, 0],           // arriba
+    [6, T, 3.2, 0, -3.9, 0],          // abajo
+  ].forEach(([w, h, d, x, y, z]) => {
+    const m = box(w, h, d, orangeMat, x, y, z, housing);
+    m.userData.occluder = true; occluders.push(m);
+  });
+  // placa de montaje interior
+  box(5.4, 7.4, 0.05, mat(0x1f2937, { roughness: 0.7 }), 0, 0, -1.375, housing);
+  // prensaestopa inferior
+  cyl(0.28, 0.28, 0.5, darkMat, 0, -4.1, 0, housing, false);
+  // bisagras
+  [-2.2, 2.2].forEach(y => cyl(0.14, 0.14, 1.0, metalMat, -3.03, y, 1.52, housing, false, 16));
+
+  // ───────────────────────── Tapa frontal (bisagra izquierda) ─────────────────────────
+  const lidGroup = new THREE.Group();
+  lidGroup.position.set(-3, 0, 1.5);
+  deviceGroup.add(lidGroup);
+  const lidMesh = box(6, 8, T, orangeMat, 3, 0, 0, lidGroup);
+  lidMesh.userData.occluder = true; occluders.push(lidMesh);
+  // tornillos
+  [[0.35, 3.65], [5.65, 3.65], [0.35, -3.65], [5.65, -3.65]].forEach(([x, y]) => cyl(0.14, 0.14, 0.08, metalMat, x, y, 0.13, lidGroup, true, 12));
+  // cierre derecho
+  box(0.25, 0.9, 0.18, darkMat, 5.85, 0, 0.15, lidGroup);
+
+  // Pantalla TFT con textura dinámica
+  const tftGroup = new THREE.Group();
+  lidGroup.add(tftGroup);
+  box(3.7, 3.7, 0.1, mat(0x0b0f19, { roughness: 0.3, metalness: 0.4 }), 3, 0.7, 0.15, tftGroup);
+  const screenCanvas = document.createElement('canvas');
+  screenCanvas.width = screenCanvas.height = 240;
+  const sctx = screenCanvas.getContext('2d');
+  const screenTex = new THREE.CanvasTexture(screenCanvas);
+  screenTex.encoding = THREE.sRGBEncoding;
+  const screenMesh = new THREE.Mesh(new THREE.PlaneGeometry(3.2, 3.2), new THREE.MeshBasicMaterial({ map: screenTex }));
+  screenMesh.position.set(3, 0.7, 0.205);
+  tftGroup.add(screenMesh);
+
+  // Etiqueta inferior de la tapa
+  const labelCanvas = document.createElement('canvas');
+  labelCanvas.width = 512; labelCanvas.height = 96;
+  const lctx = labelCanvas.getContext('2d');
+  lctx.fillStyle = '#111827'; lctx.fillRect(0, 0, 512, 96);
+  lctx.fillStyle = '#fb923c'; lctx.font = 'bold 40px sans-serif'; lctx.textBaseline = 'middle';
+  lctx.fillText('MINESAFE', 20, 36);
+  lctx.fillStyle = '#94a3b8'; lctx.font = '24px sans-serif';
+  lctx.fillText('Nodo IoT · 38A839E81F84', 20, 72);
+  const labelTex = new THREE.CanvasTexture(labelCanvas); labelTex.encoding = THREE.sRGBEncoding;
+  const label = new THREE.Mesh(new THREE.PlaneGeometry(3.6, 0.675), new THREE.MeshBasicMaterial({ map: labelTex }));
+  label.position.set(3, -2.55, 0.105); lidGroup.add(label);
+
+  // LED de estado en la tapa
+  const lidLedMat = ledMat(0x22c55e);
+  const lidLed = new THREE.Mesh(new THREE.SphereGeometry(0.14, 16, 16), lidLedMat);
+  lidLed.position.set(3, -3.4, 0.13); lidGroup.add(lidLed);
+
+  // ───────────────────────── Componentes internos ─────────────────────────
+  const parts = {};
+  function registerPart(id, group, explode = [0, 0, 0]) {
+    const meshes = [];
+    group.traverse(o => { if (o.isMesh && !o.userData.noPick) {
+      if (o.material && !o.material.userData.led && !o.material.map) o.material = o.material.clone(); // evita que el resaltado se contagie a otros componentes
+      o.userData.part = id; meshes.push(o);
+    } });
+    parts[id] = { id, group, meshes, base: group.position.clone(), explode: new THREE.Vector3(...explode), offset: new THREE.Vector3() };
+  }
+
+  // ESP32
+  const espGroup = new THREE.Group(); espGroup.position.set(-1.0, -0.6, -1.25); deviceGroup.add(espGroup);
+  box(2.0, 3.4, 0.12, mat(0x14532d, { roughness: 0.6 }), 0, 0, 0, espGroup);
+  box(1.3, 1.5, 0.1, metalMat, 0, 0.5, 0.11, espGroup);
+  box(1.3, 0.45, 0.04, mat(0x0a0a0a), 0, 1.5, 0.08, espGroup);
+  for (let i = 0; i < 4; i++) box(1.0, 0.04, 0.02, mat(0xd4a017, { metalness: 0.8 }), 0, 1.38 + i * 0.1, 0.11, espGroup);
+  box(0.7, 0.5, 0.25, metalMat, 0, -1.55, 0.17, espGroup);
+  [-0.88, 0.88].forEach(x => box(0.12, 3.0, 0.14, mat(0x0a0a0a), x, 0, 0.12, espGroup));
+  const espLedMat = ledMat(0x3b82f6);
+  const espLed = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.14, 0.06), espLedMat);
+  espLed.position.set(0.45, -0.9, 0.09); espLed.userData.noPick = false; espGroup.add(espLed);
+  registerPart('esp32', espGroup, [-1.6, -0.3, 2.4]);
+
+  // DHT11
+  const dhtGroup = new THREE.Group(); dhtGroup.position.set(1.7, 2.4, -1.1); deviceGroup.add(dhtGroup);
+  box(1.0, 1.4, 0.5, mat(0x0284c7, { roughness: 0.55 }), 0, 0, 0, dhtGroup);
+  for (let i = 0; i < 6; i++) box(0.8, 0.04, 0.03, mat(0x0c4a6e), 0, -0.5 + i * 0.2, 0.26, dhtGroup);
+  [-0.3, -0.1, 0.1, 0.3].forEach(x => box(0.05, 0.4, 0.05, metalMat, x, -0.9, 0, dhtGroup));
+  registerPart('dht11', dhtGroup, [0.8, 1.0, 2.8]);
+
+  // MQ
+  const mqGroup = new THREE.Group(); mqGroup.position.set(1.6, 0.5, -1.25); deviceGroup.add(mqGroup);
+  box(1.5, 1.8, 0.1, mat(0x1d4ed8, { roughness: 0.55 }), 0, -0.1, 0, mqGroup);
+  cyl(0.55, 0.55, 0.7, metalMat, 0, 0.1, 0.4, mqGroup);
+  cyl(0.42, 0.42, 0.05, mat(0x475569, { metalness: 0.7 }), 0, 0.1, 0.77, mqGroup);
+  box(0.3, 0.3, 0.2, mat(0x1e40af), 0.45, -0.85, 0.12, mqGroup);
+  registerPart('mq2', mqGroup, [1.8, 0.3, 2.2]);
+
+  // Altavoz / I2S
+  const spkGroup = new THREE.Group(); spkGroup.position.set(1.5, -2.3, -1.25); deviceGroup.add(spkGroup);
+  box(1.6, 1.4, 0.1, mat(0x312e81, { roughness: 0.55 }), 0, 0, 0, spkGroup);
+  cyl(0.55, 0.55, 0.35, mat(0x0a0a0a, { roughness: 0.4 }), 0, 0, 0.25, spkGroup);
+  const cone = new THREE.Mesh(new THREE.TorusGeometry(0.38, 0.05, 12, 32), metalMat);
+  cone.position.set(0, 0, 0.44); spkGroup.add(cone);
+  // ondas de sonido (solo visibles en alerta)
+  const rings = [];
+  for (let i = 0; i < 3; i++) {
+    const r = new THREE.Mesh(new THREE.RingGeometry(0.55, 0.62, 40),
+      new THREE.MeshBasicMaterial({ color: 0xfb7185, transparent: true, opacity: 0, side: THREE.DoubleSide, depthWrite: false }));
+    r.position.set(0, 0, 0.55); r.userData.noPick = true; r.userData.phase = i / 3;
+    spkGroup.add(r); rings.push(r);
+  }
+  registerPart('speaker', spkGroup, [1.2, -1.4, 2.0]);
+
+  // Sensor Sharp GP2Y10 (PM2.5): cuerpo oscuro con orificio para el paso del aire
+  const pmGroup = new THREE.Group(); pmGroup.position.set(-1.2, 2.5, -0.95); deviceGroup.add(pmGroup);
+  box(1.8, 1.2, 0.7, mat(0x1f2937, { roughness: 0.55 }), 0, 0, 0, pmGroup);
+  box(1.84, 0.12, 0.74, mat(0xcbd5e1, { metalness: 0.85, roughness: 0.3 }), 0, 0.55, 0, pmGroup);   // tapa metálica
+  cyl(0.3, 0.3, 0.05, mat(0x020617, { roughness: 0.8 }), 0, -0.05, 0.36, pmGroup);                  // orificio
+  const pmHole = new THREE.Mesh(new THREE.TorusGeometry(0.31, 0.04, 12, 32), mat(0x64748b, { metalness: 0.8, roughness: 0.3 }));
+  pmHole.position.set(0, -0.05, 0.37); pmHole.castShadow = true; pmGroup.add(pmHole);
+  const pmIrMat = ledMat(0xff2a2a);                                                                  // LED infrarrojo (pulsos)
+  const pmIr = new THREE.Mesh(new THREE.SphereGeometry(0.05, 12, 12), pmIrMat);
+  pmIr.position.set(0.62, -0.05, 0.36); pmGroup.add(pmIr);
+  box(1.0, 0.25, 0.4, mat(0xf8fafc, { roughness: 0.6 }), 0, -0.72, 0, pmGroup);                      // conector
+  for (let i = 0; i < 6; i++) box(0.05, 0.3, 0.05, metalMat, -0.4 + i * 0.16, -0.95, 0, pmGroup);
+  const pmLedMat = ledMat(0x22c55e);                                                                 // LED de nivel
+  const pmLed = new THREE.Mesh(new THREE.SphereGeometry(0.07, 12, 12), pmLedMat);
+  pmLed.position.set(-0.7, 0.3, 0.36); pmGroup.add(pmLed);
+  // partículas de polvo que atraviesan el orificio (más densas con PM2.5 alto)
+  const PM_N = 45, pmPos = new Float32Array(PM_N * 3), pmSeeds = [];
+  for (let i = 0; i < PM_N; i++) pmSeeds.push({ a: Math.random() * Math.PI * 2, r0: 0.4 + Math.random() * 0.6, t: Math.random(), s: 0.4 + Math.random() * 0.8 });
+  const pmGeo = new THREE.BufferGeometry();
+  pmGeo.setAttribute('position', new THREE.BufferAttribute(pmPos, 3));
+  const pmPoints = new THREE.Points(pmGeo, new THREE.PointsMaterial({ color: 0xfde68a, size: 0.06, transparent: true, opacity: 0.3, depthWrite: false }));
+  pmPoints.frustumCulled = false; pmPoints.position.set(0, -0.05, 0); pmGroup.add(pmPoints);
+  registerPart('pm25', pmGroup, [-0.6, 1.2, 2.6]);
+
+  // Baliza estroboscópica 12 V (exterior, sobre la carcasa) + módulo MOSFET (interior)
+  const beaconGroup = new THREE.Group(); beaconGroup.position.set(0, 4.0, 0); deviceGroup.add(beaconGroup);
+  const beaconTop = new THREE.Group(); beaconGroup.add(beaconTop);   // cúpula + base (extraíble)
+  cyl(0.75, 0.8, 0.25, darkMat, 0, 0.125, 0, beaconTop, false, 32);
+  cyl(0.55, 0.65, 0.12, mat(0x475569, { metalness: 0.6, roughness: 0.4 }), 0, 0.31, 0, beaconTop, false, 32);
+  const domeMat = mat(0xff9f1c, { emissive: 0xff6a00, emissiveIntensity: 0.15, transparent: true, opacity: 0.88, roughness: 0.2 });
+  domeMat.userData.led = true;
+  const dome = new THREE.Mesh(new THREE.SphereGeometry(0.62, 32, 16, 0, Math.PI * 2, 0, Math.PI / 2), domeMat);
+  dome.position.set(0, 0.37, 0); dome.castShadow = true; beaconTop.add(dome);
+  const bulbMat = mat(0xfff7ed, { emissive: 0xffb347, emissiveIntensity: 0.2 });
+  bulbMat.userData.led = true;
+  const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.22, 16, 12), bulbMat);
+  bulb.position.set(0, 0.65, 0); beaconTop.add(bulb);
+  const beaconLight = new THREE.PointLight(0xff7a00, 0, 18);
+  beaconLight.position.set(0, 0.8, 0.5); beaconTop.add(beaconLight);
+  // módulo MOSFET dentro de la caja (coordenadas relativas a la baliza)
+  const mos = new THREE.Group(); mos.position.set(-1.2, -7.0, -1.3); beaconGroup.add(mos);
+  box(1.7, 1.1, 0.1, mat(0x991b1b, { roughness: 0.6 }), 0, 0, 0, mos);
+  box(0.5, 0.55, 0.2, mat(0x0a0a0a), -0.35, 0.05, 0.15, mos);          // MOSFET (encapsulado TO-220)
+  box(0.5, 0.25, 0.04, metalMat, -0.35, 0.42, 0.1, mos);               // pestaña metálica
+  box(0.45, 0.4, 0.3, mat(0x1d4ed8), 0.5, -0.3, 0.2, mos);             // borne 12 V
+  box(0.45, 0.4, 0.3, mat(0x1d4ed8), 0.5, 0.25, 0.2, mos);             // borne baliza
+  const mosLedMat = ledMat(0xef4444);
+  const mosLed = new THREE.Mesh(new THREE.SphereGeometry(0.06, 12, 12), mosLedMat);
+  mosLed.position.set(-0.7, -0.4, 0.08); mos.add(mosLed);
+  registerPart('beacon', beaconGroup, [0, 1.0, 2.0]);
+
+  // TFT también es un componente seleccionable (no se separa en la vista explosionada)
+  registerPart('tft', tftGroup, [0, 0, 0]);
+
+  // Carcasa: ranuras de ventilación + registro como componente seleccionable
+  for (let i = 0; i < 6; i++) box(0.06, 0.12, 1.4, darkMat, 3.0, -1.6 + i * 0.4, 0, housing);
+  const caseMeshes = [];
+  [housing, lidGroup].forEach(g => g.traverse(o => {
+    if (o.isMesh && !o.userData.part && !o.userData.noPick) {
+      if (o.material && !o.material.userData.led && !o.material.map) o.material = o.material.clone();
+      o.userData.part = 'case'; caseMeshes.push(o);
+    }
+  }));
+  parts.case = { id: 'case', group: housing, meshes: caseMeshes, base: housing.position.clone(), explode: new THREE.Vector3(0, 0, 0) };
+
+  // Cables
+  const wires = new THREE.Group(); deviceGroup.add(wires);
+  function wire(pts, color) {
+    const c = new THREE.CatmullRomCurve3(pts.map(p => new THREE.Vector3(...p)));
+    const m = new THREE.Mesh(new THREE.TubeGeometry(c, 32, 0.045, 8, false), mat(color, { roughness: 0.6 }));
+    m.castShadow = true; wires.add(m);
+  }
+  wire([[-0.1, 0.4, -1.1], [0.5, 1.3, -0.95], [1.4, 2.0, -1.0]], 0xef4444);
+  wire([[0.0, 0.2, -1.1], [0.7, 0.4, -0.95], [1.3, 0.5, -1.0]], 0x3b82f6);
+  wire([[-0.05, -0.3, -1.1], [0.6, -1.4, -0.95], [1.2, -2.2, -1.1]], 0xfacc15);
+  wire([[-0.2, 0.5, -1.1], [0.9, 1.0, -0.85], [1.9, 2.0, -1.0]], 0x10b981);
+  wire([[-1.3, 1.1, -1.1], [-1.5, 1.6, -1.0], [-1.8, 2.3, -1.05]], 0x06b6d4);
+  wire([[-1.5, -2.85, -1.1], [-2.55, -2.0, -1.0], [-2.6, 0.5, -1.0], [-2.5, 3.55, -1.0], [-1.0, 3.7, -0.7], [0, 3.85, -0.2]], 0xf1f5f9);
+
+  // ───────────────────────── Estado y telemetría ─────────────────────────
+  const ALERT_CO = 50;
+  const state = { open: false, explode: false, alarm: false, selected: null, hover: null, page: 0 };
+  const tele = { temp: 23.4, hum: 48, co: 4, pm: 11 };
+  const $ = id => document.getElementById(id);
+
+  function stepTelemetry() {
+    const rnd = s => (Math.random() - 0.5) * s;
+    tele.temp = THREE.MathUtils.clamp(tele.temp + rnd(0.3), 20, 28);
+    tele.hum = THREE.MathUtils.clamp(tele.hum + rnd(1.0), 35, 65);
+    const coT = state.alarm ? 120 : 4, pmT = state.alarm ? 85 : 11;
+    tele.co += (coT - tele.co) * (state.alarm ? 0.35 : 0.2) + rnd(1.2);
+    tele.pm += (pmT - tele.pm) * 0.2 + rnd(0.8);
+    tele.co = Math.max(0, tele.co); tele.pm = Math.max(0, tele.pm);
+    $('vTemp').textContent = tele.temp.toFixed(1);
+    $('vHum').textContent = Math.round(tele.hum);
+    $('vCo').textContent = Math.round(tele.co);
+    $('vPm').textContent = Math.round(tele.pm);
+    const over = tele.co > ALERT_CO;
+    $('vCoBox').className = 'text-lg font-bold ' + (over ? 'text-red-400' : 'text-amber-300');
+    $('telStatus').textContent = over ? 'ALERTA GAS' : 'NORMAL';
+    $('telStatus').className = 'text-[11px] px-2 py-0.5 rounded-full border ' +
+      (over ? 'bg-red-900/60 text-red-200 border-red-600 alarm-pulse' : 'bg-emerald-900/50 text-emerald-300 border-emerald-700/50');
+    $('statusDot').className = 'w-3.5 h-3.5 rounded-full animate-pulse ' + (over ? 'bg-red-500' : 'bg-emerald-500');
+    $('alarmBanner').classList.toggle('hidden', !over);
+    state.over = over;
+  }
+  setInterval(stepTelemetry, 1000);
+  stepTelemetry();
+  setInterval(() => { state.page = (state.page + 1) % 2; }, 4000);
+
+  function drawScreen() {
+    const c = sctx, over = !!state.over;
+    const flash = over && Math.floor(performance.now() / 400) % 2 === 0;
+    c.fillStyle = over ? (flash ? '#7f1d1d' : '#450a0a') : '#04101c';
+    c.fillRect(0, 0, 240, 240);
+    c.fillStyle = over ? '#dc2626' : '#ea580c'; c.fillRect(0, 0, 240, 36);
+    c.fillStyle = '#fff'; c.textBaseline = 'middle'; c.font = 'bold 19px sans-serif'; c.textAlign = 'left';
+    c.fillText('MINESAFE', 10, 18);
+    c.textAlign = 'right'; c.font = '14px sans-serif'; c.fillText('Wi‑Fi ●', 230, 18);
+    c.textAlign = 'left';
+    const row = (label, val, unit, y, color) => {
+      c.fillStyle = '#94a3b8'; c.font = '14px sans-serif'; c.fillText(label, 14, y);
+      c.fillStyle = color; c.font = 'bold 38px sans-serif'; c.fillText(val, 14, y + 34);
+      const w = c.measureText(val).width;
+      c.fillStyle = '#94a3b8'; c.font = '16px sans-serif'; c.fillText(unit, 20 + w, y + 40);
+    };
+    if (over) {
+      c.fillStyle = '#fff'; c.textAlign = 'center';
+      c.font = 'bold 30px sans-serif'; c.fillText('¡ALERTA!', 120, 75);
+      c.font = '16px sans-serif'; c.fillText('GAS PELIGROSO', 120, 105);
+      c.fillStyle = '#fde047'; c.font = 'bold 54px sans-serif'; c.fillText(Math.round(tele.co), 120, 160);
+      c.fillStyle = '#fecaca'; c.font = '16px sans-serif'; c.fillText('ppm CO', 120, 195);
+      c.fillStyle = '#fff'; c.font = 'bold 15px sans-serif'; c.fillText('EVACUAR ZONA', 120, 222);
+      c.textAlign = 'left';
+    } else if (state.page === 0) {
+      c.fillStyle = '#38bdf8'; c.font = 'bold 13px sans-serif'; c.fillText('ENTORNO', 14, 56);
+      row('Temperatura', tele.temp.toFixed(1), '°C', 82, '#7dd3fc');
+      row('Humedad', String(Math.round(tele.hum)), '%', 150, '#7dd3fc');
+    } else {
+      c.fillStyle = '#fbbf24'; c.font = 'bold 13px sans-serif'; c.fillText('CALIDAD DEL AIRE', 14, 56);
+      row('Monóxido (CO)', String(Math.round(tele.co)), 'ppm', 82, '#fcd34d');
+      row('Partículas PM2.5', String(Math.round(tele.pm)), 'µg/m³', 150, '#fcd34d');
+    }
+    if (!over) {
+      c.fillStyle = state.page === 0 ? '#fb923c' : '#334155'; c.fillRect(100, 228, 16, 4);
+      c.fillStyle = state.page === 1 ? '#fb923c' : '#334155'; c.fillRect(124, 228, 16, 4);
+    }
+    screenTex.needsUpdate = true;
+  }
+  setInterval(drawScreen, 200);
+  drawScreen();
+
+  // ───────────────────────── Sonido ─────────────────────────
+  let audioCtx = null, beepTimer = null;
+  function beep() {
+    if (!audioCtx) return;
+    const o = audioCtx.createOscillator(), g = audioCtx.createGain();
+    o.type = 'square'; o.frequency.value = 880; g.gain.value = 0.04;
+    o.connect(g); g.connect(audioCtx.destination);
+    o.start(); o.stop(audioCtx.currentTime + 0.18);
+  }
+  function syncSound() {
+    clearInterval(beepTimer); beepTimer = null;
+    if (state.alarm && $('chkSound').checked) {
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      beep(); beepTimer = setInterval(beep, 600);
+    }
+  }
+  $('chkSound').addEventListener('change', syncSound);
+
+  // ───────────────────────── UI: lista, inspector, botones ─────────────────────────
+  const list = $('component-list');
+  Object.entries(componentData).forEach(([id, d]) => {
+    const el = document.createElement('div');
+    el.className = 'comp-card p-3 rounded-xl bg-slate-900/60 border border-slate-800 hover:border-orange-500/50 cursor-pointer';
+    el.dataset.id = id;
+    el.innerHTML = `<div class="flex justify-between items-center"><span class="font-bold text-sm text-slate-200">${d.name}</span><span class="w-2.5 h-2.5 rounded-full ${d.dot}"></span></div><p class="text-xs text-slate-400 mt-1">${d.short}</p>`;
+    el.addEventListener('click', () => selectPart(state.selected === id ? null : id, true));
+    list.appendChild(el);
+  });
+
+  function applyHighlights() {
+    Object.values(parts).forEach(p => {
+      const sel = state.selected === p.id, hov = state.hover === p.id;
+      p.meshes.forEach(m => {
+        const mt = m.material;
+        if (!mt || !mt.emissive || mt.userData.led) return;
+        if (sel) { mt.emissive.setHex(0xff6a00); mt.emissiveIntensity = 0.45; }
+        else if (hov) { mt.emissive.setHex(0xffa040); mt.emissiveIntensity = 0.3; }
+        else { mt.emissive.setHex(0x000000); mt.emissiveIntensity = 1; }
+      });
+    });
+  }
+
+  function selectPart(id, focus) {
+    state.selected = id;
+    document.querySelectorAll('.comp-card').forEach(el => el.classList.toggle('active', el.dataset.id === id));
+    const d = id && componentData[id];
+    $('insp-title').textContent = d ? d.title : 'Selecciona un componente';
+    $('insp-desc').textContent = d ? d.desc : 'Haz clic sobre un elemento de la lista o directamente sobre el modelo 3D para ver su especificación técnica y su rol en MineSafe.';
+    $('insp-specs').innerHTML = d ? d.specs.map(s => `<li class="flex gap-2"><span class="text-orange-500">▸</span><span>${s}</span></li>`).join('') : '';
+    applyHighlights();
+    if (id && focus) {
+      if (!['tft', 'case', 'beacon'].includes(id) && !state.open) setOpen(true);
+      focusOn(id);
+    }
+  }
+
+  function setOpen(v) {
+    state.open = v;
+    $('txtOpen').textContent = v ? 'Cerrar carcasa' : 'Abrir carcasa';
+    $('btnOpen').setAttribute('aria-pressed', String(v));
+    $('btnOpen').classList.toggle('on', !v);
+  }
+  $('btnOpen').addEventListener('click', () => {
+    if (state.open && state.explode) setExplode(false);
+    if (state.open) movables.forEach(m => { m.returning = true; });
+    else if (lidFree) lidMv.returning = true;
+    setOpen(!state.open);
+  });
+  function setExplode(v) {
+    state.explode = v;
+    $('btnExplode').classList.toggle('on', v);
+    if (v) setOpen(true);
+  }
+  $('btnExplode').addEventListener('click', () => setExplode(!state.explode));
+  $('btnAlarm').addEventListener('click', () => {
+    state.alarm = !state.alarm;
+    $('btnAlarm').classList.toggle('on', state.alarm);
+    $('btnAlarm').textContent = state.alarm ? '■ Detener alerta' : '⚠ Simular alerta de gas';
+    syncSound();
+  });
+  $('btnRotate').addEventListener('click', () => {
+    controls.autoRotate = !controls.autoRotate;
+    $('btnRotate').classList.toggle('on', controls.autoRotate);
+  });
+  $('btnReset').addEventListener('click', () => {
+    selectPart(null, false);
+    flyTo(DEFAULT_TARGET, DEFAULT_CAM);
+  });
+  setOpen(false);
+
+  // ───────────────────────── Animación de cámara ─────────────────────────
+  let fly = null;
+  const ease = t => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+  function flyTo(target, pos) {
+    fly = { t: 0, fromT: controls.target.clone(), toT: target.clone(), fromP: camera.position.clone(), toP: pos.clone() };
+  }
+  controls.addEventListener('start', () => { fly = null; });
+
+  function focusOn(id) {
+    const p = parts[id]; if (!p) return;
+    const target = new THREE.Vector3();
+    if (id === 'tft') target.set(0, 0.7, 1.6);
+    else if (id === 'case') target.set(0, 0, 0);
+    else p.group.getWorldPosition(target).add(p.explode.clone().multiplyScalar(state.explode ? 1 : 0));
+    const dir = new THREE.Vector3(0.55, 0.3, 1).normalize();
+    const dist = id === 'tft' ? 9 : id === 'case' ? 16 : 10;
+    flyTo(target, target.clone().add(dir.multiplyScalar(dist)));
+  }
+
+  // ───────────────────────── Selección por clic / hover ─────────────────────────
+  const raycaster = new THREE.Raycaster();
+  const ndc = new THREE.Vector2();
+  function pickHit(e) {
+    const r = renderer.domElement.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    const objs = occluders.slice();
+    Object.values(parts).forEach(p => objs.push(...p.meshes));
+    return raycaster.intersectObjects(objs, false)[0] || null;
+  }
+  function pick(e) {
+    const h = pickHit(e);
+    return h && h.object.userData.part ? h.object.userData.part : null;
+  }
+
+  // Tarjeta flotante: qué sensor es y qué hace
+  const tipInfo = {
+    esp32:   { color: '#10b981', type: 'Microcontrolador', what: 'Cerebro del nodo: procesa la lógica en tiempo real, se conecta por Wi-Fi al hotspot y sincroniza las órdenes con Firebase.' },
+    tft:     { color: '#06b6d4', type: 'Pantalla ST7789', what: 'Muestra en terreno temperatura, humedad, CO y PM2.5, y se pone en rojo ante una alerta.' },
+    dht11:   { color: '#3b82f6', type: 'Sensor · Pin D22', what: 'Mide la temperatura y la humedad del ambiente, con caché para no caer a cero si una lectura falla.' },
+    mq2:     { color: '#f59e0b', type: 'Sensor de gas · ADC 34', what: 'Detecta monóxido de carbono y gases combustibles; dispara las alarmas cuando supera el umbral.' },
+    pm25:    { color: '#8b5cf6', type: 'Sensor de polvo · Sharp GP2Y10', what: 'Mide el polvo y material particulado (PM2.5) en suspensión mediante pulsos ópticos infrarrojos.' },
+    speaker: { color: '#f43f5e', type: 'Módulo I2S + parlante', what: 'Emite tonos de sirena variables para alertar al personal en terreno.' },
+    beacon:  { color: '#facc15', type: 'Baliza 12 V + MOSFET', what: 'Luz estroboscópica de alta visibilidad que señala peligro; el ESP32 la enciende mediante un MOSFET.' },
+    case:    { color: '#f97316', type: 'Carcasa impresa en 3D', what: 'Estructura modular en PETG/PLA naranja que aloja y protege la electrónica, con ventilación y espacio para tornillería.' }
+  };
+  const tip = $('tooltip');
+  let tipId = null, tipTimer = null;
+  function showTip(id, x, y, canDrag) {
+    const info = tipInfo[id]; if (!info) return hideTip();
+    const key = id + (canDrag ? '*' : '');
+    if (tipId !== key) {
+      tipId = key;
+      $('ttName').textContent = componentData[id].name;
+      $('ttDot').style.background = info.color; $('ttDot').style.color = info.color;
+      $('ttType').textContent = info.type;
+      $('ttDesc').textContent = info.what;
+      $('ttHint').textContent = canDrag
+        ? 'Arrastra para sacarlo · Shift o clic derecho + arrastrar para girarlo · doble clic para devolverlo'
+        : 'Clic para ver las especificaciones';
+      $('ttHint').style.display = 'block';
+    }
+    const w = tip.offsetWidth, h = tip.offsetHeight, m = 8;
+    let left = x + 16, top = y + 16;
+    if (left + w > window.innerWidth - m) left = x - w - 16;
+    if (top + h > window.innerHeight - m) top = y - h - 16;
+    tip.style.left = Math.max(m, left) + 'px'; tip.style.top = Math.max(m, top) + 'px';
+    tip.classList.add('show');
+  }
+  function hideTip() { tipId = null; clearTimeout(tipTimer); tip.classList.remove('show'); }
+
+  const dom = renderer.domElement;
+  dom.style.touchAction = 'none';
+  const DRAGGABLE = ['esp32', 'dht11', 'mq2', 'pm25', 'speaker', 'beacon'];
+
+  // Piezas que se pueden sacar de la caja con el mouse
+  const movables = [];
+  ['esp32', 'dht11', 'mq2', 'pm25', 'speaker'].forEach(id => movables.push({ obj: parts[id].group, part: parts[id], returning: false }));
+  [beaconTop, mos].forEach(o => movables.push({ obj: o, home: o.position.clone(), returning: false }));
+  const lidMv = { obj: lidGroup, home: lidGroup.position.clone(), lid: true, returning: false };
+  movables.push(lidMv);
+  let lidFree = false;   // true cuando la tapa está fuera de la bisagra
+  function movableFor(hit) {
+    let o = hit.object;
+    while (o) {
+      const m = movables.find(m => m.obj === o);
+      if (m) return m;
+      o = o.parent;
+    }
+    return null;
+  }
+  const dragPlane = new THREE.Plane(), dragPt = new THREE.Vector3(), dragOff = new THREE.Vector3();
+  let drag = null;
+
+  // Fase de captura: si se toca una pieza extraíble, el arrastre la mueve y la cámara no orbita
+  container.addEventListener('pointerdown', e => {
+    if (e.target !== dom) return;
+    hideTip();
+    if (e.button !== 0 && e.button !== 2) return;
+    const hit = pickHit(e);
+    const mv = hit ? movableFor(hit) : null;
+    if (!mv) return;
+    e.stopPropagation();
+    mv.returning = false; fly = null;
+    const world = new THREE.Vector3(); mv.obj.getWorldPosition(world);
+    dragPlane.setFromNormalAndCoplanarPoint(camera.getWorldDirection(new THREE.Vector3()), world);
+    if (!raycaster.ray.intersectPlane(dragPlane, dragPt)) return;
+    dragOff.copy(world).sub(dragPt);
+    drag = { mv, id: hit.object.userData.part, rotate: e.shiftKey || e.button === 2, x: e.clientX, y: e.clientY, sx: e.clientX, sy: e.clientY, moved: false };
+    dom.setPointerCapture(e.pointerId);
+    dom.style.cursor = 'grabbing';
+  }, true);
+
+  function dragMove(e) {
+    const dx = e.clientX - drag.x, dy = e.clientY - drag.y;
+    drag.x = e.clientX; drag.y = e.clientY;
+    if (!drag.moved) {
+      if (Math.hypot(e.clientX - drag.sx, e.clientY - drag.sy) < 4) return;
+      drag.moved = true;
+      if (drag.mv.lid) lidFree = true;
+      else if (state.selected !== drag.id) selectPart(drag.id, false);
+    }
+    const o = drag.mv.obj;
+    if (drag.rotate || e.shiftKey) {
+      if (drag.mv.lid) {
+        // la tapa gira sobre su centro: se compensa el desplazamiento del pivote
+        const c = new THREE.Vector3(3, 0, 0);
+        o.updateMatrixWorld(true);
+        const before = o.localToWorld(c.clone());
+        o.rotation.y += dx * 0.01; o.rotation.x += dy * 0.01;
+        o.updateMatrixWorld(true);
+        o.position.add(before.sub(o.localToWorld(c.clone())));
+      } else {
+        o.rotation.y += dx * 0.01;
+        o.rotation.x += dy * 0.01;
+      }
+      return;
+    }
+    const r = dom.getBoundingClientRect();
+    ndc.set(((e.clientX - r.left) / r.width) * 2 - 1, -((e.clientY - r.top) / r.height) * 2 + 1);
+    raycaster.setFromCamera(ndc, camera);
+    if (!raycaster.ray.intersectPlane(dragPlane, dragPt)) return;
+    const w = dragPt.clone().add(dragOff);
+    w.y = Math.max(w.y, drag.mv.lid ? -0.3 : -4.0);   // no atraviesa el suelo
+    w.clampLength(0, 18);        // no se aleja demasiado
+    const local = o.parent.worldToLocal(w);
+    const p = drag.mv.part;
+    if (p) p.offset.copy(local).sub(p.base).addScaledVector(p.explode, -explodeK);
+    else o.position.copy(local);
+  }
+
+  let down = null;
+  dom.addEventListener('pointerdown', e => { down = { x: e.clientX, y: e.clientY }; });
+  dom.addEventListener('pointerup', e => {
+    if (drag) {
+      const d = drag; drag = null;
+      try { dom.releasePointerCapture(e.pointerId); } catch (_) {}
+      dom.style.cursor = 'grab';
+      if (!d.moved) selectPart(d.id, false);
+      tipId = null;
+      return;
+    }
+    if (down && Math.hypot(e.clientX - down.x, e.clientY - down.y) < 5) {
+      const id = pick(e);
+      selectPart(id, false);
+      tipId = null; // fuerza refrescar la tarjeta
+      // en pantallas táctiles no hay "hover": mostrar la tarjeta unos segundos al tocar
+      if (id && e.pointerType === 'touch') {
+        showTip(id, e.clientX, e.clientY);
+        clearTimeout(tipTimer); tipTimer = setTimeout(hideTip, 4000);
+      }
+    }
+    down = null;
+  });
+  dom.addEventListener('pointermove', e => {
+    if (drag) { dragMove(e); return; }
+    if (e.buttons || e.pointerType === 'touch') return;
+    const hit = pickHit(e);
+    const id = hit && hit.object.userData.part ? hit.object.userData.part : null;
+    if (id !== state.hover) { state.hover = id; applyHighlights(); }
+    const mv = hit ? movableFor(hit) : null;
+    dom.style.cursor = !id ? '' : mv ? 'grab' : 'pointer';
+    if (id) showTip(id, e.clientX, e.clientY, !!mv); else hideTip();
+  });
+  dom.addEventListener('pointerleave', () => { if (drag) return; hideTip(); if (state.hover) { state.hover = null; applyHighlights(); } });
+  dom.addEventListener('dblclick', e => {
+    const hit = pickHit(e);
+    const mv = hit ? movableFor(hit) : null;
+    if (mv) mv.returning = true;
+  });
+  $('btnReturn').addEventListener('click', () => movables.forEach(m => { m.returning = true; }));
+
+  // ───────────────────────── Bucle de animación ─────────────────────────
+  const clock = new THREE.Clock();
+  let explodeK = 0;
+  const OPEN_ANGLE = -Math.PI * 0.72;
+
+  function animate() {
+    requestAnimationFrame(animate);
+    const dt = Math.min(clock.getDelta(), 0.05), t = clock.elapsedTime;
+
+    // Tapa
+    const targetAngle = state.open ? OPEN_ANGLE : 0;
+    if (!lidFree) lidGroup.rotation.y += (targetAngle - lidGroup.rotation.y) * Math.min(1, dt * 6);
+    innerLight.intensity += ((state.open ? 1.8 : 0) - innerLight.intensity) * Math.min(1, dt * 5);
+
+    // Explosión
+    explodeK += ((state.explode ? 1 : 0) - explodeK) * Math.min(1, dt * 5);
+    Object.values(parts).forEach(p => {
+      p.group.position.copy(p.base).addScaledVector(p.explode, explodeK);
+      if (p.offset) p.group.position.add(p.offset);
+    });
+    // devolver piezas extraídas a su sitio (doble clic o botón)
+    movables.forEach(m => {
+      if (!m.returning) return;
+      if (m.lid && !lidFree) { m.returning = false; return; }
+      const k = Math.min(1, dt * 7), o = m.obj;
+      const ty = m.lid ? (state.open ? OPEN_ANGLE : 0) : 0;
+      if (m.part) m.part.offset.multiplyScalar(1 - k); else o.position.lerp(m.home, k);
+      o.rotation.x *= 1 - k; o.rotation.z *= 1 - k; o.rotation.y += (ty - o.rotation.y) * k;
+      const dist = m.part ? m.part.offset.length() : o.position.distanceTo(m.home);
+      if (dist < 0.01 && Math.abs(o.rotation.x) + Math.abs(o.rotation.z) + Math.abs(o.rotation.y - ty) < 0.01) {
+        if (m.part) m.part.offset.set(0, 0, 0); else o.position.copy(m.home);
+        o.rotation.set(0, ty, 0); m.returning = false;
+        if (m.lid) lidFree = false;
+      }
+    });
+    const anyOut = movables.some(m => !m.lid && (m.returning ||
+      (m.part ? m.part.offset.lengthSq() : m.obj.position.distanceToSquared(m.home)) > 1e-4 ||
+      Math.abs(m.obj.rotation.x) + Math.abs(m.obj.rotation.y) > 1e-3));
+    wires.visible = explodeK < 0.05 && !anyOut;   // los cables se ocultan al extraer piezas
+
+    // Vuelo de cámara
+    if (fly) {
+      fly.t = Math.min(1, fly.t + dt / 0.9);
+      const k = ease(fly.t);
+      controls.target.lerpVectors(fly.fromT, fly.toT, k);
+      camera.position.lerpVectors(fly.fromP, fly.toP, k);
+      if (fly.t >= 1) fly = null;
+    }
+
+    // LEDs y efectos de alerta
+    const over = !!state.over, blink = Math.floor(t * (over ? 4 : 1.5)) % 2 === 0;
+    espLedMat.emissive.setHex(over ? 0xef4444 : 0x3b82f6);
+    espLedMat.color.setHex(over ? 0xef4444 : 0x3b82f6);
+    espLedMat.emissiveIntensity = blink ? 1.2 : 0.1;
+    lidLedMat.emissive.setHex(over ? 0xef4444 : 0x22c55e);
+    lidLedMat.color.setHex(over ? 0xef4444 : 0x22c55e);
+    lidLedMat.emissiveIntensity = over ? (blink ? 1.5 : 0.1) : 0.9;
+    orangeLight.intensity = over ? 1.2 + Math.abs(Math.sin(t * 6)) * 2.5 : 1.2;
+    orangeLight.color.setHex(over ? 0xff2a2a : 0xf97316);
+    rings.forEach(r => {
+      if (!over) { r.material.opacity = 0; return; }
+      const k = (t * 1.2 + r.userData.phase) % 1;
+      r.scale.setScalar(1 + k * 2.2);
+      r.material.opacity = (1 - k) * 0.8;
+    });
+
+    // Sensor Sharp GP2Y10 (PM2.5): LED IR pulsante, partículas y LED de nivel
+    pmIrMat.emissiveIntensity = Math.floor(t * 20) % 2 === 0 ? 1.4 : 0.15;
+    const pmLevel = tele.pm > 55 ? 2 : tele.pm > 35 ? 1 : 0;
+    const pmCol = [0x22c55e, 0xf59e0b, 0xef4444][pmLevel];
+    pmLedMat.emissive.setHex(pmCol); pmLedMat.color.setHex(pmCol);
+    pmLedMat.emissiveIntensity = pmLevel === 2 ? (blink ? 1.5 : 0.1) : 0.9;
+    for (let i = 0; i < PM_N; i++) {
+      const p = pmSeeds[i];
+      p.t += dt * 0.3 * p.s * (1 + tele.pm / 40);
+      if (p.t > 1) p.t -= 1;
+      const r = p.r0 * (0.9 * (1 - p.t) + 0.08);
+      pmPos[i * 3] = r * Math.cos(p.a);
+      pmPos[i * 3 + 1] = r * Math.sin(p.a);
+      pmPos[i * 3 + 2] = 0.4 + (1 - p.t) * 0.55;
+    }
+    pmGeo.attributes.position.needsUpdate = true;
+    pmPoints.material.opacity = THREE.MathUtils.clamp(0.15 + tele.pm / 70, 0.15, 1);
+    pmPoints.material.size = 0.05 + Math.min(tele.pm, 100) / 1200;
+
+    // Baliza 12 V: estrobo en alerta (el MOSFET la conmuta)
+    const strobe = over && Math.floor(t * 8) % 2 === 0;
+    domeMat.emissiveIntensity = strobe ? 2.4 : 0.15;
+    bulbMat.emissiveIntensity = strobe ? 2.5 : 0.2;
+    beaconLight.intensity = strobe ? 6 : 0;
+    mosLedMat.emissiveIntensity = strobe ? 1.6 : 0.1;
+
+    controls.update();
+    renderer.render(scene, camera);
+  }
+  animate();
+})();
+</script>
+</body>
+</html>

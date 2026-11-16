@@ -201,4 +201,19 @@ assert.ok(rtdbRulesSrc.includes("/isActive').val() !== false"), 'database.rules.
 assert.ok(!firestoreRulesSrc.includes("incoming().role == 'operador'"), 'firestore.rules disallows client self-registration on /users');
 
 console.log('✅ 4. Static P013 separation, no-self-registration & privacy invariants passed');
-console.log('\n🎉 All P013 checks passed!');
+
+// -----------------------------------------------------------------------------
+// 5. Visor 3D Window Visibility Controls (Role & Individual Overrides)
+// -----------------------------------------------------------------------------
+const superAdminCtrlSrc = readSrc('src/components/SuperAdminControlView.tsx');
+const navbarSrc = readSrc('src/components/Navbar.tsx');
+const appSrc = readSrc('src/App.tsx');
+
+assert.ok(superAdminCtrlSrc.includes("id: 'visor_3d'"), 'SuperAdminControlView lists visor_3d in controllable windows');
+assert.ok(navbarSrc.includes("id: 'visor_3d'"), 'Navbar includes visor_3d tab filtered by visibility config');
+assert.ok(appSrc.includes("lazy(() => import('./components/Node3DInspectorView'))"), 'App.tsx lazy-loads Node3DInspectorView');
+assert.ok(appSrc.includes("currentTab === 'visor_3d'"), 'App.tsx renders visor_3d inside permission-gated branch');
+
+console.log('✅ 5. Inspector 3D integration & visibility control wiring passed');
+console.log('\n🎉 All P013 + 3D Inspector checks passed!');
+

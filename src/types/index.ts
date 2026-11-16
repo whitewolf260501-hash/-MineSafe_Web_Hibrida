@@ -19,9 +19,12 @@ export interface TelemetryHistoryPoint {
   humedad: number | null;
 }
 
+export type TelemetryRangeKey = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom';
+
 export interface AlertAttachment {
   id: string;
   alertId: string;
+  organizationId?: string;
   fileName: string;
   contentType: string;
   sizeBytes: number;
@@ -261,7 +264,8 @@ export type ControllableTab =
   | 'equipos'
   | 'reportes'
   | 'faenas'
-  | 'usuarios';
+  | 'usuarios'
+  | 'visor_3d';
 
 export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
 
@@ -387,6 +391,7 @@ export interface DeviceThresholdsConfig {
 
 export interface AlertEventRecord {
   id: string;
+  organizationId?: string;
   dispositivo_id: string;
   dispositivo_nombre: string;
   sector_nombre: string;

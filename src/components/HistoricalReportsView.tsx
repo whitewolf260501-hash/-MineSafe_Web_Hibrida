@@ -1,10 +1,11 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import {
   BarChart3,
   Download,
   FileSpreadsheet,
   CheckCircle,
-  Info
+  Info,
+  Calendar
 } from 'lucide-react';
 import {
   TelemetryVariable,
@@ -12,18 +13,28 @@ import {
   TelemetryHistoryPoint,
   AlertEventRecord,
   SafetyAlert,
+  TelemetryRangeKey,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
+
+export interface TelemetryRangeWindow {
+  key: TelemetryRangeKey;
+  startMs: number;
+  endMs: number;
+}
 
 interface HistoricalReportsViewProps {
   variables: TelemetryVariable[];
   currentSite: MiningSite;
+  activeDeviceId?: string;
+  activeDeviceName?: string;
   telemetryHistory?: TelemetryHistoryPoint[];
   alertEvents?: AlertEventRecord[];
   alerts?: SafetyAlert[];
+  onRangeChange?: (window: TelemetryRangeWindow) => void;
 }
 
-const RANGE_HOURS: Record<'1h' | '6h' | '24h' | '7d' | '30d', number> = {
+export const RANGE_HOURS: Record<Exclude<TelemetryRangeKey, 'custom'>, number> = {
   '1h': 1,
   '6h': 6,
   '24h': 24,
@@ -31,22 +42,136 @@ const RANGE_HOURS: Record<'1h' | '6h' | '24h' | '7d' | '30d', number> = {
   '30d': 24 * 30,
 };
 
+export function computeTelemetryWindow(
+  key: TelemetryRangeKey,
+  customStartDate?: string,
+  customEndDate?: string,
+  nowMs: number = Date.now()
+): TelemetryRangeWindow {
+  if (key === 'custom') {
+    const startParsed = customStartDate ? new Date(`${customStartDate}T00:00:00`).getTime() : NaN;
+    const endParsed = customEndDate ? new Date(`${customEndDate}T23:59:59.999`).getTime() : NaN;
+    const endMs = Number.isFinite(endParsed) ? endParsed : nowMs;
+    const startMs = Number.isFinite(startParsed)
+      ? Math.min(startParsed, endMs)
+      : endMs - 24 * 3600 * 1000;
+    return { key: 'custom', startMs, endMs };
+  }
+  const hours = RANGE_HOURS[key] || 24;
+  return {
+    key,
+    startMs: nowMs - hours * 3600 * 1000,
+    endMs: nowMs,
+  };
+}
+
+export function escapeCsvCell(value: unknown): string {
+  const str = String(value ?? '');
+  if (/[",\r\n]/.test(str)) {
+    return `"${str.replace(/"/g, '""')}"`;
+  }
+  return str;
+}
+
+export interface CsvTelemetryRow {
+  timestamp: number;
+  value: number;
+}
+
+export function buildTelemetryCsvContent(params: {
+  rows: CsvTelemetryRow[];
+  deviceId: string;
+  variableName: string;
+  unit: string;
+  siteName: string;
+  sectorName: string;
+}): string {
+  const sorted = [...params.rows].sort((a, b) => a.timestamp - b.timestamp);
+  const headers = [
+    'Dispositivo',
+    'Marca_Temporal_ISO',
+    'Fecha_Hora_Local',
+    'Variable',
+    'Valor_Registrado',
+    'Unidad',
+    'Faena',
+    'Sector',
+  ].join(',');
+
+  const lines = sorted.map((pt) => {
+    const validTs = Number.isFinite(pt.timestamp) && pt.timestamp > 0;
+    const iso = validTs ? new Date(pt.timestamp).toISOString() : '';
+    const localStr = validTs
+      ? new Date(pt.timestamp).toLocaleString('es-CL', {
+          day: '2-digit',
+          month: '2-digit',
+          year: 'numeric',
+          hour: '2-digit',
+          minute: '2-digit',
+          second: '2-digit',
+        })
+      : 'Lectura Actual';
+    return [
+      escapeCsvCell(params.deviceId),
+      escapeCsvCell(iso),
+      escapeCsvCell(localStr),
+      escapeCsvCell(params.variableName),
+      escapeCsvCell(pt.value),
+      escapeCsvCell(params.unit),
+      escapeCsvCell(params.siteName),
+      escapeCsvCell(params.sectorName),
+    ].join(',');
+  });
+
+  return '\uFEFF' + headers + '\n' + lines.join('\n') + (lines.length > 0 ? '\n' : '');
+}
+
+export function downsampleChartPoints<T>(items: T[], maxPoints: number = 48): T[] {
+  if (items.length <= maxPoints || maxPoints < 2) return items;
+  const result: T[] = [];
+  const step = (items.length - 1) / (maxPoints - 1);
+  for (let i = 0; i < maxPoints; i++) {
+    const idx = Math.round(i * step);
+    result.push(items[Math.min(items.length - 1, idx)]);
+  }
+  return result;
+}
+
 export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   variables,
   currentSite,
+  activeDeviceId = 'device_38A839E81F84',
+  activeDeviceName = 'Nodo Activo',
   telemetryHistory = [],
   alertEvents = [],
   alerts = [],
+  onRangeChange,
 }) => {
   const [selectedVarId, setSelectedVarId] = useState<string>('temp');
-  const [timeRange, setTimeRange] = useState<'1h' | '6h' | '24h' | '7d' | '30d'>('24h');
+  const [timeRange, setTimeRange] = useState<TelemetryRangeKey>('24h');
+  const [customStartDate, setCustomStartDate] = useState<string>(() => {
+    const d = new Date(Date.now() - 7 * 24 * 3600 * 1000);
+    return d.toISOString().split('T')[0];
+  });
+  const [customEndDate, setCustomEndDate] = useState<string>(() => {
+    return new Date().toISOString().split('T')[0];
+  });
   const [showExportSuccess, setShowExportSuccess] = useState(false);
 
   const currentVar = variables.find((v) => v.id === selectedVarId) || variables[0];
 
-  const series = useMemo(() => {
-    const cutoff = Date.now() - RANGE_HOURS[timeRange] * 3600 * 1000;
-    const filtered = telemetryHistory.filter((pt) => pt.timestamp >= cutoff);
+  useEffect(() => {
+    if (!onRangeChange) return;
+    onRangeChange(computeTelemetryWindow(timeRange, customStartDate, customEndDate));
+  }, [timeRange, customStartDate, customEndDate, onRangeChange]);
+
+  const fullSeries = useMemo(() => {
+    const windowBounds = computeTelemetryWindow(timeRange, customStartDate, customEndDate);
+    const filtered = telemetryHistory
+      .filter((pt) => pt.timestamp >= windowBounds.startMs && pt.timestamp <= windowBounds.endMs)
+      .sort((a, b) => a.timestamp - b.timestamp);
+
+    const includeDate = timeRange === '7d' || timeRange === '30d' || timeRange === 'custom';
 
     const mappedFromRTDB = filtered
       .map((pt) => {
@@ -58,34 +183,48 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
 
         if (typeof val !== 'number' || !Number.isFinite(val)) return null;
         return {
-          label: new Date(pt.timestamp).toLocaleTimeString('es-CL', {
-            hour: '2-digit',
-            minute: '2-digit',
-          }),
+          timestamp: pt.timestamp,
+          label: includeDate
+            ? new Date(pt.timestamp).toLocaleString('es-CL', {
+                day: '2-digit',
+                month: '2-digit',
+                hour: '2-digit',
+                minute: '2-digit',
+              })
+            : new Date(pt.timestamp).toLocaleTimeString('es-CL', {
+                hour: '2-digit',
+                minute: '2-digit',
+              }),
           value: Number(val.toFixed(1)),
         };
       })
-      .filter((item): item is { label: string; value: number } => item !== null);
+      .filter((item): item is { timestamp: number; label: string; value: number } => item !== null);
 
     if (mappedFromRTDB.length >= 2) {
-      return mappedFromRTDB.slice(-36);
+      return mappedFromRTDB;
     }
     if (currentVar?.historical && currentVar.historical.length >= 2) {
-      return currentVar.historical.map((h) => ({
+      const now = Date.now();
+      return currentVar.historical.map((h, i, arr) => ({
+        timestamp: now - (arr.length - 1 - i) * 60000,
         label: h.timestamp,
         value: Number(h.value.toFixed(1)),
       }));
     }
     return [
       {
+        timestamp: Date.now(),
         label: 'Actual',
         value: Number((currentVar?.value ?? 0).toFixed(1)),
       },
     ];
-  }, [telemetryHistory, timeRange, currentVar]);
+  }, [telemetryHistory, timeRange, customStartDate, customEndDate, currentVar]);
 
-  const isSufficientHistory = series.length >= 3;
-  const values = series.map((s) => s.value);
+  // Muestra completa para cálculos estadísticos/CSV; submuestreo equilibrado solo para la curva SVG
+  const chartSeries = useMemo(() => downsampleChartPoints(fullSeries, 48), [fullSeries]);
+
+  const isSufficientHistory = fullSeries.length >= 3;
+  const values = fullSeries.map((s) => s.value);
   const minVal = Math.min(...values);
   const maxVal = Math.max(...values);
   const avgVal = (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1);
@@ -98,13 +237,13 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   const yRange = maxVal - minVal || 1;
 
   const getCoord = (ptValue: number, index: number) => {
-    const ratioX = series.length > 1 ? index / (series.length - 1) : 0.5;
+    const ratioX = chartSeries.length > 1 ? index / (chartSeries.length - 1) : 0.5;
     const x = padding + ratioX * chartWidth;
     const y = height - padding - ((ptValue - minVal) / yRange) * chartHeight;
     return { x, y };
   };
 
-  const points = series
+  const points = chartSeries
     .map((pt, index) => {
       const { x, y } = getCoord(pt.value, index);
       return `${x},${y}`;
@@ -160,30 +299,35 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
 
     return [...fromEvents, ...fromAlerts]
       .sort((a, b) => b.sortTs - a.sortTs)
-      .slice(0, 25);
+      .slice(0, 50);
   }, [alertEvents, alerts]);
 
   const handleExportCSV = () => {
     soundAlert.playFeedbackBeep();
-    const headers = 'Marca_Temporal,Variable,Unidad,Valor_Registrado,Faena,Sector\n';
-    const rows = series
-      .map(
-        (pt) =>
-          `${pt.label},${currentVar.name},${currentVar.unit},${pt.value},"${currentSite.name}","Nivel Subterráneo"\n`
-      )
-      .join('');
-    const blob = new Blob(['\uFEFF' + headers + rows], { type: 'text/csv;charset=utf-8;' });
+    const csvContent = buildTelemetryCsvContent({
+      rows: fullSeries.map((pt) => ({ timestamp: pt.timestamp, value: pt.value })),
+      deviceId: activeDeviceId,
+      variableName: currentVar.name,
+      unit: currentVar.unit,
+      siteName: currentSite.name,
+      sectorName: currentSite.activeSectors?.[0]?.name || activeDeviceName || 'Sector Minero',
+    });
+
+    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
     link.href = url;
-    link.setAttribute('download', `minesafe_reporte_${currentVar.id}_${timeRange}.csv`);
+    link.setAttribute('download', `minesafe_reporte_${activeDeviceId}_${currentVar.id}_${timeRange}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 
     setShowExportSuccess(true);
     setTimeout(() => setShowExportSuccess(false), 3000);
   };
+
+  const labelStep = Math.max(1, Math.ceil(chartSeries.length / 8));
 
   return (
     <div className="space-y-6">
@@ -195,7 +339,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
               Historial de Mediciones y Reportes Técnicos
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Serie histórica real persistida en Firebase RTDB (/historial_telemetria) y auditoría de eventos.
+              Serie histórica real persistida en Firebase RTDB (/historial_telemetria/{activeDeviceId}) y auditoría de eventos.
             </p>
           </div>
 
@@ -205,7 +349,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
               className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              Exportar Datos CSV
+              Exportar Datos CSV ({fullSeries.length} muestras)
             </button>
           </div>
         </div>
@@ -213,7 +357,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
         {showExportSuccess && (
           <div className="mt-4 p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-300 rounded-lg text-xs flex items-center gap-2 animate-in fade-in">
             <CheckCircle className="w-4 h-4 text-emerald-400" />
-            <span>Archivo CSV generado exitosamente con el registro histórico de telemetría.</span>
+            <span>Archivo CSV generado exitosamente con marca temporal completa ISO y orden cronológico ({fullSeries.length} muestras).</span>
           </div>
         )}
 
@@ -237,20 +381,43 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
             ))}
           </div>
 
-          <div className="flex items-center gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800 self-start md:self-auto">
-            {(['1h', '6h', '24h', '7d', '30d'] as const).map((r) => (
-              <button
-                key={r}
-                onClick={() => setTimeRange(r)}
-                className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
-                  timeRange === r
-                    ? 'bg-slate-800 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                {r}
-              </button>
-            ))}
+          <div className="flex flex-wrap items-center gap-2 self-start md:self-auto">
+            <div className="flex items-center gap-1 p-1 bg-slate-950 rounded-lg border border-slate-800">
+              {(['1h', '6h', '24h', '7d', '30d', 'custom'] as const).map((r) => (
+                <button
+                  key={r}
+                  onClick={() => setTimeRange(r)}
+                  className={`px-2.5 py-1 text-xs font-semibold rounded-md transition-colors ${
+                    timeRange === r
+                      ? 'bg-slate-800 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  {r === 'custom' ? 'Rango' : r}
+                </button>
+              ))}
+            </div>
+
+            {timeRange === 'custom' && (
+              <div className="flex items-center gap-1.5 text-xs bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800">
+                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                <input
+                  type="date"
+                  value={customStartDate}
+                  onChange={(e) => setCustomStartDate(e.target.value)}
+                  className="bg-transparent text-slate-200 focus:outline-none text-xs"
+                  aria-label="Fecha inicio"
+                />
+                <span className="text-slate-500">a</span>
+                <input
+                  type="date"
+                  value={customEndDate}
+                  onChange={(e) => setCustomEndDate(e.target.value)}
+                  className="bg-transparent text-slate-200 focus:outline-none text-xs"
+                  aria-label="Fecha término"
+                />
+              </div>
+            )}
           </div>
         </div>
       </div>
@@ -259,7 +426,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
           <div>
             <span className="text-xs uppercase tracking-wider text-slate-400 block font-semibold">
-              Evolución Temporal de {currentVar.name} ({series.length} muestras reales)
+              Evolución Temporal de {currentVar.name} ({fullSeries.length} muestras reales en ventana)
             </span>
             <div className="flex items-baseline gap-2 mt-1">
               <span className="text-3xl font-extrabold text-white font-mono tabular-nums">
@@ -322,7 +489,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
                 );
               })}
 
-              {series.length >= 2 && (
+              {chartSeries.length >= 2 && (
                 <>
                   <polygon
                     points={`${padding},${height - padding} ${points} ${width - padding},${height - padding}`}
@@ -339,29 +506,32 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
                 </>
               )}
 
-              {series.map((pt, i) => {
+              {chartSeries.map((pt, i) => {
                 const { x, y } = getCoord(pt.value, i);
+                const showTickLabel = i % labelStep === 0 || i === chartSeries.length - 1;
                 return (
                   <g key={i} className="group">
                     <circle
                       cx={x}
                       cy={y}
-                      r={series.length === 1 ? '5' : '3.5'}
+                      r={chartSeries.length === 1 ? '5' : '3.5'}
                       fill="#06b6d4"
                       stroke="#0f172a"
                       strokeWidth="2"
                       className="hover:scale-150 transition-transform duration-100"
                     />
-                    <text
-                      x={x}
-                      y={height - padding + 16}
-                      fill="#64748b"
-                      fontSize="9"
-                      textAnchor="middle"
-                      fontFamily="JetBrains Mono"
-                    >
-                      {pt.label}
-                    </text>
+                    {showTickLabel && (
+                      <text
+                        x={x}
+                        y={height - padding + 16}
+                        fill="#64748b"
+                        fontSize="9"
+                        textAnchor="middle"
+                        fontFamily="JetBrains Mono"
+                      >
+                        {pt.label}
+                      </text>
+                    )}
                   </g>
                 );
               })}
@@ -381,7 +551,9 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           ) : (
             <div className="p-2.5 bg-emerald-950/20 rounded-lg border border-emerald-800/40 text-xs text-emerald-300 flex items-center gap-2">
               <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
-              <span>Registros históricos reales acumulados desde Firebase RTDB (/historial_telemetria).</span>
+              <span>
+                Registros históricos reales acumulados desde Firebase RTDB (/historial_telemetria) mientras existe sesión activa en plataforma o ingestión directa del nodo.
+              </span>
             </div>
           )}
         </div>
@@ -402,7 +574,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
 
         {auditTableRows.length === 0 ? (
           <div className="p-6 text-center bg-slate-950/50 rounded-xl border border-slate-800 text-xs text-slate-400">
-            No existen eventos en <span className="font-mono text-slate-300">/alertas_eventos</span> ni alertas emitidas aún en esta sesión/organización.
+            No existen eventos en <span className="font-mono text-slate-300">/eventos_umbrales</span> ni alertas emitidas aún en esta sesión/organización.
           </div>
         ) : (
           <div className="overflow-x-auto">
@@ -436,4 +608,3 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
     </div>
   );
 };
-

@@ -6,16 +6,18 @@
   "scripts": {
     "dev": "tsx server.ts",
     "start": "node server.ts",
-    "build": "vite build",
+    "build": "vite build && rm -rf dist/assets/aistudio",
     "preview": "vite preview",
     "clean": "rm -rf dist server.js",
     "lint": "tsc --noEmit",
     "test:alerts": "tsx tests/test_alert_engine.ts",
     "test:p013": "tsx tests/test_p013_access_and_landing.ts",
-    "test": "npm run test:alerts && npm run test:p013"
+    "test:audit": "tsx tests/test_audit_stabilization.ts",
+    "test": "npm run test:alerts && npm run test:p013 && npm run test:audit"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",
+    "@types/three": "^0.187.0",
     "@vitejs/plugin-react": "^6.1.1",
     "dotenv": "^17.2.3",
     "express": "^4.21.2",
@@ -25,6 +27,7 @@
     "qrcode": "^1.5.4",
     "react": "^19.0.1",
     "react-dom": "^19.0.1",
+    "three": "^0.187.0",
     "vite": "^8.3.0"
   },
   "devDependencies": {

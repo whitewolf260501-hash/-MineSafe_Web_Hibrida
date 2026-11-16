@@ -28,7 +28,8 @@ import {
   Lock,
   Sun,
   Moon,
-  Building2
+  Building2,
+  Box
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -129,6 +130,12 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'reportes', label: 'Historial y Reportes', shortLabel: 'Reportes', icon: <FileText className="w-4 h-4 shrink-0" /> },
     { id: 'faenas', label: 'Faenas y Sectores', shortLabel: 'Sectores', icon: <MapPin className="w-4 h-4 shrink-0" /> },
     { id: 'usuarios', label: 'Usuarios y Roles', shortLabel: 'Usuarios', icon: <Users className="w-4 h-4 shrink-0" /> },
+    {
+      id: 'visor_3d',
+      label: 'Inspector 3D',
+      shortLabel: 'Visor 3D',
+      icon: <Box className="w-4 h-4 shrink-0 text-orange-400" />,
+    },
   ];
 
   const navLinks: { id: NavigationTab; label: string; shortLabel: string; icon: React.ReactNode; badge?: number }[] = [

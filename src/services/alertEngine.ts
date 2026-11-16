@@ -11,6 +11,7 @@ import {
   closeAlertLifecycleInRTDB,
   DEFAULT_GLOBAL_THRESHOLDS
 } from './firebase';
+import { DEFAULT_ORGANIZATION_ID } from '../utils/accessControl';
 import { soundAlert } from './audioAlert';
 
 interface ActiveIncident {
@@ -181,6 +182,7 @@ class AlertEngine {
 
           const eventRecord: AlertEventRecord = {
             id: eventId,
+            organizationId: device.organizationId || DEFAULT_ORGANIZATION_ID,
             dispositivo_id: device.id,
             dispositivo_nombre: device.name,
             sector_nombre: device.sectorName || 'Faena Central',
@@ -229,6 +231,7 @@ class AlertEngine {
           const now = Date.now();
           const recoveredRecord: AlertEventRecord = {
             id: existingIncident.id,
+            organizationId: device.organizationId || DEFAULT_ORGANIZATION_ID,
             dispositivo_id: device.id,
             dispositivo_nombre: device.name,
             sector_nombre: device.sectorName || 'Faena Central',

@@ -77,7 +77,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
   const [isResettingGateway, setIsResettingGateway] = useState(false);
 
-  // Update clock every second for live 15-second calculation
+  // Update clock every second for live telemetry timeout calculation
   useEffect(() => {
     const timer = setInterval(() => {
       setNowTimestamp(Date.now());
@@ -136,11 +136,11 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
     setIsSimulatingHeartbeat(true);
     if (currentDevice) {
       await sendESP32Command(currentDevice.id, 'ping');
-      showNotification('Latido enviado: Dispositivo marcado "En línea" por 15 segundos.');
+      showNotification(`Latido enviado: Dispositivo marcado "En línea" (ventana ${effectiveTimeout}s).`);
     }
     setTimeout(() => {
       setIsSimulatingHeartbeat(false);
-    }, 15000);
+    }, effectiveTimeout * 1000);
   };
 
   const handleCopyId = () => {

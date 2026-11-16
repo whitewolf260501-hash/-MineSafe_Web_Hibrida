@@ -30,6 +30,7 @@ import {
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION, isEquiposSubTabVisibleForUser } from '../services/firebase';
+import { canManageContractsAndPayments } from '../utils/accessControl';
 
 interface DevicesAndRentalsViewProps {
   rentals: DeviceRental[];
@@ -38,9 +39,9 @@ interface DevicesAndRentalsViewProps {
   currentUser?: UserProfile | null;
   platformConfig?: PlatformConfig;
   activeOrganizationId?: string;
-  onAddAssignment: (assignment: Omit<WorkerAssignment, 'id'>) => void;
-  onAddRentalContract: (contract: Omit<DeviceRental, 'id'>) => void;
-  onRecordPayment: (contractId: string) => void;
+  onAddAssignment: (assignment: Omit<WorkerAssignment, 'id'>) => Promise<void> | void;
+  onAddRentalContract: (contract: Omit<DeviceRental, 'id'>) => Promise<void> | void;
+  onRecordPayment: (contractId: string) => Promise<void> | void;
 }
 
 const EQUIPOS_SUBTAB_ORDER: EquiposSubTab[] = ['asignaciones', 'arriendos', 'pagos', 'inventario'];
@@ -93,61 +94,137 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const [newCostClp, setNewCostClp] = useState(195000);
   const [newEndDate, setNewEndDate] = useState('2026-12-31');
 
+  const [actionNotice, setActionNotice] = useState<{ text: string; tone: 'error' | 'success' } | null>(null);
+  const [modalError, setModalError] = useState<string | null>(null);
+  const [isSubmitting, setIsSubmitting] = useState(false);
+
+  const canManageContracts = useMemo(
+    () => canManageContractsAndPayments(currentUser).allowed,
+    [currentUser]
+  );
+
+  // Filtrar dispositivos deshabilitados en el catálogo maestro para nuevas asignaciones o contratos
+  const enabledDeviceIds = useMemo(() => {
+    const regList = platformConfig?.registeredDevices || [];
+    if (regList.length === 0) return null;
+    const disabledSet = new Set(regList.filter((r) => r.enabled === false).map((r) => r.id));
+    return disabledSet;
+  }, [platformConfig?.registeredDevices]);
+
+  const activeInventoryDevices = useMemo(
+    () => (enabledDeviceIds ? devices.filter((d) => !enabledDeviceIds.has(d.id)) : devices),
+    [devices, enabledDeviceIds]
+  );
+
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
       : DEFAULT_ORGANIZATION.id;
 
-  const handleCreateAssignment = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!newWorkerName || !newWorkerRut) return;
-
-    const selectedDev = devices.find(d => d.code === newSelectedDeviceCode) || devices[0];
-
-    onAddAssignment({
-      organizationId: effectiveOrgId,
-      workerName: newWorkerName,
-      workerRut: newWorkerRut,
-      role: newRole,
-      crew: newCrew,
-      sectorName: newSector,
-      assignedDeviceId: selectedDev.id,
-      assignedDeviceCode: selectedDev.code,
-      assignmentDate: new Date().toISOString().split('T')[0],
-      deviceBattery: selectedDev.batteryPct,
-      emergencyContact: newEmergencyContact,
-    });
-
-    soundAlert.playFeedbackBeep();
-    setShowAssignModal(false);
-    setNewWorkerName('');
-    setNewWorkerRut('');
+  const showTempNotice = (text: string, tone: 'error' | 'success') => {
+    setActionNotice({ text, tone });
+    setTimeout(() => {
+      setActionNotice((prev) => (prev?.text === text ? null : prev));
+    }, 4500);
   };
 
-  const handleCreateContract = (e: React.FormEvent) => {
+  const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newContractNumber || !newDeviceCode) return;
+    if (!newWorkerName.trim() || !newWorkerRut.trim()) return;
+    if (!canManageContracts) {
+      setModalError('Solo un Administrador o SuperAdministrador autorizado puede asignar equipos.');
+      return;
+    }
 
-    onAddRentalContract({
-      organizationId: effectiveOrgId,
-      contractNumber: newContractNumber,
-      deviceCode: newDeviceCode,
-      deviceType: newDeviceType,
-      provider: newProvider,
-      startDate: new Date().toISOString().split('T')[0],
-      endDate: newEndDate,
-      monthlyCostClp: Number(newCostClp),
-      paymentStatus: 'al_dia',
-      lastPaymentDate: new Date().toISOString().split('T')[0],
-      nextDueDate: '2026-10-30',
-      assignedTechnician: 'Gonzalo Vergara',
-      notes: 'Contrato nuevo incorporado al sistema de control MineSafe.',
-    });
+    const selectedDev = activeInventoryDevices.find((d) => d.code === newSelectedDeviceCode) || activeInventoryDevices[0];
+    if (!selectedDev) {
+      setModalError('No hay dispositivos habilitados disponibles para asignar.');
+      return;
+    }
 
-    soundAlert.playFeedbackBeep();
-    setShowNewContractModal(false);
-    setNewContractNumber('');
-    setNewDeviceCode('');
+    try {
+      setIsSubmitting(true);
+      setModalError(null);
+      await onAddAssignment({
+        organizationId: effectiveOrgId,
+        workerName: newWorkerName.trim(),
+        workerRut: newWorkerRut.trim(),
+        role: newRole.trim(),
+        crew: newCrew.trim(),
+        sectorName: newSector.trim(),
+        assignedDeviceId: selectedDev.id,
+        assignedDeviceCode: selectedDev.code,
+        assignmentDate: new Date().toISOString().split('T')[0],
+        deviceBattery: selectedDev.batteryPct,
+        emergencyContact: newEmergencyContact.trim(),
+      });
+
+      soundAlert.playFeedbackBeep();
+      setShowAssignModal(false);
+      setNewWorkerName('');
+      setNewWorkerRut('');
+      showTempNotice('Asignación de equipo guardada en Firebase RTDB.', 'success');
+    } catch (err: any) {
+      setModalError(err?.message || 'No se pudo guardar la asignación.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const handleCreateContract = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanContractNum = newContractNumber.trim();
+    const cleanDevCode = newDeviceCode.trim();
+    if (!cleanContractNum || !cleanDevCode) {
+      setModalError('Número de contrato y código del dispositivo son obligatorios.');
+      return;
+    }
+    if (!canManageContracts) {
+      setModalError('Permisos insuficientes: solo Administradores o SuperAdministrador pueden crear contratos.');
+      return;
+    }
+    if (Number(newCostClp) <= 0) {
+      setModalError('El costo mensual (CLP) debe ser mayor a 0.');
+      return;
+    }
+    if (rentals.some((r) => r.contractNumber.toLowerCase() === cleanContractNum.toLowerCase())) {
+      setModalError(`Ya existe un contrato activo con el número "${cleanContractNum}".`);
+      return;
+    }
+    if (enabledDeviceIds?.has(cleanDevCode)) {
+      setModalError(`El dispositivo "${cleanDevCode}" se encuentra deshabilitado en la plataforma.`);
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setModalError(null);
+      await onAddRentalContract({
+        organizationId: effectiveOrgId,
+        contractNumber: cleanContractNum,
+        deviceCode: cleanDevCode,
+        deviceType: newDeviceType.trim(),
+        provider: newProvider.trim(),
+        startDate: new Date().toISOString().split('T')[0],
+        endDate: newEndDate,
+        monthlyCostClp: Number(newCostClp),
+        paymentStatus: 'al_dia',
+        lastPaymentDate: new Date().toISOString().split('T')[0],
+        nextDueDate: newEndDate,
+        assignedTechnician: 'Gonzalo Vergara',
+        notes: 'Contrato nuevo incorporado al sistema de control MineSafe.',
+      });
+
+      soundAlert.playFeedbackBeep();
+      setShowNewContractModal(false);
+      setNewContractNumber('');
+      setNewDeviceCode('');
+      showTempNotice(`Contrato ${cleanContractNum} registrado y validado en RTDB.`, 'success');
+    } catch (err: any) {
+      setModalError(err?.message || 'Error al guardar el contrato en Firebase RTDB.');
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   const formatClp = (amount: number) => {
@@ -200,9 +277,12 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
           </div>
 
           <div className="flex items-center gap-2">
-            {activeSubTab === 'asignaciones' && canViewSubTab('asignaciones') && (
+            {activeSubTab === 'asignaciones' && canViewSubTab('asignaciones') && canManageContracts && (
               <button
-                onClick={() => setShowAssignModal(true)}
+                onClick={() => {
+                  setModalError(null);
+                  setShowAssignModal(true);
+                }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
               >
                 <Plus className="w-4 h-4" />
@@ -211,9 +291,13 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             )}
 
             {((activeSubTab === 'arriendos' && canViewSubTab('arriendos')) ||
-              (activeSubTab === 'pagos' && canViewSubTab('pagos'))) && (
+              (activeSubTab === 'pagos' && canViewSubTab('pagos'))) &&
+              canManageContracts && (
               <button
-                onClick={() => setShowNewContractModal(true)}
+                onClick={() => {
+                  setModalError(null);
+                  setShowNewContractModal(true);
+                }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
               >
                 <Plus className="w-4 h-4" />
@@ -222,6 +306,23 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             )}
           </div>
         </div>
+
+        {actionNotice && (
+          <div
+            className={`mt-4 p-3 rounded-lg border text-xs flex items-center gap-2 ${
+              actionNotice.tone === 'error'
+                ? 'bg-rose-950/80 border-rose-800 text-rose-200'
+                : 'bg-emerald-950/80 border-emerald-800 text-emerald-200'
+            }`}
+          >
+            {actionNotice.tone === 'error' ? (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{actionNotice.text}</span>
+          </div>
+        )}
 
         {/* Sub Navigation Tabs */}
         <div className="flex flex-wrap items-center gap-2 pt-6 border-t border-slate-800/80 mt-6">
@@ -442,12 +543,25 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 <div className="flex items-center justify-between pt-2 border-t border-slate-800">
                   <span className="text-[11px] text-slate-400">Técnico: {rental.assignedTechnician}</span>
                   {rental.paymentStatus !== 'al_dia' ? (
-                    <button
-                      onClick={() => onRecordPayment(rental.id)}
-                      className="px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors"
-                    >
-                      Registrar Pago
-                    </button>
+                    canManageContracts ? (
+                      <button
+                        onClick={async () => {
+                          try {
+                            await onRecordPayment(rental.id);
+                            showTempNotice(`Pago registrado para el contrato ${rental.contractNumber}.`, 'success');
+                          } catch (err: any) {
+                            showTempNotice(err?.message || 'Error al registrar el pago en RTDB.', 'error');
+                          }
+                        }}
+                        className="px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors"
+                      >
+                        Registrar Pago
+                      </button>
+                    ) : (
+                      <span className="text-[11px] text-amber-400 flex items-center gap-1">
+                        <Lock className="w-3 h-3" /> Solo Admin
+                      </span>
+                    )
                   ) : (
                     <span className="text-xs text-emerald-400 font-medium flex items-center gap-1">
                       <CheckCircle className="w-3.5 h-3.5" /> Cuota al día
@@ -578,7 +692,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                   onChange={(e) => setNewSelectedDeviceCode(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                 >
-                  {devices.map(d => (
+                  {activeInventoryDevices.map(d => (
                     <option key={d.id} value={d.code}>{d.code} - {d.name} ({d.batteryPct}% bat)</option>
                   ))}
                 </select>
@@ -594,6 +708,12 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 />
               </div>
 
+              {modalError && (
+                <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-200 text-xs">
+                  {modalError}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
@@ -604,9 +724,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 rounded-lg font-semibold"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg font-semibold"
                 >
-                  Registrar Asignación
+                  {isSubmitting ? 'Guardando...' : 'Registrar Asignación'}
                 </button>
               </div>
             </form>
@@ -688,6 +809,12 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </div>
               </div>
 
+              {modalError && (
+                <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-200 text-xs">
+                  {modalError}
+                </div>
+              )}
+
               <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
                 <button
                   type="button"
@@ -698,9 +825,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 rounded-lg font-semibold"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg font-semibold"
                 >
-                  Guardar Contrato
+                  {isSubmitting ? 'Guardando...' : 'Guardar Contrato'}
                 </button>
               </div>
             </form>

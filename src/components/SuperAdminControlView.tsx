@@ -117,6 +117,11 @@ const CONTROLLABLE_WINDOWS: Array<{
     label: 'Usuarios y Roles',
     description: 'Administración de cuentas RBAC, altas y permisos',
   },
+  {
+    id: 'visor_3d',
+    label: 'Inspector 3D del Nodo',
+    description: 'Visor 3D interactivo de hardware ESP32, sensores, carcasa y simulación de gases',
+  },
 ];
 
 const EQUIPOS_SUB_WINDOWS: Array<{
@@ -286,6 +291,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       reportes: allowed,
       faenas: allowed,
       usuarios: allowed,
+      visor_3d: allowed,
     };
     commitVisibilityChange((prev) => ({
       ...prev,

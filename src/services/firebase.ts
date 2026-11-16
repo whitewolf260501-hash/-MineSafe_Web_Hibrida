@@ -12,9 +12,15 @@ import {
   get,
   remove,
   query,
+  orderByChild,
+  equalTo,
+  startAt,
+  endAt,
   orderByKey,
   limitToLast,
-  Database
+  Database,
+  DatabaseReference,
+  Query
 } from 'firebase/database';
 import {
   getStorage,
@@ -71,7 +77,27 @@ import {
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 
-export const USER_RTDB_URL = "https://minefase-fc5f5-default-rtdb.firebaseio.com/";
+const DEFAULT_RTDB_URL = "https://minefase-fc5f5-default-rtdb.firebaseio.com/";
+
+export function resolveConfiguredRtdbUrl(envUrl?: string): string {
+  const rawCandidate =
+    envUrl ??
+    (typeof import.meta !== 'undefined' ? (import.meta as any).env?.VITE_FIREBASE_RTDB_URL : undefined) ??
+    '';
+  const candidate = String(rawCandidate).trim();
+  if (!candidate) return DEFAULT_RTDB_URL;
+  try {
+    const parsed = new URL(candidate);
+    if (parsed.protocol === 'https:' && parsed.hostname.endsWith('.firebaseio.com')) {
+      return candidate.endsWith('/') ? candidate : `${candidate}/`;
+    }
+  } catch {
+    // Fallback to validated default URL when env override is malformed
+  }
+  return DEFAULT_RTDB_URL;
+}
+
+export const USER_RTDB_URL = resolveConfiguredRtdbUrl();
 
 const minefaseConfig = {
   apiKey: "AIzaSyA14qbuEIlTtln7A0U5xJCzFtj9jIxDHCg",
@@ -402,25 +428,46 @@ export async function resolveUserProfileFromAuthUser(fbUser: FirebaseUser): Prom
     if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
   }
 
-  // 2. Buscar por email en /usuarios
-  try {
-    const allUsersSnap = await get(ref(rtdb, 'usuarios'));
-    if (allUsersSnap.exists()) {
-      const allUsers = allUsersSnap.val() || {};
-      const matchedKey = Object.keys(allUsers).find(
-        (k) => (allUsers[k]?.email || '').trim().toLowerCase() === emailLower
-      );
-      if (matchedKey) {
-        const profile = mapRTDBUserToUserProfile(matchedKey, allUsers[matchedKey]);
-        if (profile.status === 'inactivo') {
-          await signOut(auth).catch(() => {});
-          throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
+  // 2. Buscar por email en /usuarios usando consulta indexada (compatibles con reglas restrictivas para operadores)
+  if (emailLower) {
+    try {
+      const byEmailQuery = query(ref(rtdb, 'usuarios'), orderByChild('email'), equalTo(emailLower));
+      const byEmailSnap = await get(byEmailQuery);
+      if (byEmailSnap.exists()) {
+        const matchedObj = byEmailSnap.val() || {};
+        const matchedKey = Object.keys(matchedObj)[0];
+        if (matchedKey) {
+          const profile = mapRTDBUserToUserProfile(matchedKey, matchedObj[matchedKey]);
+          if (profile.status === 'inactivo') {
+            await signOut(auth).catch(() => {});
+            throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
+          }
+          return profile;
         }
-        return profile;
       }
+    } catch (err: any) {
+      if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
     }
-  } catch (err: any) {
-    if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
+
+    try {
+      const allUsersSnap = await get(ref(rtdb, 'usuarios'));
+      if (allUsersSnap.exists()) {
+        const allUsers = allUsersSnap.val() || {};
+        const matchedKey = Object.keys(allUsers).find(
+          (k) => (allUsers[k]?.email || '').trim().toLowerCase() === emailLower
+        );
+        if (matchedKey) {
+          const profile = mapRTDBUserToUserProfile(matchedKey, allUsers[matchedKey]);
+          if (profile.status === 'inactivo') {
+            await signOut(auth).catch(() => {});
+            throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
+          }
+          return profile;
+        }
+      }
+    } catch (err: any) {
+      if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
+    }
   }
 
   // 3. Únicamente el SuperAdministrador canónico tiene respaldo automático; cualquier otra cuenta
@@ -605,6 +652,42 @@ export function subscribeToFirebaseAuth(
 }
 
 /**
+ * Listener directo sobre el nodo propio /usuarios/{uid} y /usuarios/{profileId} para revocar la sesión
+ * de forma inmediata ante desactivación (isActive === false), incluso para roles operador sin permiso de lista.
+ */
+export function subscribeToCurrentUserStatus(
+  profileId: string,
+  authUid: string | null | undefined,
+  callback: (status: 'activo' | 'inactivo', updatedProfile?: UserProfile) => void
+): () => void {
+  const watchedIds = Array.from(new Set([profileId, authUid].filter((id): id is string => Boolean(id))));
+  if (watchedIds.length === 0) return () => {};
+
+  const unsubs = watchedIds.map((uid) =>
+    onValue(
+      ref(rtdb, `usuarios/${uid}`),
+      (snapshot) => {
+        if (!snapshot.exists()) return;
+        const val = snapshot.val();
+        if (val?.isActive === false || val?.status === 'inactivo') {
+          callback('inactivo');
+          return;
+        }
+        const updated = mapRTDBUserToUserProfile(uid, val);
+        callback(updated.status, updated);
+      },
+      (err) => {
+        console.warn(`Error verificando estado de sesión para /usuarios/${uid}:`, err?.message || err);
+      }
+    )
+  );
+
+  return () => {
+    unsubs.forEach((fn) => fn());
+  };
+}
+
+/**
  * Verifica contra Firebase Authentication y la base de datos RTDB si el usuario autenticado
  * posee privilegios reales de SuperAdministrador.
  */
@@ -652,10 +735,18 @@ export async function verifySuperAdminPrivileges(actingUser?: UserProfile | null
 }
 
 export function mapRTDBContractToRental(key: string, data: any): DeviceRental {
+  const rawPaymentStatus = data?.paymentStatus;
   const estadoGeneral = data?.estadoGeneral || data?.estadoArriendo || 'Activo';
-  let paymentStatus: 'al_dia' | 'proximo_a_vencer' | 'pago_pendiente' | 'vencido' = 'al_dia';
+  let paymentStatus: DeviceRental['paymentStatus'] = 'al_dia';
 
-  if (estadoGeneral === 'Por Vencer') {
+  if (
+    rawPaymentStatus === 'al_dia' ||
+    rawPaymentStatus === 'proximo_a_vencer' ||
+    rawPaymentStatus === 'pago_pendiente' ||
+    rawPaymentStatus === 'vencido'
+  ) {
+    paymentStatus = rawPaymentStatus;
+  } else if (estadoGeneral === 'Por Vencer') {
     paymentStatus = 'proximo_a_vencer';
   } else if (estadoGeneral === 'Finalizado' || estadoGeneral === 'Vencido') {
     paymentStatus = 'vencido';
@@ -666,28 +757,77 @@ export function mapRTDBContractToRental(key: string, data: any): DeviceRental {
   return {
     id: key,
     organizationId: data?.organizationId || DEFAULT_ORGANIZATION.id,
-    contractNumber: key,
-    deviceCode: data?.deviceId || data?.idDispositivo || 'MS-IOT-REG',
-    deviceType: 'Detector MultiGas Certificado DS 132',
-    provider: data?.empresa || 'Dräger / MineSafe Mining Equipments',
-    startDate: data?.fechaInicioArriendo || data?.fechaInicio || '2025-01-01',
-    endDate: data?.fechaFinArriendo || data?.fechaFinContrato || data?.fechaTermino || '2026-12-31',
-    monthlyCostClp: typeof data?.monto === 'number' ? data.monto : (typeof data?.monthlyCostClp === 'number' ? data.monthlyCostClp : 185000),
-    paymentStatus: paymentStatus,
-    lastPaymentDate: data?.fechaUltimoPago || '2025-11-15',
-    nextDueDate: data?.fechaFinArriendo || '2026-03-31',
-    assignedTechnician: data?.tec || 'Ingeniería y Soporte MineSafe',
-    notes: `Contrato sincronizado desde Realtime Database (${estadoGeneral}).`,
+    contractNumber: data?.contractNumber || key,
+    deviceCode: data?.deviceCode || data?.deviceId || data?.idDispositivo || 'MS-IOT-REG',
+    deviceType: data?.deviceType || 'Detector MultiGas Certificado DS 132',
+    provider: data?.provider || data?.empresa || 'Dräger / MineSafe Mining Equipments',
+    startDate: data?.startDate || data?.fechaInicioArriendo || data?.fechaInicio || '2025-01-01',
+    endDate: data?.endDate || data?.fechaFinArriendo || data?.fechaFinContrato || data?.fechaTermino || '2026-12-31',
+    monthlyCostClp:
+      typeof data?.monthlyCostClp === 'number'
+        ? data.monthlyCostClp
+        : typeof data?.monto === 'number'
+        ? data.monto
+        : 185000,
+    paymentStatus,
+    lastPaymentDate: data?.lastPaymentDate || data?.fechaUltimoPago || '2025-11-15',
+    nextDueDate: data?.nextDueDate || data?.fechaFinArriendo || '2026-03-31',
+    assignedTechnician: data?.assignedTechnician || data?.tec || 'Ingeniería y Soporte MineSafe',
+    notes: data?.notes || `Contrato sincronizado desde Realtime Database (${estadoGeneral}).`,
   };
+}
+
+export interface RTDBSubscriptionScope {
+  role?: UserRole;
+  organizationId?: string;
+  deviceIds?: string[];
+}
+
+function buildOrgScopedQuery(path: string, scope?: RTDBSubscriptionScope): DatabaseReference | Query {
+  const baseRef = ref(rtdb, path);
+  if (scope?.role && scope.role !== 'superadmin') {
+    const orgId = scope.organizationId && scope.organizationId !== 'all'
+      ? scope.organizationId
+      : DEFAULT_ORGANIZATION_ID;
+    return query(baseRef, orderByChild('organizationId'), equalTo(orgId));
+  }
+  return baseRef;
 }
 
 // -------------------------------------------------------------
 // REALTIME LISTENERS (RTDB)
 // -------------------------------------------------------------
 export function subscribeToRTDBDevicesRaw(
-  callback: (rawDevices: Record<string, any>) => void
+  callback: (rawDevices: Record<string, any>) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
-  const devicesRef = ref(rtdb, 'dispositivos');
+  if (scope?.role && scope.role !== 'superadmin' && scope.deviceIds && scope.deviceIds.length > 0) {
+    const aggregated: Record<string, any> = {};
+    const uniqueIds = Array.from(new Set(scope.deviceIds.filter(Boolean)));
+    const unsubs = uniqueIds.map((devId) =>
+      onValue(
+        ref(rtdb, `dispositivos/${devId}`),
+        (snapshot) => {
+          if (snapshot.exists()) {
+            const val = snapshot.val();
+            aggregated[devId] = val;
+            recordDevicePacketArrival(devId, val);
+          } else {
+            delete aggregated[devId];
+          }
+          callback({ ...aggregated });
+        },
+        (err) => {
+          console.warn(`Error subscribing to RTDB /dispositivos/${devId}:`, err?.message || err);
+        }
+      )
+    );
+    return () => {
+      unsubs.forEach((fn) => fn());
+    };
+  }
+
+  const devicesRef = buildOrgScopedQuery('dispositivos', scope?.role === 'superadmin' ? scope : undefined);
   const unsub = onValue(devicesRef, (snapshot) => {
     if (snapshot.exists()) {
       const incoming = snapshot.val() || {};
@@ -699,26 +839,43 @@ export function subscribeToRTDBDevicesRaw(
       callback({});
     }
   }, (err) => {
-    console.warn('Error subscribing to RTDB /dispositivos:', err);
+    console.warn('Error subscribing to RTDB /dispositivos:', err?.message || err);
   });
   return unsub;
 }
 
 export function subscribeToRTDBDevices(
   callback: (devices: SensorDevice[]) => void,
-  timeoutSeconds: number = 20
+  timeoutSeconds: number = 20,
+  scope?: RTDBSubscriptionScope
 ): () => void {
   return subscribeToRTDBDevicesRaw((incoming) => {
     const combined: SensorDevice[] = Object.keys(incoming).map((key) =>
       mapRTDBDeviceToSensorDevice(key, incoming[key], timeoutSeconds)
     );
     callback(combined);
-  });
+  }, scope);
 }
 
 export async function forceRefreshDevicesFromRTDB(
-  timeoutSeconds: number = 20
+  timeoutSeconds: number = 20,
+  scope?: RTDBSubscriptionScope
 ): Promise<{ raw: Record<string, any>; devices: SensorDevice[] }> {
+  if (scope?.role && scope.role !== 'superadmin' && scope.deviceIds && scope.deviceIds.length > 0) {
+    const raw: Record<string, any> = {};
+    const devices: SensorDevice[] = [];
+    for (const id of Array.from(new Set(scope.deviceIds))) {
+      const snap = await get(ref(rtdb, `dispositivos/${id}`)).catch(() => null);
+      if (snap && snap.exists()) {
+        const val = snap.val();
+        raw[id] = val;
+        recordDevicePacketArrival(id, val);
+        devices.push(mapRTDBDeviceToSensorDevice(id, val, timeoutSeconds));
+      }
+    }
+    return { raw, devices };
+  }
+
   const snapshot = await get(ref(rtdb, 'dispositivos'));
   if (!snapshot.exists()) {
     return { raw: {}, devices: [] };
@@ -833,8 +990,17 @@ export function subscribeToRTDBAlarmRecords(callback: (records: AlarmAuditRecord
   return unsub;
 }
 
-export function subscribeToRTDBUsers(callback: (users: UserProfile[]) => void): () => void {
-  const usersRef = ref(rtdb, 'usuarios');
+export function subscribeToRTDBUsers(
+  callback: (users: UserProfile[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
+  // Operadores no tienen permiso de lectura sobre la colección completa /usuarios
+  if (scope?.role === 'operador') {
+    callback([]);
+    return () => {};
+  }
+
+  const usersRef = buildOrgScopedQuery('usuarios', scope);
   const precargaRef = ref(rtdb, 'precarga/usuarios_contratos');
 
   let directUsers: Record<string, any> = {};
@@ -860,15 +1026,17 @@ export function subscribeToRTDBUsers(callback: (users: UserProfile[]) => void): 
       list.push(u);
     });
 
-    // 2. Process precarga usuarios
-    Object.keys(precargaUsers).forEach((key) => {
-      const pu = precargaUsers[key];
-      const email = (pu?.email || '').trim().toLowerCase();
-      if (!seenEmails.has(email)) {
-        if (email) seenEmails.add(email);
-        list.push(mapRTDBUserToUserProfile(key, pu));
-      }
-    });
+    // 2. Process precarga usuarios (solo para superadmin)
+    if (!scope?.role || scope.role === 'superadmin') {
+      Object.keys(precargaUsers).forEach((key) => {
+        const pu = precargaUsers[key];
+        const email = (pu?.email || '').trim().toLowerCase();
+        if (!seenEmails.has(email)) {
+          if (email) seenEmails.add(email);
+          list.push(mapRTDBUserToUserProfile(key, pu));
+        }
+      });
+    }
 
     // Garantizar que solo exista un único SuperAdministrador en toda la plataforma
     const hasCanonicalSuper = list.some(
@@ -910,7 +1078,6 @@ export function subscribeToRTDBUsers(callback: (users: UserProfile[]) => void): 
       return u;
     });
 
-    // Sort with superadmin first, then admin, then operador
     normalizedList.sort((a, b) => {
       if (a.role === 'superadmin') return -1;
       if (b.role === 'superadmin') return 1;
@@ -925,28 +1092,26 @@ export function subscribeToRTDBUsers(callback: (users: UserProfile[]) => void): 
   const unsub1 = onValue(
     usersRef,
     (snapshot) => {
-      if (snapshot.exists()) {
-        directUsers = snapshot.val() || {};
-        emitCombined();
-      }
+      directUsers = snapshot.exists() ? snapshot.val() || {} : {};
+      emitCombined();
     },
     (err) => {
       console.warn('Acceso restringido o error leyendo /usuarios en RTDB:', err?.message || err);
     }
   );
 
-  const unsub2 = onValue(
-    precargaRef,
-    (snapshot) => {
-      if (snapshot.exists()) {
-        precargaUsers = snapshot.val() || {};
-        emitCombined();
-      }
-    },
-    () => {
-      // Precarga es opcional y puede estar restringida por reglas
-    }
-  );
+  const unsub2 = !scope?.role || scope.role === 'superadmin'
+    ? onValue(
+        precargaRef,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            precargaUsers = snapshot.val() || {};
+            emitCombined();
+          }
+        },
+        () => {}
+      )
+    : () => {};
 
   return () => {
     unsub1();
@@ -954,8 +1119,11 @@ export function subscribeToRTDBUsers(callback: (users: UserProfile[]) => void): 
   };
 }
 
-export function subscribeToRTDBRentals(callback: (rentals: DeviceRental[]) => void): () => void {
-  const contractsRef = ref(rtdb, 'contratos');
+export function subscribeToRTDBRentals(
+  callback: (rentals: DeviceRental[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
+  const contractsRef = buildOrgScopedQuery('contratos', scope);
   const precargaRef = ref(rtdb, 'precarga/usuarios_contratos');
 
   let directContracts: Record<string, any> = {};
@@ -965,53 +1133,64 @@ export function subscribeToRTDBRentals(callback: (rentals: DeviceRental[]) => vo
     const list: DeviceRental[] = [];
     const seenContracts = new Set<string>();
 
-    // 1. Direct contratos (CONTRATO-001 to 004)
     Object.keys(directContracts).forEach((key) => {
       const r = mapRTDBContractToRental(key, directContracts[key]);
       list.push(r);
       seenContracts.add(key);
     });
 
-    // 2. Precarga arriendos (ARR-A001, ARR-U004, etc.)
-    Object.keys(precargaData).forEach((userKey) => {
-      const u = precargaData[userKey];
-      const arr = u?.arriendo;
-      if (arr && arr.idArriendo && !seenContracts.has(arr.idArriendo)) {
-        seenContracts.add(arr.idArriendo);
-        list.push({
-          id: arr.idArriendo,
-          contractNumber: arr.idArriendo,
-          deviceCode: u?.dispositivo?.nombreDispositivo || u?.dispositivo?.idDispositivo || 'DS-FLEET',
-          deviceType: 'Detector Portátil MultiGas Certificado DS 132',
-          provider: u.empresa || 'MineSafe / Dräger Mining',
-          startDate: arr.fechaInicioArriendo || '2025-01-01',
-          endDate: arr.fechaTerminoArriendo || '2026-01-01',
-          monthlyCostClp: 220000,
-          paymentStatus: arr.estadoArriendo === 'Vigente' ? 'al_dia' : (arr.estadoArriendo === 'Vencido' ? 'vencido' : 'proximo_a_vencer'),
-          lastPaymentDate: '2025-11-20',
-          nextDueDate: arr.fechaTerminoArriendo || '2026-03-31',
-          assignedTechnician: u.tec || 'Ingeniería MineSafe',
-          notes: `Arriendo de ${u.nombre || 'Trabajador'} (${u.cargo || 'Operador'}).`,
-        });
-      }
-    });
+    if (!scope?.role || scope.role === 'superadmin') {
+      Object.keys(precargaData).forEach((userKey) => {
+        const u = precargaData[userKey];
+        const arr = u?.arriendo;
+        if (arr && arr.idArriendo && !seenContracts.has(arr.idArriendo)) {
+          seenContracts.add(arr.idArriendo);
+          list.push({
+            id: arr.idArriendo,
+            organizationId: DEFAULT_ORGANIZATION.id,
+            contractNumber: arr.idArriendo,
+            deviceCode: u?.dispositivo?.nombreDispositivo || u?.dispositivo?.idDispositivo || 'DS-FLEET',
+            deviceType: 'Detector Portátil MultiGas Certificado DS 132',
+            provider: u.empresa || 'MineSafe / Dräger Mining',
+            startDate: arr.fechaInicioArriendo || '2025-01-01',
+            endDate: arr.fechaTerminoArriendo || '2026-01-01',
+            monthlyCostClp: 220000,
+            paymentStatus: arr.estadoArriendo === 'Vigente' ? 'al_dia' : (arr.estadoArriendo === 'Vencido' ? 'vencido' : 'proximo_a_vencer'),
+            lastPaymentDate: '2025-11-20',
+            nextDueDate: arr.fechaTerminoArriendo || '2026-03-31',
+            assignedTechnician: u.tec || 'Ingeniería MineSafe',
+            notes: `Arriendo de ${u.nombre || 'Trabajador'} (${u.cargo || 'Operador'}).`,
+          });
+        }
+      });
+    }
 
     callback(list);
   };
 
-  const unsub1 = onValue(contractsRef, (snapshot) => {
-    if (snapshot.exists()) {
-      directContracts = snapshot.val() || {};
+  const unsub1 = onValue(
+    contractsRef,
+    (snapshot) => {
+      directContracts = snapshot.exists() ? snapshot.val() || {} : {};
       emitCombined();
+    },
+    (err) => {
+      console.warn('Error subscribing to RTDB /contratos:', err?.message || err);
     }
-  });
+  );
 
-  const unsub2 = onValue(precargaRef, (snapshot) => {
-    if (snapshot.exists()) {
-      precargaData = snapshot.val() || {};
-      emitCombined();
-    }
-  });
+  const unsub2 = !scope?.role || scope.role === 'superadmin'
+    ? onValue(
+        precargaRef,
+        (snapshot) => {
+          if (snapshot.exists()) {
+            precargaData = snapshot.val() || {};
+            emitCombined();
+          }
+        },
+        () => {}
+      )
+    : () => {};
 
   return () => {
     unsub1();
@@ -1085,8 +1264,9 @@ export async function addUserToRTDB(
       deviceId: user.assignedDeviceCode || '',
       updatedAt: new Date().toISOString(),
     });
-  } catch (err) {
+  } catch (err: any) {
     console.warn('Error adding user to RTDB:', err);
+    throw new Error(err?.message || 'No se pudo registrar el perfil del usuario en Firebase RTDB.');
   }
 }
 
@@ -1180,40 +1360,144 @@ export async function updateUserInRTDB(
   }
 }
 
-export async function addRentalContractToRTDB(rental: DeviceRental): Promise<void> {
-  try {
-    const contractRef = ref(rtdb, `contratos/${rental.contractNumber}`);
-    await set(contractRef, {
-      deviceId: rental.deviceCode,
-      organizationId: rental.organizationId || DEFAULT_ORGANIZATION.id,
-      empresa: rental.provider,
-      monto: rental.monthlyCostClp,
-      tec: rental.assignedTechnician,
-      estadoGeneral: rental.paymentStatus === 'al_dia' ? 'Activo' : 'Por Vencer',
-      fechaInicioArriendo: rental.startDate,
-      fechaFinArriendo: rental.endDate,
-      fechaInicioContrato: rental.startDate,
-      fechaFinContrato: rental.endDate,
-    });
-  } catch (err) {
-    console.warn('Error adding contract to RTDB:', err);
-  }
+export function buildRentalContractRTDBPayload(rental: DeviceRental): Record<string, any> {
+  const now = Date.now();
+  const orgId = rental.organizationId || DEFAULT_ORGANIZATION.id;
+  const cleanContractNumber = (rental.contractNumber || '').trim();
+  const cleanDeviceCode = (rental.deviceCode || '').trim();
+  const cleanProvider = (rental.provider || '').trim();
+  const monthlyCost = Number(rental.monthlyCostClp) || 0;
+  const estadoGeneral =
+    rental.paymentStatus === 'al_dia'
+      ? 'Activo'
+      : rental.paymentStatus === 'vencido'
+      ? 'Vencido'
+      : 'Por Vencer';
+
+  return {
+    id: rental.id || cleanContractNumber,
+    contractNumber: cleanContractNumber,
+    deviceCode: cleanDeviceCode,
+    deviceType: rental.deviceType || 'Detector MultiGas Certificado DS 132',
+    provider: cleanProvider,
+    organizationId: orgId,
+    monthlyCostClp: monthlyCost,
+    paymentStatus: rental.paymentStatus || 'al_dia',
+    startDate: rental.startDate,
+    endDate: rental.endDate,
+    lastPaymentDate: rental.lastPaymentDate,
+    nextDueDate: rental.nextDueDate,
+    assignedTechnician: rental.assignedTechnician || 'Ingeniería MineSafe',
+    notes: rental.notes || '',
+    // Campos legacy mantenidos para compatibilidad
+    deviceId: cleanDeviceCode,
+    empresa: cleanProvider,
+    monto: monthlyCost,
+    tec: rental.assignedTechnician || 'Ingeniería MineSafe',
+    estadoGeneral,
+    fechaInicioArriendo: rental.startDate,
+    fechaFinArriendo: rental.endDate,
+    fechaInicioContrato: rental.startDate,
+    fechaFinContrato: rental.endDate,
+    fechaUltimoPago: rental.lastPaymentDate,
+    updatedAt: now,
+  };
 }
 
-export async function recordPaymentInRTDB(contractId: string, amount: number): Promise<void> {
-  try {
-    const pagoId = `PAGO-${Date.now().toString().slice(-4)}`;
-    const pagoRef = ref(rtdb, `pagos/${pagoId}`);
-    await set(pagoRef, {
-      idContrato: contractId,
-      monto: amount,
-      estado: 'Pagado',
-      fechaPago: new Date().toISOString().split('T')[0],
-      referencia: `REF-${pagoId}`,
-    });
-  } catch (err) {
-    console.warn('Error recording payment in RTDB:', err);
+export async function addRentalContractToRTDB(
+  rental: DeviceRental,
+  actingUser?: UserProfile | null
+): Promise<void> {
+  if (actingUser) {
+    if (actingUser.status !== 'activo') {
+      throw new Error('Tu sesión se encuentra inactiva.');
+    }
+    if (actingUser.role !== 'admin' && actingUser.role !== 'superadmin') {
+      throw new Error('Permisos insuficientes: solo Administradores o SuperAdministrador pueden registrar contratos.');
+    }
   }
+  const cleanKey = (rental.contractNumber || '').trim().replace(/[.#$/[\]]/g, '_');
+  if (!cleanKey || !rental.deviceCode?.trim() || !rental.provider?.trim()) {
+    throw new Error('Número de contrato, código de dispositivo y proveedor son obligatorios.');
+  }
+  if (!(Number(rental.monthlyCostClp) > 0)) {
+    throw new Error('El costo mensual del contrato debe ser mayor a 0.');
+  }
+
+  const contractRef = ref(rtdb, `contratos/${cleanKey}`);
+  const existingSnap = await get(contractRef).catch(() => null);
+  if (existingSnap && existingSnap.exists()) {
+    throw new Error(`Ya existe un contrato registrado con el número "${cleanKey}".`);
+  }
+
+  const payload = buildRentalContractRTDBPayload({ ...rental, contractNumber: cleanKey });
+  await set(contractRef, { ...payload, createdAt: Date.now() });
+}
+
+export async function recordPaymentInRTDB(
+  contractId: string,
+  amount: number,
+  options?: { organizationId?: string; actingUser?: UserProfile | null }
+): Promise<{ pagoId: string; fechaPago: string }> {
+  const actingUser = options?.actingUser;
+  if (actingUser) {
+    if (actingUser.status !== 'activo') {
+      throw new Error('Tu sesión se encuentra inactiva.');
+    }
+    if (actingUser.role !== 'admin' && actingUser.role !== 'superadmin') {
+      throw new Error('Permisos insuficientes: solo Administradores o SuperAdministrador pueden registrar pagos.');
+    }
+  }
+
+  const safeAmount = Number(amount);
+  if (!Number.isFinite(safeAmount) || safeAmount <= 0) {
+    throw new Error('El monto del pago debe ser mayor a cero.');
+  }
+
+  const cleanContractKey = contractId.trim().replace(/[.#$/[\]]/g, '_');
+  const contractRef = ref(rtdb, `contratos/${cleanContractKey}`);
+  const contractSnap = await get(contractRef).catch(() => null);
+  const existingContract = contractSnap?.exists() ? contractSnap.val() : null;
+
+  if (existingContract && (existingContract.paymentStatus === 'al_dia' || existingContract.estadoGeneral === 'Activo')) {
+    if (existingContract.fechaUltimoPago === new Date().toISOString().split('T')[0]) {
+      throw new Error(`El contrato ${cleanContractKey} ya registra un pago al día con fecha de hoy.`);
+    }
+  }
+
+  const targetOrgId =
+    existingContract?.organizationId ||
+    options?.organizationId ||
+    actingUser?.organizationId ||
+    DEFAULT_ORGANIZATION.id;
+
+  const now = Date.now();
+  const fechaPago = new Date(now).toISOString().split('T')[0];
+  const pagoId = `PAGO-${now}-${Math.random().toString(36).slice(2, 6).toUpperCase()}`;
+
+  await set(ref(rtdb, `pagos/${pagoId}`), {
+    id: pagoId,
+    idContrato: cleanContractKey,
+    organizationId: targetOrgId,
+    monto: safeAmount,
+    estado: 'Pagado',
+    fechaPago,
+    referencia: `REF-${pagoId}`,
+    recordedBy: actingUser?.email || actingUser?.name || 'Sistema',
+    timestamp: now,
+  });
+
+  if (contractSnap && contractSnap.exists()) {
+    await update(contractRef, {
+      paymentStatus: 'al_dia',
+      estadoGeneral: 'Activo',
+      lastPaymentDate: fechaPago,
+      fechaUltimoPago: fechaPago,
+      updatedAt: now,
+    });
+  }
+
+  return { pagoId, fechaPago };
 }
 
 export async function sendESP32Command(deviceId: string, command: 'pause' | 'resume' | 'ping'): Promise<void> {
@@ -1479,11 +1763,16 @@ function formatAlertTimestamp(ts: unknown, fallbackText?: string): string {
   return fallbackText || 'Reciente';
 }
 
-function buildAlertBasePayload(alert: SafetyAlert, now: number): Record<string, any> {
+export function buildAlertBasePayload(alert: SafetyAlert, now: number): Record<string, any> {
   return {
     id: alert.id,
     codigo: alert.code,
     organizationId: alert.organizationId || DEFAULT_ORGANIZATION.id,
+    // Campos canónicos exigidos por database.rules.json
+    title: alert.title,
+    severity: alert.severity,
+    status: alert.resolved ? 'resuelta' : 'activa',
+    // Campos legacy mantenidos para compatibilidad con lectores existentes
     titulo: alert.title,
     severidad: alert.severity,
     variable: alert.variableName,
@@ -1502,51 +1791,113 @@ function buildAlertBasePayload(alert: SafetyAlert, now: number): Record<string, 
   };
 }
 
-export async function broadcastAlertToRTDB(alert: SafetyAlert): Promise<void> {
-  try {
-    const now = alert.timestampMs || Date.now();
-    const alertRef = ref(rtdb, `alertas/${alert.id}`);
-    const payload = buildAlertBasePayload(alert, now);
-    if (alert.resolutionDetails) {
-      payload.tipo_resolucion = alert.resolutionDetails.resolutionType;
-      if (alert.resolutionDetails.closingTitle) {
-        payload.titulo_cierre = alert.resolutionDetails.closingTitle;
-      }
-      payload.descripcion_cierre = alert.resolutionDetails.comment;
-      payload.acciones_correctivas = alert.resolutionDetails.correctiveActions || '';
-      payload.resuelto_por = alert.resolutionDetails.resolvedBy;
-      payload.resuelto_en = alert.resolutionDetails.resolvedAt;
-      payload.timestamp_cierre = now;
-      if (alert.resolutionDetails.attachments?.length) {
-        payload.adjuntos = alert.resolutionDetails.attachments;
-      }
-    }
-    await set(alertRef, payload);
+export function mapRTDBAlertRecord(id: string, data: any, bit: any = {}): SafetyAlert {
+  const resolved = Boolean(data?.resuelta || data?.status === 'resuelta' || bit?.descripcion || bit?.tipoResolucion);
+  const comment = data?.descripcion_cierre || bit?.descripcion || '';
+  const hasResolution =
+    resolved ||
+    Boolean(comment) ||
+    Boolean(data?.tipo_resolucion) ||
+    Boolean(bit?.tipoResolucion);
 
-    // 2. If it's a critical alert, activate alarma and buzzer on RTDB devices so hardware/web react
-    if (alert.severity === 'critico') {
-      const devIds = Array.from(new Set([alert.sensorId, 'device_38A839E81F84']));
-      for (const id of devIds) {
-        await ensureValidDevicePayload(id, {
-          comando_web: 'ENCENDER',
-          silencio_remoto: false,
-          alarma: true,
-          alarma_activa: true,
-          buzzer: true,
-          luz: true,
-          last_update_server: now,
-        }).catch(() => {});
-      }
-      await update(ref(rtdb, 'emergencia'), {
-        activa: true,
-        esSimulacro: false,
-        alertaId: alert.id,
-        titulo: alert.title,
-        timestamp: now,
+  const attachmentsRaw = data?.adjuntos || bit?.adjuntos;
+  const attachments: AlertAttachment[] | undefined = Array.isArray(attachmentsRaw)
+    ? attachmentsRaw
+    : attachmentsRaw && typeof attachmentsRaw === 'object'
+    ? (Object.values(attachmentsRaw) as AlertAttachment[])
+    : undefined;
+
+  const tsNum = Math.max(
+    typeof data?.timestamp_cierre === 'number' ? data.timestamp_cierre : 0,
+    typeof bit?.timestamp === 'number' ? bit.timestamp : 0,
+    typeof data?.timestamp === 'number' ? data.timestamp : 0
+  );
+
+  return {
+    id,
+    code: data?.codigo || id,
+    organizationId: data?.organizationId || bit?.organizationId || DEFAULT_ORGANIZATION.id,
+    title:
+      data?.title ||
+      data?.titulo ||
+      (bit?.idAlerta ? `Contingencia Registrada (${bit.idAlerta})` : 'Alerta de Seguridad'),
+    severity: ((data?.severity || data?.severidad) as SafetyAlert['severity']) || 'advertencia',
+    variableName: data?.variable || 'Variable Ambiental',
+    sensorId: data?.sensorId || 'device_38A839E81F84',
+    sensorCode: data?.sensorCode || data?.sensorId || 'ESP32',
+    sectorName: data?.sector || 'Mina Chuquicamata - Rampa Principal',
+    recordedValue: data?.valor || '-',
+    safeLimit: data?.limite || '-',
+    timestamp: data?.creado_en_texto || formatAlertTimestamp(tsNum, bit?.fecha),
+    timestampMs: tsNum,
+    acknowledged: Boolean(data?.atendida || resolved),
+    acknowledgedBy: data?.atendida_por,
+    acknowledgedAt: typeof data?.timestamp_atendida === 'number' ? data.timestamp_atendida : undefined,
+    resolved,
+    suggestedAction:
+      data?.accionSugerida ||
+      data?.descripcion ||
+      'Verificar condiciones del sector y registrar medidas de control.',
+    ...(hasResolution
+      ? {
+          resolutionDetails: {
+            resolutionType: data?.tipo_resolucion || bit?.tipoResolucion || 'simulacro',
+            closingTitle: data?.titulo_cierre || bit?.tituloCierre || undefined,
+            comment,
+            correctiveActions: data?.acciones_correctivas || bit?.accionesCorrectivas || '',
+            resolvedBy: data?.resuelto_por || bit?.supervisor || 'Supervisor de Turno',
+            resolvedAt:
+              data?.resuelto_en ||
+              bit?.fecha ||
+              formatAlertTimestamp(data?.timestamp_cierre || bit?.timestamp),
+            attachments,
+          },
+        }
+      : {}),
+  };
+}
+
+export async function broadcastAlertToRTDB(alert: SafetyAlert): Promise<void> {
+  const now = alert.timestampMs || Date.now();
+  const alertRef = ref(rtdb, `alertas/${alert.id}`);
+  const payload = buildAlertBasePayload(alert, now);
+  if (alert.resolutionDetails) {
+    payload.tipo_resolucion = alert.resolutionDetails.resolutionType;
+    if (alert.resolutionDetails.closingTitle) {
+      payload.titulo_cierre = alert.resolutionDetails.closingTitle;
+    }
+    payload.descripcion_cierre = alert.resolutionDetails.comment;
+    payload.acciones_correctivas = alert.resolutionDetails.correctiveActions || '';
+    payload.resuelto_por = alert.resolutionDetails.resolvedBy;
+    payload.resuelto_en = alert.resolutionDetails.resolvedAt;
+    payload.timestamp_cierre = now;
+    if (alert.resolutionDetails.attachments?.length) {
+      payload.adjuntos = alert.resolutionDetails.attachments;
+    }
+  }
+  await set(alertRef, payload);
+
+  // If it's a critical alert, activate alarma and buzzer on RTDB devices so hardware/web react
+  if (alert.severity === 'critico') {
+    const devIds = Array.from(new Set([alert.sensorId, 'device_38A839E81F84']));
+    for (const id of devIds) {
+      await ensureValidDevicePayload(id, {
+        comando_web: 'ENCENDER',
+        silencio_remoto: false,
+        alarma: true,
+        alarma_activa: true,
+        buzzer: true,
+        luz: true,
+        last_update_server: now,
       }).catch(() => {});
     }
-  } catch (err) {
-    console.warn('Error broadcasting alert to RTDB:', err);
+    await update(ref(rtdb, 'emergencia'), {
+      activa: true,
+      esSimulacro: false,
+      alertaId: alert.id,
+      titulo: alert.title,
+      timestamp: now,
+    }).catch(() => {});
   }
 }
 
@@ -1570,7 +1921,10 @@ export async function acknowledgeAlertInRTDB(
   });
 }
 
-export function subscribeToRTDBAlerts(callback: (alerts: SafetyAlert[]) => void): () => void {
+export function subscribeToRTDBAlerts(
+  callback: (alerts: SafetyAlert[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
   let rawAlertas: Record<string, any> = {};
   let rawBitacora: Record<string, any> = {};
   let alertasReady = false;
@@ -1584,69 +1938,7 @@ export function subscribeToRTDBAlerts(callback: (alerts: SafetyAlert[]) => void)
       const data = rawAlertas[id] || {};
       const bit = rawBitacora[id] || {};
       if (!data && !bit) return;
-
-      const resolved = Boolean(data.resuelta || bit.descripcion || bit.tipoResolucion);
-      const comment = data.descripcion_cierre || bit.descripcion || '';
-      const hasResolution =
-        resolved ||
-        Boolean(comment) ||
-        Boolean(data.tipo_resolucion) ||
-        Boolean(bit.tipoResolucion);
-
-      const attachmentsRaw = data.adjuntos || bit.adjuntos;
-      const attachments: AlertAttachment[] | undefined = Array.isArray(attachmentsRaw)
-        ? attachmentsRaw
-        : attachmentsRaw && typeof attachmentsRaw === 'object'
-        ? (Object.values(attachmentsRaw) as AlertAttachment[])
-        : undefined;
-
-      const tsNum = Math.max(
-        typeof data.timestamp_cierre === 'number' ? data.timestamp_cierre : 0,
-        typeof bit.timestamp === 'number' ? bit.timestamp : 0,
-        typeof data.timestamp === 'number' ? data.timestamp : 0
-      );
-
-      const mappedAlert: SafetyAlert = {
-        id,
-        code: data.codigo || id,
-        organizationId: data.organizationId || DEFAULT_ORGANIZATION.id,
-        title: data.titulo || (bit.idAlerta ? `Contingencia Registrada (${bit.idAlerta})` : 'Alerta de Seguridad'),
-        severity: (data.severidad as SafetyAlert['severity']) || 'advertencia',
-        variableName: data.variable || 'Variable Ambiental',
-        sensorId: data.sensorId || 'device_38A839E81F84',
-        sensorCode: data.sensorCode || data.sensorId || 'ESP32',
-        sectorName: data.sector || 'Mina Chuquicamata - Rampa Principal',
-        recordedValue: data.valor || '-',
-        safeLimit: data.limite || '-',
-        timestamp: data.creado_en_texto || formatAlertTimestamp(tsNum, bit.fecha),
-        timestampMs: tsNum,
-        acknowledged: Boolean(data.atendida || resolved),
-        acknowledgedBy: data.atendida_por,
-        acknowledgedAt: typeof data.timestamp_atendida === 'number' ? data.timestamp_atendida : undefined,
-        resolved,
-        suggestedAction:
-          data.accionSugerida ||
-          data.descripcion ||
-          'Verificar condiciones del sector y registrar medidas de control.',
-        ...(hasResolution
-          ? {
-              resolutionDetails: {
-                resolutionType: data.tipo_resolucion || bit.tipoResolucion || 'simulacro',
-                closingTitle: data.titulo_cierre || bit.tituloCierre || undefined,
-                comment,
-                correctiveActions: data.acciones_correctivas || bit.accionesCorrectivas || '',
-                resolvedBy: data.resuelto_por || bit.supervisor || 'Supervisor de Turno',
-                resolvedAt:
-                  data.resuelto_en ||
-                  bit.fecha ||
-                  formatAlertTimestamp(data.timestamp_cierre || bit.timestamp),
-                attachments,
-              },
-            }
-          : {}),
-      };
-
-      mapped.push(mappedAlert);
+      mapped.push(mapRTDBAlertRecord(id, data, bit));
     });
 
     mapped.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
@@ -1671,27 +1963,27 @@ export function subscribeToRTDBAlerts(callback: (alerts: SafetyAlert[]) => void)
   };
 
   const unsubAlertas = onValue(
-    ref(rtdb, 'alertas'),
+    buildOrgScopedQuery('alertas', scope),
     (snapshot) => {
       rawAlertas = snapshot.exists() ? snapshot.val() || {} : {};
       alertasReady = true;
       emitCombined();
     },
     (err) => {
-      console.warn('Error subscribing to RTDB /alertas:', err);
+      console.warn('Error subscribing to RTDB /alertas:', err?.message || err);
       alertasReady = true;
       emitCombined();
     }
   );
 
   const unsubBitacora = onValue(
-    ref(rtdb, 'bitacora_contingencias'),
+    buildOrgScopedQuery('bitacora_contingencias', scope),
     (snapshot) => {
       rawBitacora = snapshot.exists() ? snapshot.val() || {} : {};
       emitCombined();
     },
     (err) => {
-      console.warn('Error subscribing to RTDB /bitacora_contingencias:', err);
+      console.warn('Error subscribing to RTDB /bitacora_contingencias:', err?.message || err);
     }
   );
 
@@ -1732,6 +2024,8 @@ export async function resolveAlertInRTDB(
     typeof alertOrId === 'object' && alertOrId !== null
       ? buildAlertBasePayload(alertOrId, alertOrId.timestampMs || now)
       : {};
+  const orgId =
+    (typeof alertOrId === 'object' && alertOrId?.organizationId) || DEFAULT_ORGANIZATION.id;
 
   const cleanAttachments = (details.attachments || []).map((a) => ({ ...a }));
 
@@ -1739,6 +2033,8 @@ export async function resolveAlertInRTDB(
   await update(alertRef, {
     ...baseFields,
     id: alertId,
+    organizationId: orgId,
+    status: 'resuelta',
     resuelta: true,
     atendida: true,
     tipo_resolucion: details.resolutionType,
@@ -1755,6 +2051,7 @@ export async function resolveAlertInRTDB(
   await set(bitacoraRef, {
     alertaId: alertId,
     idAlerta: alertId,
+    organizationId: orgId,
     titulo: details.closingTitle || (typeof alertOrId === 'object' ? alertOrId.title : 'Contingencia Resuelta'),
     estado: 'resuelta',
     tipoResolucion: details.resolutionType,
@@ -2088,13 +2385,19 @@ export async function resetThresholdConfigToDefault(
  */
 export async function saveAlertThresholdEvent(event: AlertEventRecord): Promise<void> {
   try {
+    const orgId = event.organizationId || DEFAULT_ORGANIZATION.id;
+    const enrichedEvent: AlertEventRecord = {
+      ...event,
+      organizationId: orgId,
+    };
     const eventRef = ref(rtdb, `eventos_umbrales/${event.id}`);
-    await set(eventRef, event);
+    await set(eventRef, enrichedEvent);
 
     // Si el evento está activo y es de advertencia o crítico, reflejarlo en la lista de alertas activas
     if (event.estado === 'activa' && (event.nivel === 'advertencia' || event.nivel === 'critico')) {
       const safetyAlert: SafetyAlert = {
         id: event.id,
+        organizationId: orgId,
         code: `EVT-${event.variable.toUpperCase()}-${event.id.slice(-6)}`,
         title: `Umbral ${event.nivel.toUpperCase()}: ${event.variable_label}`,
         severity: event.nivel === 'critico' ? 'critico' : 'advertencia',
@@ -2105,6 +2408,7 @@ export async function saveAlertThresholdEvent(event: AlertEventRecord): Promise<
         recordedValue: `${event.valor_detectado} ${event.unidad}`,
         safeLimit: `< ${event.umbral_superado} ${event.unidad}`,
         timestamp: event.fecha_hora,
+        timestampMs: event.timestamp,
         acknowledged: false,
         resolved: false,
         suggestedAction: event.nivel === 'critico'
@@ -2137,9 +2441,10 @@ export async function updateAlertThresholdEvent(
  * Suscribe a los eventos históricos y en vivo generados por el motor de umbrales
  */
 export function subscribeToAlertEvents(
-  callback: (events: AlertEventRecord[]) => void
+  callback: (events: AlertEventRecord[]) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
-  const eventsRef = ref(rtdb, 'eventos_umbrales');
+  const eventsRef = buildOrgScopedQuery('eventos_umbrales', scope);
 
   return onValue(eventsRef, (snapshot) => {
     if (snapshot.exists()) {
@@ -2154,7 +2459,7 @@ export function subscribeToAlertEvents(
       callback([]);
     }
   }, (err) => {
-    console.warn('Error subscribing to alert events:', err);
+    console.warn('Error subscribing to alert events:', err?.message || err);
     callback([]);
   });
 }
@@ -2177,6 +2482,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         reportes: true,
         faenas: true,
         usuarios: true,
+        visor_3d: true,
       },
       operador: {
         dashboard: true,
@@ -2187,6 +2493,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         reportes: true,
         faenas: true,
         usuarios: false,
+        visor_3d: false,
       },
     },
     userOverrides: {},
@@ -2660,9 +2967,10 @@ export async function saveSiteToRTDB(
 }
 
 export function subscribeToRTDBSites(
-  callback: (sites: MiningSite[]) => void
+  callback: (sites: MiningSite[]) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
-  const sitesRef = ref(rtdb, 'faenas');
+  const sitesRef = buildOrgScopedQuery('faenas', scope);
   return onValue(
     sitesRef,
     (snapshot) => {
@@ -2675,7 +2983,7 @@ export function subscribeToRTDBSites(
       }
     },
     (err) => {
-      console.warn('Error subscribing to RTDB /faenas:', err);
+      console.warn('Error subscribing to RTDB /faenas:', err?.message || err);
       callback([]);
     }
   );
@@ -2687,8 +2995,41 @@ export function subscribeToRTDBSites(
  * ============================================================================
  */
 export function subscribeToRTDBOrganizations(
-  callback: (orgs: Organization[]) => void
+  callback: (orgs: Organization[]) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
+  if (scope?.role && scope.role !== 'superadmin') {
+    const orgId =
+      scope.organizationId && scope.organizationId !== 'all'
+        ? scope.organizationId
+        : DEFAULT_ORGANIZATION_ID;
+    return onValue(
+      ref(rtdb, `organizaciones/${orgId}`),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          const val = snapshot.val() || {};
+          callback([
+            {
+              id: orgId,
+              name: val?.name || orgId,
+              rut: val?.rut || '',
+              industry: val?.industry || 'Minería',
+              status: val?.status === 'suspendida' ? 'suspendida' : 'activa',
+              createdAt: typeof val?.createdAt === 'number' ? val.createdAt : Date.now(),
+              updatedAt: val?.updatedAt,
+              createdBy: val?.createdBy,
+            },
+          ]);
+        } else {
+          callback([DEFAULT_ORGANIZATION]);
+        }
+      },
+      () => {
+        callback([DEFAULT_ORGANIZATION]);
+      }
+    );
+  }
+
   const orgsRef = ref(rtdb, 'organizaciones');
   return onValue(
     orgsRef,
@@ -2758,9 +3099,10 @@ export async function deleteOrganizationFromRTDB(
  * ============================================================================
  */
 export function subscribeToRTDBAssignments(
-  callback: (assignments: WorkerAssignment[]) => void
+  callback: (assignments: WorkerAssignment[]) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
-  const assignRef = ref(rtdb, 'asignaciones');
+  const assignRef = buildOrgScopedQuery('asignaciones', scope);
   return onValue(
     assignRef,
     (snapshot) => {
@@ -2828,9 +3170,12 @@ export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise
     if (prev.sig === sig && elapsed < 30000) return;
   }
 
-  lastTelemetryWriteMap[device.id] = { ts: now, sig };
+  // Evitar colisiones con prev.ts garantizando marca estrictamente creciente
+  const safeTs = prev && now <= prev.ts ? prev.ts + 1 : now;
+  lastTelemetryWriteMap[device.id] = { ts: safeTs, sig };
+
   const sample: TelemetryHistoryPoint = {
-    timestamp: now,
+    timestamp: safeTs,
     co: device.rawCO ?? null,
     pm25: device.rawPM25 ?? null,
     temperatura: device.rawTemp ?? null,
@@ -2838,25 +3183,48 @@ export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise
   };
 
   try {
-    await set(ref(rtdb, `historial_telemetria/${device.id}/${now}`), sample);
+    await set(ref(rtdb, `historial_telemetria/${device.id}/${safeTs}`), sample);
   } catch (err) {
     console.warn('Error persisting telemetry history sample:', err);
   }
 }
 
+export function resolveTelemetryWindowMs(
+  rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
+  nowMs: number = Date.now()
+): { startMs: number; endMs: number; limit: number } {
+  if (typeof rangeOrOptions === 'number') {
+    const hours = Math.max(0.25, rangeOrOptions);
+    return {
+      startMs: nowMs - hours * 3600 * 1000,
+      endMs: nowMs,
+      limit: hours >= 24 * 7 ? 15000 : hours > 24 ? 5000 : 2500,
+    };
+  }
+  const endMs = typeof rangeOrOptions.endMs === 'number' && rangeOrOptions.endMs > 0
+    ? rangeOrOptions.endMs
+    : nowMs;
+  const startMs = Math.min(rangeOrOptions.startMs, endMs);
+  const limit = Math.max(100, rangeOrOptions.limit || 15000);
+  return { startMs, endMs, limit };
+}
+
 export function subscribeToTelemetryHistory(
   deviceId: string,
-  rangeHours: number,
+  rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
   callback: (points: TelemetryHistoryPoint[]) => void
 ): () => void {
   if (!deviceId) {
     callback([]);
     return () => {};
   }
+  const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
   const histQuery = query(
     ref(rtdb, `historial_telemetria/${deviceId}`),
-    orderByKey(),
-    limitToLast(600)
+    orderByChild('timestamp'),
+    startAt(startMs),
+    endAt(endMs),
+    limitToLast(limit)
   );
   return onValue(
     histQuery,
@@ -2865,7 +3233,6 @@ export function subscribeToTelemetryHistory(
         callback([]);
         return;
       }
-      const cutoff = Date.now() - rangeHours * 3600 * 1000;
       const raw = snapshot.val() || {};
       const points: TelemetryHistoryPoint[] = Object.keys(raw)
         .map((k) => {
@@ -2879,12 +3246,12 @@ export function subscribeToTelemetryHistory(
             humedad: typeof item?.humedad === 'number' ? item.humedad : null,
           };
         })
-        .filter((p) => Number.isFinite(p.timestamp) && p.timestamp >= cutoff)
+        .filter((p) => Number.isFinite(p.timestamp) && p.timestamp >= startMs && p.timestamp <= endMs)
         .sort((a, b) => a.timestamp - b.timestamp);
       callback(points);
     },
     (err) => {
-      console.warn('Error subscribing to telemetry history:', err);
+      console.warn('Error subscribing to telemetry history:', err?.message || err);
       callback([]);
     }
   );
@@ -2906,7 +3273,8 @@ const MAX_ATTACHMENT_BYTES = 5 * 1024 * 1024; // 5 MB
 export async function uploadAlertAttachmentToStorage(
   alertId: string,
   file: File,
-  uploadedBy: string
+  uploadedBy: string,
+  organizationId?: string
 ): Promise<AlertAttachment> {
   if (!ALLOWED_ATTACHMENT_MIME.has(file.type)) {
     throw new Error('Formato no permitido. Solo se aceptan imágenes JPG, PNG, WEBP o documentos PDF.');
@@ -2928,6 +3296,7 @@ export async function uploadAlertAttachmentToStorage(
     const attachment: AlertAttachment = {
       id: attId,
       alertId: safeAlertId,
+      organizationId: organizationId || DEFAULT_ORGANIZATION.id,
       fileName: file.name,
       contentType: file.type,
       sizeBytes: file.size,

@@ -3,7 +3,7 @@ import express, { type Request, type Response } from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { defaultTelemetryCollector } from './src/services/telemetryCollector';
+import { defaultTelemetryCollector } from './src/services/telemetryCollector.ts';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);

@@ -1,4 +1,4 @@
-import type { TelemetryHistoryPoint } from '../types';
+import type { TelemetryHistoryPoint } from '../types/index.ts';
 
 export interface TelemetryIngestPayload {
   deviceId: string;

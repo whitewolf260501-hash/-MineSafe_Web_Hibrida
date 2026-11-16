@@ -1,0 +1,2774 @@
+import React, { useState, useEffect, useRef } from 'react';
+import {
+  Crown,
+  Lock,
+  Unlock,
+  Eye,
+  EyeOff,
+  Sliders,
+  Layout,
+  Save,
+  RotateCcw,
+  ShieldAlert,
+  CheckCircle2,
+  AlertCircle,
+  Users,
+  Search,
+  Flame,
+  Wind,
+  Thermometer,
+  Droplets,
+  Activity,
+  Gauge,
+  Megaphone,
+  Shield,
+  HardHat,
+  Cpu,
+  Volume2,
+  Battery,
+  Radio,
+  Server,
+  Plus,
+  Trash2,
+  Edit3,
+  Wifi,
+  WifiOff,
+  Check,
+  Building2
+} from 'lucide-react';
+import {
+  ControllableTab,
+  EquiposSubTab,
+  DeviceCategory,
+  Organization,
+  PlatformConfig,
+  RegisteredDeviceConfig,
+  SensorDevice,
+  UserProfile,
+  UserRole,
+  WindowOverrideValue
+} from '../types';
+import {
+  DEFAULT_PLATFORM_CONFIG,
+  DEFAULT_ORGANIZATION,
+  savePlatformConfig,
+  resetPlatformConfigToDefault,
+  initializeRegisteredDeviceInRTDB,
+  normalizeEmailOverrideKey,
+  saveOrganizationToRTDB,
+  deleteOrganizationFromRTDB
+} from '../services/firebase';
+import { soundAlert } from '../services/audioAlert';
+
+interface SuperAdminControlViewProps {
+  currentUser: UserProfile;
+  usersList: UserProfile[];
+  platformConfig: PlatformConfig;
+  rtdbDevices?: SensorDevice[];
+  organizations?: Organization[];
+  activeOrganizationId?: string;
+  onSelectOrganization?: (orgId: string) => void;
+  onUpdateUserRole?: (userId: string, newRole: UserRole) => void;
+  onToggleUserStatus?: (userId: string) => void;
+}
+
+const CONTROLLABLE_WINDOWS: Array<{
+  id: ControllableTab;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'dashboard',
+    label: 'Dashboard Principal',
+    description: 'Resumen operacional, tarjetas métricas, ESP32 Gateway y gráficos',
+  },
+  {
+    id: 'monitoreo',
+    label: 'Monitoreo IoT',
+    description: 'Lectura detallada por sensor, simulaciones de gases y reset',
+  },
+  {
+    id: 'alertas',
+    label: 'Alertas y Auditoría',
+    description: 'Incidencias activas, reconocimiento, cierre y registro /registro_alarmas',
+  },
+  {
+    id: 'configuracion_alertas',
+    label: 'Config. Umbrales',
+    description: 'Ajuste de umbrales por dispositivo y bitácora de cambios',
+  },
+  {
+    id: 'equipos',
+    label: 'Equipos y Arriendos',
+    description: 'Inventario de detectores, contratos de arriendo y cuadrillas',
+  },
+  {
+    id: 'reportes',
+    label: 'Historial y Reportes',
+    description: 'Series históricas reales y exportación normativa DS 132',
+  },
+  {
+    id: 'faenas',
+    label: 'Faenas y Sectores',
+    description: 'Sectores subterráneos, niveles de profundidad y ventilación',
+  },
+  {
+    id: 'usuarios',
+    label: 'Usuarios y Roles',
+    description: 'Administración de cuentas RBAC, altas y permisos',
+  },
+];
+
+const EQUIPOS_SUB_WINDOWS: Array<{
+  id: EquiposSubTab;
+  label: string;
+  description: string;
+}> = [
+  {
+    id: 'asignaciones',
+    label: 'Asignaciones a Cuadrillas',
+    description: 'Entrega y asignación de detectores personales a trabajadores',
+  },
+  {
+    id: 'arriendos',
+    label: 'Contratos de Arriendo',
+    description: 'Vigencia, proveedores y contratos de equipos arrendados',
+  },
+  {
+    id: 'pagos',
+    label: 'Estado de Pagos y Facturas',
+    description: 'Cánones mensuales, vencimientos y registro de pagos',
+  },
+  {
+    id: 'inventario',
+    label: 'Stock de Sensores IoT',
+    description: 'Inventario técnico, baterías, señal y estado en terreno',
+  },
+];
+
+export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
+  currentUser,
+  usersList,
+  platformConfig,
+  rtdbDevices = [],
+  organizations = [DEFAULT_ORGANIZATION],
+  activeOrganizationId = 'all',
+  onSelectOrganization,
+  onUpdateUserRole,
+  onToggleUserStatus,
+}) => {
+  const [subTab, setSubTab] = useState<'windows' | 'metrics' | 'page' | 'devices' | 'organizations'>('windows');
+  const [draftConfig, setDraftConfig] = useState<PlatformConfig>(platformConfig);
+  const draftConfigRef = useRef<PlatformConfig>(platformConfig);
+  const activeSaveCountRef = useRef<number>(0);
+  const visibilityQueueRef = useRef<Promise<void>>(Promise.resolve());
+  const [visibilitySyncState, setVisibilitySyncState] = useState<'idle' | 'saving' | 'saved' | 'error'>('idle');
+  const [visibilitySyncError, setVisibilitySyncError] = useState<string | null>(null);
+  const [selectedUserId, setSelectedUserId] = useState<string>('');
+  const [userSearch, setUserSearch] = useState('');
+  const [userOverrideSection, setUserOverrideSection] = useState<'main' | 'equipos'>('main');
+  const [isSaving, setIsSaving] = useState(false);
+  const [isResetting, setIsResetting] = useState(false);
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+
+  // Estado del formulario para agregar o editar Sensores y Gateways
+  const [newDevId, setNewDevId] = useState('');
+  const [newDevName, setNewDevName] = useState('');
+  const [newDevCategory, setNewDevCategory] = useState<DeviceCategory>('sensor');
+  const [newDevSector, setNewDevSector] = useState('Mina Chuquicamata - Rampa Principal');
+  const [newDevOrganizationId, setNewDevOrganizationId] = useState(
+    activeOrganizationId && activeOrganizationId !== 'all' ? activeOrganizationId : DEFAULT_ORGANIZATION.id
+  );
+  const [newDevParentGateway, setNewDevParentGateway] = useState('device_38A839E81F84');
+  const [newDevLocalIp, setNewDevLocalIp] = useState('192.168.4.1');
+  const [initNodeInRTDB, setInitNodeInRTDB] = useState(true);
+  const [editingDeviceId, setEditingDeviceId] = useState<string | null>(null);
+
+  // Estado del formulario multi-empresa (Organizaciones)
+  const [orgName, setOrgName] = useState('');
+  const [orgRut, setOrgRut] = useState('');
+  const [orgIndustry, setOrgIndustry] = useState('Minería Subterránea & Rajo');
+  const [orgStatus, setOrgStatus] = useState<'activa' | 'suspendida'>('activa');
+  const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (activeSaveCountRef.current > 0) return;
+    const cloned = JSON.parse(JSON.stringify(platformConfig));
+    draftConfigRef.current = cloned;
+    setDraftConfig(cloned);
+  }, [platformConfig]);
+
+  // Seguridad estricta: solo el único SuperAdmin puede ver/usar este panel
+  if (currentUser.role !== 'superadmin') {
+    return (
+      <div className="p-8 text-center bg-slate-900/80 border border-rose-800/60 rounded-2xl max-w-xl mx-auto my-12 shadow-xl">
+        <ShieldAlert className="w-12 h-12 text-rose-400 mx-auto mb-4" />
+        <h2 className="text-xl font-bold text-white mb-2">Acceso Exclusivo del SuperAdministrador</h2>
+        <p className="text-slate-400 text-sm">
+          Esta consola maestra solo está disponible para el único SuperAdministrador de la plataforma.
+        </p>
+      </div>
+    );
+  }
+
+  const nonSuperUsers = usersList.filter((u) => u.role !== 'superadmin');
+  const filteredUsers = nonSuperUsers.filter((u) => {
+    const q = userSearch.toLowerCase();
+    return (
+      u.name.toLowerCase().includes(q) ||
+      u.email.toLowerCase().includes(q) ||
+      (u.rut && u.rut.toLowerCase().includes(q))
+    );
+  });
+
+  const activeTargetUser =
+    nonSuperUsers.find((u) => u.id === selectedUserId) || filteredUsers[0] || null;
+
+  const showNotice = (type: 'success' | 'error', text: string) => {
+    setFeedback({ type, text });
+    setTimeout(() => setFeedback(null), 5000);
+  };
+
+  const commitVisibilityChange = (updater: (prev: PlatformConfig) => PlatformConfig) => {
+    const nextConfig = updater(draftConfigRef.current);
+    draftConfigRef.current = nextConfig;
+    setDraftConfig(nextConfig);
+    setVisibilitySyncState('saving');
+    setVisibilitySyncError(null);
+    activeSaveCountRef.current += 1;
+
+    visibilityQueueRef.current = visibilityQueueRef.current
+      .then(async () => {
+        await savePlatformConfig(nextConfig, currentUser);
+      })
+      .then(() => {
+        if (activeSaveCountRef.current <= 1) {
+          setVisibilitySyncState('saved');
+          setVisibilitySyncError(null);
+        }
+      })
+      .catch((err: any) => {
+        const msg = err?.message || 'Error al guardar el bloqueo de ventanas en Firebase RTDB.';
+        setVisibilitySyncState('error');
+        setVisibilitySyncError(msg);
+        showNotice('error', msg);
+      })
+      .finally(() => {
+        activeSaveCountRef.current = Math.max(0, activeSaveCountRef.current - 1);
+      });
+  };
+
+  const handleToggleRoleWindow = (role: 'admin' | 'operador', tabId: ControllableTab) => {
+    soundAlert.playFeedbackBeep();
+    commitVisibilityChange((prev) => ({
+      ...prev,
+      visibility: {
+        ...prev.visibility,
+        rolePermissions: {
+          ...prev.visibility.rolePermissions,
+          [role]: {
+            ...prev.visibility.rolePermissions[role],
+            [tabId]: !prev.visibility.rolePermissions[role][tabId],
+          },
+        },
+      },
+    }));
+  };
+
+  const handleSetAllRoleWindows = (role: 'admin' | 'operador', allowed: boolean) => {
+    soundAlert.playFeedbackBeep();
+    const updated: Record<ControllableTab, boolean> = {
+      dashboard: allowed,
+      monitoreo: allowed,
+      alertas: allowed,
+      configuracion_alertas: allowed,
+      equipos: allowed,
+      reportes: allowed,
+      faenas: allowed,
+      usuarios: allowed,
+    };
+    commitVisibilityChange((prev) => ({
+      ...prev,
+      visibility: {
+        ...prev.visibility,
+        rolePermissions: {
+          ...prev.visibility.rolePermissions,
+          [role]: updated,
+        },
+      },
+    }));
+  };
+
+  const handleUserWindowOverride = (
+    targetUser: UserProfile,
+    tabId: ControllableTab,
+    value: WindowOverrideValue
+  ) => {
+    soundAlert.playFeedbackBeep();
+    const emailKey = normalizeEmailOverrideKey(targetUser.email);
+    commitVisibilityChange((prev) => {
+      const nextOverrides = { ...(prev.visibility.userOverrides || {}) };
+      const userMap = { ...(nextOverrides[targetUser.id] || {}) };
+      if (value === 'inherit') {
+        delete userMap[tabId];
+      } else {
+        userMap[tabId] = value;
+      }
+      if (Object.keys(userMap).length === 0) {
+        delete nextOverrides[targetUser.id];
+      } else {
+        nextOverrides[targetUser.id] = userMap;
+      }
+
+      const nextEmailOverrides = { ...(prev.visibility.userOverridesByEmail || {}) };
+      if (emailKey) {
+        const emailMap = { ...(nextEmailOverrides[emailKey] || {}) };
+        if (value === 'inherit') {
+          delete emailMap[tabId];
+        } else {
+          emailMap[tabId] = value;
+        }
+        if (Object.keys(emailMap).length === 0) {
+          delete nextEmailOverrides[emailKey];
+        } else {
+          nextEmailOverrides[emailKey] = emailMap;
+        }
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          userOverrides: nextOverrides,
+          userOverridesByEmail: nextEmailOverrides,
+        },
+      };
+    });
+  };
+
+  const handleToggleEquiposSubTabRole = (role: 'admin' | 'operador', subId: EquiposSubTab) => {
+    soundAlert.playFeedbackBeep();
+    commitVisibilityChange((prev) => {
+      const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
+        admin: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
+        operador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
+      };
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          equiposSubTabRolePermissions: {
+            ...currentPerms,
+            [role]: {
+              ...currentPerms[role],
+              [subId]: !currentPerms[role][subId],
+            },
+          },
+        },
+      };
+    });
+  };
+
+  const handleUserEquiposSubTabOverride = (
+    targetUser: UserProfile,
+    subId: EquiposSubTab,
+    value: WindowOverrideValue
+  ) => {
+    soundAlert.playFeedbackBeep();
+    const emailKey = normalizeEmailOverrideKey(targetUser.email);
+    commitVisibilityChange((prev) => {
+      const nextOverrides = { ...(prev.visibility.equiposSubTabUserOverrides || {}) };
+      const userMap = { ...(nextOverrides[targetUser.id] || {}) };
+      if (value === 'inherit') {
+        delete userMap[subId];
+      } else {
+        userMap[subId] = value;
+      }
+      if (Object.keys(userMap).length === 0) {
+        delete nextOverrides[targetUser.id];
+      } else {
+        nextOverrides[targetUser.id] = userMap;
+      }
+
+      const nextEmailOverrides = { ...(prev.visibility.equiposSubTabUserOverridesByEmail || {}) };
+      if (emailKey) {
+        const emailMap = { ...(nextEmailOverrides[emailKey] || {}) };
+        if (value === 'inherit') {
+          delete emailMap[subId];
+        } else {
+          emailMap[subId] = value;
+        }
+        if (Object.keys(emailMap).length === 0) {
+          delete nextEmailOverrides[emailKey];
+        } else {
+          nextEmailOverrides[emailKey] = emailMap;
+        }
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          equiposSubTabUserOverrides: nextOverrides,
+          equiposSubTabUserOverridesByEmail: nextEmailOverrides,
+        },
+      };
+    });
+  };
+
+  const handleSetAllUserEquiposSubTabs = (
+    targetUser: UserProfile,
+    value: WindowOverrideValue
+  ) => {
+    soundAlert.playFeedbackBeep();
+    const emailKey = normalizeEmailOverrideKey(targetUser.email);
+    commitVisibilityChange((prev) => {
+      const nextOverrides = { ...(prev.visibility.equiposSubTabUserOverrides || {}) };
+      const nextEmailOverrides = { ...(prev.visibility.equiposSubTabUserOverridesByEmail || {}) };
+
+      if (value === 'inherit') {
+        delete nextOverrides[targetUser.id];
+        if (emailKey) {
+          delete nextEmailOverrides[emailKey];
+        }
+      } else {
+        const allMap: Partial<Record<EquiposSubTab, WindowOverrideValue>> = {
+          asignaciones: value,
+          arriendos: value,
+          pagos: value,
+          inventario: value,
+        };
+        nextOverrides[targetUser.id] = allMap;
+        if (emailKey) {
+          nextEmailOverrides[emailKey] = { ...allMap };
+        }
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          equiposSubTabUserOverrides: nextOverrides,
+          equiposSubTabUserOverridesByEmail: nextEmailOverrides,
+        },
+      };
+    });
+  };
+
+  const handleClearUserOverrides = (targetUser: UserProfile) => {
+    soundAlert.playFeedbackBeep();
+    const emailKey = normalizeEmailOverrideKey(targetUser.email);
+    commitVisibilityChange((prev) => {
+      const nextOverrides = { ...(prev.visibility.userOverrides || {}) };
+      delete nextOverrides[targetUser.id];
+      const nextEmailOverrides = { ...(prev.visibility.userOverridesByEmail || {}) };
+      if (emailKey) {
+        delete nextEmailOverrides[emailKey];
+      }
+
+      const nextSubOverrides = { ...(prev.visibility.equiposSubTabUserOverrides || {}) };
+      delete nextSubOverrides[targetUser.id];
+      const nextSubEmailOverrides = { ...(prev.visibility.equiposSubTabUserOverridesByEmail || {}) };
+      if (emailKey) {
+        delete nextSubEmailOverrides[emailKey];
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          userOverrides: nextOverrides,
+          userOverridesByEmail: nextEmailOverrides,
+          equiposSubTabUserOverrides: nextSubOverrides,
+          equiposSubTabUserOverridesByEmail: nextSubEmailOverrides,
+        },
+      };
+    });
+  };
+
+  const handleMetricChange = (key: keyof PlatformConfig['metrics'], value: number) => {
+    setDraftConfig((prev) => ({
+      ...prev,
+      metrics: {
+        ...prev.metrics,
+        [key]: isNaN(value) ? 0 : value,
+      },
+    }));
+  };
+
+  const handleAppearanceChange = <K extends keyof PlatformConfig['appearance']>(
+    key: K,
+    value: PlatformConfig['appearance'][K]
+  ) => {
+    setDraftConfig((prev) => ({
+      ...prev,
+      appearance: {
+        ...prev.appearance,
+        [key]: value,
+      },
+    }));
+  };
+
+  const registeredDevices = draftConfig.registeredDevices || [];
+  const gatewayOptions = registeredDevices.filter(
+    (d) => d.category === 'gateway' || d.category === 'gateway_sensor'
+  );
+  const unregisteredRTDBDevices = rtdbDevices.filter(
+    (rt) => !registeredDevices.some((reg) => reg.id === rt.id)
+  );
+
+  const handleAddOrUpdateDevice = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const cleanId = newDevId.trim().replace(/[.#$/[\]]/g, '_');
+    const cleanName = newDevName.trim();
+    if (!cleanId || !cleanName) {
+      showNotice('error', 'Debes ingresar un ID de Firebase válido y un nombre para el dispositivo.');
+      return;
+    }
+
+    const exists = registeredDevices.some((d) => d.id === cleanId);
+    if (!editingDeviceId && exists) {
+      showNotice('error', `Ya existe un dispositivo registrado con el ID "${cleanId}".`);
+      return;
+    }
+
+    const deviceEntry: RegisteredDeviceConfig = {
+      id: cleanId,
+      organizationId: newDevOrganizationId || DEFAULT_ORGANIZATION.id,
+      name: cleanName,
+      category: newDevCategory,
+      sectorName: newDevSector.trim() || 'Faena Central',
+      parentGatewayId:
+        newDevCategory === 'sensor' && newDevParentGateway.trim()
+          ? newDevParentGateway.trim()
+          : undefined,
+      localIp: newDevLocalIp.trim() || '192.168.4.1',
+      enabled: true,
+      createdAt: editingDeviceId
+        ? registeredDevices.find((d) => d.id === editingDeviceId)?.createdAt || Date.now()
+        : Date.now(),
+    };
+
+    const nextDevices = editingDeviceId
+      ? registeredDevices.map((d) => (d.id === editingDeviceId ? deviceEntry : d))
+      : [...registeredDevices, deviceEntry];
+
+    const nextConfig: PlatformConfig = {
+      ...draftConfig,
+      registeredDevices: nextDevices,
+    };
+
+    setIsSaving(true);
+    try {
+      await savePlatformConfig(nextConfig, currentUser);
+      if (initNodeInRTDB) {
+        await initializeRegisteredDeviceInRTDB(deviceEntry, currentUser);
+      }
+      setDraftConfig(nextConfig);
+      setNewDevId('');
+      setNewDevName('');
+      setEditingDeviceId(null);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        editingDeviceId
+          ? `Dispositivo "${cleanName}" actualizado en la plataforma y Firebase.`
+          : `Dispositivo "${cleanName}" (${cleanId}) agregado y activado en tiempo real.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'Error al registrar el dispositivo.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleImportRTDBDevice = async (rtDev: SensorDevice, category: DeviceCategory) => {
+    const newEntry: RegisteredDeviceConfig = {
+      id: rtDev.id,
+      organizationId:
+        rtDev.organizationId ||
+        (activeOrganizationId && activeOrganizationId !== 'all' ? activeOrganizationId : DEFAULT_ORGANIZATION.id),
+      name: rtDev.name || rtDev.id,
+      category,
+      sectorName: rtDev.sectorName || 'Faena Central',
+      parentGatewayId: category === 'sensor' ? gatewayOptions[0]?.id || undefined : undefined,
+      localIp: rtDev.localIp || '192.168.4.1',
+      enabled: true,
+      createdAt: Date.now(),
+    };
+
+    const nextConfig: PlatformConfig = {
+      ...draftConfig,
+      registeredDevices: [...registeredDevices, newEntry],
+    };
+
+    setIsSaving(true);
+    try {
+      await savePlatformConfig(nextConfig, currentUser);
+      setDraftConfig(nextConfig);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Nodo "${rtDev.id}" activado en la plataforma.`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo activar el nodo detectado.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleToggleDeviceEnabled = (deviceId: string) => {
+    soundAlert.playFeedbackBeep();
+    setDraftConfig((prev) => ({
+      ...prev,
+      registeredDevices: (prev.registeredDevices || []).map((d) =>
+        d.id === deviceId ? { ...d, enabled: !d.enabled } : d
+      ),
+    }));
+  };
+
+  const handleDeleteRegisteredDevice = (deviceId: string) => {
+    if ((draftConfig.registeredDevices || []).length <= 1) {
+      showNotice('error', 'Debe permanecer al menos 1 dispositivo registrado en la plataforma.');
+      return;
+    }
+    soundAlert.playFeedbackBeep();
+    setDraftConfig((prev) => ({
+      ...prev,
+      registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== deviceId),
+    }));
+  };
+
+  const handleStartEditDevice = (dev: RegisteredDeviceConfig) => {
+    setEditingDeviceId(dev.id);
+    setNewDevId(dev.id);
+    setNewDevName(dev.name);
+    setNewDevCategory(dev.category);
+    setNewDevSector(dev.sectorName);
+    setNewDevOrganizationId(dev.organizationId || DEFAULT_ORGANIZATION.id);
+    setNewDevParentGateway(dev.parentGatewayId || '');
+    setNewDevLocalIp(dev.localIp || '192.168.4.1');
+  };
+
+  const handleSaveOrg = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!orgName.trim()) {
+      showNotice('error', 'El nombre de la organización es obligatorio.');
+      return;
+    }
+    setIsSaving(true);
+    try {
+      const existing = editingOrgId ? organizations.find((o) => o.id === editingOrgId) : undefined;
+      const cleanId =
+        editingOrgId ||
+        `org-${orgName
+          .trim()
+          .toLowerCase()
+          .replace(/[^a-z0-9]+/g, '-')
+          .replace(/^-|-$/g, '')}-${Date.now().toString().slice(-4)}`;
+      await saveOrganizationToRTDB(
+        {
+          id: cleanId,
+          name: orgName.trim(),
+          rut: orgRut.trim(),
+          industry: orgIndustry.trim() || 'Minería',
+          status: orgStatus,
+          createdAt: existing?.createdAt || Date.now(),
+        },
+        currentUser
+      );
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        editingOrgId
+          ? `Organización "${orgName.trim()}" actualizada en Firebase RTDB.`
+          : `Organización "${orgName.trim()}" creada en Firebase RTDB.`
+      );
+      setEditingOrgId(null);
+      setOrgName('');
+      setOrgRut('');
+      setOrgIndustry('Minería Subterránea & Rajo');
+      setOrgStatus('activa');
+    } catch (err: any) {
+      showNotice('error', err?.message || 'Error al guardar organización en Firebase RTDB.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleDeleteOrg = async (org: Organization) => {
+    setIsSaving(true);
+    try {
+      await deleteOrganizationFromRTDB(org.id, currentUser);
+      if (activeOrganizationId === org.id && onSelectOrganization) {
+        onSelectOrganization('all');
+      }
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Organización "${org.name}" eliminada.`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo eliminar la organización.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleSaveAll = async () => {
+    setIsSaving(true);
+    try {
+      await savePlatformConfig(draftConfig, currentUser);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        'Configuración maestra guardada en Firebase RTDB. Los permisos de ventanas, métricas y ajustes de página ya están activos para todos los usuarios.'
+      );
+    } catch (err: any) {
+      soundAlert.playFeedbackBeep();
+      showNotice('error', err?.message || 'Error al guardar la configuración maestra.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
+  const handleResetDefaults = async () => {
+    setIsResetting(true);
+    try {
+      const restored = await resetPlatformConfigToDefault(currentUser);
+      setDraftConfig(restored);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', 'Se restauraron todas las métricas, bloqueos y ajustes de página a los valores predeterminados.');
+    } catch (err: any) {
+      showNotice('error', err?.message || 'Error al restaurar valores.');
+    } finally {
+      setIsResetting(false);
+    }
+  };
+
+  const m = draftConfig.metrics;
+  const metricErrors: string[] = [];
+  if (m.coPreventivo >= m.coAdvertencia || m.coAdvertencia >= m.coCritico) {
+    metricErrors.push('Gas CO (MQ-2): debe cumplirse Preventivo < Advertencia < Crítico.');
+  }
+  if (m.pm25Preventivo >= m.pm25Advertencia || m.pm25Advertencia >= m.pm25Critico) {
+    metricErrors.push('Polvo PM2.5: debe cumplirse Preventivo < Advertencia < Crítico.');
+  }
+  if (m.tempPreventivo >= m.tempAdvertencia || m.tempAdvertencia >= m.tempCritico) {
+    metricErrors.push('Temperatura: debe cumplirse Preventivo < Advertencia < Crítico.');
+  }
+  if (m.humPreventivo >= m.humAdvertencia || m.humAdvertencia >= m.humCritico) {
+    metricErrors.push('Humedad: debe cumplirse Preventivo < Advertencia < Crítico.');
+  }
+
+  return (
+    <div className="space-y-6 pb-12">
+      {/* HEADER BANNER */}
+      <div className="bg-gradient-to-r from-slate-900 via-slate-900 to-purple-950/50 border border-purple-700/50 rounded-2xl p-5 sm:p-6 shadow-xl">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
+          <div className="flex items-start gap-3.5">
+            <div className="w-12 h-12 rounded-xl bg-purple-950 border border-purple-600/80 flex items-center justify-center text-purple-300 shadow-lg shadow-purple-950/60 shrink-0">
+              <Crown className="w-6 h-6 text-purple-300" />
+            </div>
+            <div>
+              <div className="flex flex-wrap items-center gap-2">
+                <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
+                  Control Maestro SuperAdministrador
+                </h1>
+                <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-purple-950 text-purple-200 border border-purple-600">
+                  Exclusivo SuperAdmin Único
+                </span>
+              </div>
+              <p className="text-xs sm:text-sm text-slate-300 mt-1">
+                Ajusta todas las métricas operacionales, configura la plataforma completa y decide qué ventanas pueden ver o tienen bloqueadas los demás usuarios en tiempo real.
+              </p>
+              <p className="text-[11px] text-slate-400 font-mono mt-1.5">
+                Última actualización: {platformConfig.actualizado_por || 'Sistema'} ·{' '}
+                {platformConfig.actualizado_en
+                  ? new Date(platformConfig.actualizado_en).toLocaleString('es-CL')
+                  : 'Ahora'}
+              </p>
+            </div>
+          </div>
+
+          <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+            <button
+              type="button"
+              onClick={handleResetDefaults}
+              disabled={isResetting || isSaving}
+              className="flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-xl bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 transition-colors disabled:opacity-50"
+            >
+              <RotateCcw className="w-3.5 h-3.5 text-slate-400" />
+              <span>{isResetting ? 'Restaurando...' : 'Restaurar Fábrica'}</span>
+            </button>
+
+            <button
+              type="button"
+              onClick={handleSaveAll}
+              disabled={isSaving || metricErrors.length > 0}
+              className="flex items-center gap-2 px-4 py-2 text-xs sm:text-sm font-bold rounded-xl bg-purple-600 hover:bg-purple-500 text-white shadow-lg shadow-purple-950 transition-all disabled:opacity-50"
+            >
+              <Save className="w-4 h-4" />
+              <span>{isSaving ? 'Guardando en Firebase...' : 'Guardar Todos los Cambios'}</span>
+            </button>
+          </div>
+        </div>
+
+        {/* Sub-Navigation Pills */}
+        <div className="mt-6 pt-4 border-t border-slate-800/80 flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            onClick={() => setSubTab('windows')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors border ${
+              subTab === 'windows'
+                ? 'bg-purple-950/90 text-purple-200 border-purple-500 shadow-sm'
+                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+            }`}
+          >
+            <Lock className="w-4 h-4 text-purple-400" />
+            <span>Visibilidad y Bloqueo de Ventanas</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSubTab('metrics')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors border ${
+              subTab === 'metrics'
+                ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500 shadow-sm'
+                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+            }`}
+          >
+            <Sliders className="w-4 h-4 text-cyan-400" />
+            <span>Métricas y Umbrales de la Plataforma</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSubTab('page')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors border ${
+              subTab === 'page'
+                ? 'bg-emerald-950/90 text-emerald-200 border-emerald-500 shadow-sm'
+                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+            }`}
+          >
+            <Layout className="w-4 h-4 text-emerald-400" />
+            <span>Configuración General de la Página</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSubTab('devices')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors border ${
+              subTab === 'devices'
+                ? 'bg-amber-950/90 text-amber-200 border-amber-500 shadow-sm'
+                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+            }`}
+          >
+            <Cpu className="w-4 h-4 text-amber-400" />
+            <span>Dispositivos (Sensores y Gateways)</span>
+            <span className="px-1.5 py-0.5 rounded bg-black/40 text-[10px] font-mono">
+              {registeredDevices.filter((d) => d.enabled).length}
+            </span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setSubTab('organizations')}
+            className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold transition-colors border ${
+              subTab === 'organizations'
+                ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500 shadow-sm'
+                : 'bg-slate-950/60 text-slate-400 border-slate-800 hover:text-white'
+            }`}
+          >
+            <Building2 className="w-4 h-4 text-cyan-400" />
+            <span>Empresas / Organizaciones</span>
+            <span className="px-1.5 py-0.5 rounded bg-black/40 text-[10px] font-mono">
+              {organizations.length}
+            </span>
+          </button>
+        </div>
+      </div>
+
+      {/* FEEDBACK BANNER */}
+      {feedback && (
+        <div
+          className={`p-3.5 rounded-xl border text-xs font-semibold flex items-center justify-between ${
+            feedback.type === 'error'
+              ? 'bg-rose-950/80 border-rose-700 text-rose-200'
+              : 'bg-emerald-950/80 border-emerald-700 text-emerald-200'
+          }`}
+        >
+          <div className="flex items-center gap-2">
+            {feedback.type === 'error' ? (
+              <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+            ) : (
+              <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+            )}
+            <span>{feedback.text}</span>
+          </div>
+          <button onClick={() => setFeedback(null)} className="text-[11px] underline opacity-80 hover:opacity-100">
+            Cerrar
+          </button>
+        </div>
+      )}
+
+      {/* VALIDATION ERRORS */}
+      {metricErrors.length > 0 && (
+        <div className="p-3.5 rounded-xl bg-rose-950/80 border border-rose-700 text-rose-200 text-xs space-y-1">
+          <div className="font-bold flex items-center gap-2">
+            <AlertCircle className="w-4 h-4 text-rose-400" />
+            <span>Corrige las métricas antes de guardar:</span>
+          </div>
+          {metricErrors.map((err, i) => (
+            <p key={i} className="pl-6">• {err}</p>
+          ))}
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB 1: VISIBILIDAD Y BLOQUEO DE VENTANAS POR ROL Y POR USUARIO
+         ===================================================================== */}
+      {subTab === 'windows' && (
+        <div className="space-y-4">
+          {/* Live auto-save status bar for window locks */}
+          <div
+            className={`px-4 py-2.5 rounded-xl border text-xs flex flex-wrap items-center justify-between gap-2 ${
+              visibilitySyncState === 'error'
+                ? 'bg-rose-950/80 border-rose-700 text-rose-100'
+                : visibilitySyncState === 'saving'
+                ? 'bg-amber-950/70 border-amber-700/80 text-amber-200'
+                : 'bg-emerald-950/40 border-emerald-800/70 text-emerald-200'
+            }`}
+          >
+            <div className="flex items-center gap-2 font-semibold">
+              {visibilitySyncState === 'error' ? (
+                <AlertCircle className="w-4 h-4 text-rose-400 shrink-0" />
+              ) : visibilitySyncState === 'saving' ? (
+                <Lock className="w-4 h-4 text-amber-300 animate-pulse shrink-0" />
+              ) : (
+                <CheckCircle2 className="w-4 h-4 text-emerald-400 shrink-0" />
+              )}
+              <span>
+                {visibilitySyncState === 'error'
+                  ? visibilitySyncError || 'Error al guardar bloqueos de pantallas en Firebase RTDB.'
+                  : visibilitySyncState === 'saving'
+                  ? 'Aplicando y guardando bloqueo de pantallas en Firebase RTDB...'
+                  : 'Guardado automático en tiempo real activo: cualquier bloqueo por rol o usuario se aplica al instante en Firebase RTDB.'}
+              </span>
+            </div>
+            <button
+              type="button"
+              onClick={handleSaveAll}
+              disabled={isSaving}
+              className="px-3 py-1 rounded-lg bg-purple-600 hover:bg-purple-500 text-white font-bold text-[11px] shrink-0"
+            >
+              {isSaving ? 'Guardando...' : 'Forzar Sincronización'}
+            </button>
+          </div>
+
+          <div className="grid grid-cols-1 xl:grid-cols-12 gap-6">
+          {/* LEFT: MATRIX BY ROLE */}
+          <div className="xl:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Eye className="w-4 h-4 text-purple-400" />
+                  Permisos de Ventanas por Tipo de Usuario (Rol)
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Activa o bloquea cualquier pestaña para Administradores y Operadores. El SuperAdmin siempre ve todas las ventanas.
+                </p>
+              </div>
+            </div>
+
+            {/* Quick Bulk Controls */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+              <div className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-900/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+                  <Shield className="w-3.5 h-3.5" /> Administradores
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('admin', true)}
+                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                  >
+                    Ver todas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('admin', false)}
+                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                  >
+                    Bloquear todas
+                  </button>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                  <HardHat className="w-3.5 h-3.5" /> Usuarios Normales
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('operador', true)}
+                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                  >
+                    Ver todas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('operador', false)}
+                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                  >
+                    Bloquear todas
+                  </button>
+                </div>
+              </div>
+            </div>
+
+            {/* Table of Controllable Windows */}
+            <div className="overflow-x-auto border border-slate-800 rounded-xl">
+              <table className="w-full text-left text-xs">
+                <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                  <tr>
+                    <th className="px-4 py-3">Ventana de la Plataforma</th>
+                    <th className="px-4 py-3 text-center">Administrador</th>
+                    <th className="px-4 py-3 text-center">Operador (Normal)</th>
+                  </tr>
+                </thead>
+                <tbody className="divide-y divide-slate-800/80">
+                  {CONTROLLABLE_WINDOWS.map((win) => {
+                    const adminVisible = draftConfig.visibility.rolePermissions.admin[win.id];
+                    const opVisible = draftConfig.visibility.rolePermissions.operador[win.id];
+
+                    return (
+                      <tr key={win.id} className="hover:bg-slate-800/30 transition-colors">
+                        <td className="px-4 py-3">
+                          <span className="font-bold text-white block">{win.label}</span>
+                          <span className="text-[11px] text-slate-400">{win.description}</span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRoleWindow('admin', win.id)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                              adminVisible
+                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                            }`}
+                          >
+                            {adminVisible ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Visible</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Bloqueada</span>
+                              </>
+                            )}
+                          </button>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRoleWindow('operador', win.id)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                              opVisible
+                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                            }`}
+                          >
+                            {opVisible ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Visible</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Bloqueada</span>
+                              </>
+                            )}
+                          </button>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+
+            {/* Sub-windows of Equipos y Arriendos by Role */}
+            <div className="pt-4 border-t border-slate-800 space-y-3">
+              <div>
+                <h3 className="text-sm font-bold text-cyan-300 flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-cyan-400" />
+                  Sub-ventanas de Equipos y Arriendos (Por Rol)
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Controla quién puede ver cada pestaña interna dentro del módulo Equipos y Arriendos.
+                </p>
+              </div>
+
+              <div className="overflow-x-auto border border-slate-800 rounded-xl">
+                <table className="w-full text-left text-xs">
+                  <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
+                    <tr>
+                      <th className="px-4 py-2.5">Sub-ventana</th>
+                      <th className="px-4 py-2.5 text-center">Administrador</th>
+                      <th className="px-4 py-2.5 text-center">Operador (Normal)</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-800/80">
+                    {EQUIPOS_SUB_WINDOWS.map((sub) => {
+                      const subPerms = draftConfig.visibility.equiposSubTabRolePermissions;
+                      const adminSubVisible = subPerms?.admin?.[sub.id] ?? true;
+                      const opSubVisible = subPerms?.operador?.[sub.id] ?? true;
+
+                      return (
+                        <tr key={sub.id} className="hover:bg-slate-800/30 transition-colors">
+                          <td className="px-4 py-2.5">
+                            <span className="font-bold text-white block">{sub.label}</span>
+                            <span className="text-[11px] text-slate-400">{sub.description}</span>
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleEquiposSubTabRole('admin', sub.id)}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                                adminSubVisible
+                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                              }`}
+                            >
+                              {adminSubVisible ? (
+                                <>
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>Visible</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Lock className="w-3.5 h-3.5" />
+                                  <span>Bloqueada</span>
+                                </>
+                              )}
+                            </button>
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleEquiposSubTabRole('operador', sub.id)}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                                opSubVisible
+                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                              }`}
+                            >
+                              {opSubVisible ? (
+                                <>
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>Visible</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Lock className="w-3.5 h-3.5" />
+                                  <span>Bloqueada</span>
+                                </>
+                              )}
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+
+          {/* RIGHT: ROLE MANAGEMENT & PER-USER SPECIFIC WINDOW LOCKS / OVERRIDES */}
+          <div className="xl:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4 flex flex-col">
+            <div className="pb-3 border-b border-slate-800">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Users className="w-4 h-4 text-cyan-400" />
+                Rol y Bloqueo Individual por Usuario
+              </h2>
+              <p className="text-xs text-slate-400 mt-0.5">
+                Selecciona cualquier usuario para cambiar su rol (Operador o Administrador), activar/desactivar su cuenta o bloquearle ventanas puntuales.
+              </p>
+            </div>
+
+            {/* Search & User Selector */}
+            <div className="space-y-2.5">
+              <div className="relative">
+                <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Buscar usuario por nombre, correo o RUT..."
+                  value={userSearch}
+                  onChange={(e) => setUserSearch(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-purple-500"
+                />
+              </div>
+
+              <div className="max-h-44 overflow-y-auto space-y-1.5 pr-1">
+                {filteredUsers.map((u) => {
+                  const isSelected = activeTargetUser?.id === u.id;
+                  const emailKey = normalizeEmailOverrideKey(u.email);
+                  const byIdKeys = Object.keys(draftConfig.visibility.userOverrides?.[u.id] || {});
+                  const byEmailKeys = emailKey
+                    ? Object.keys(draftConfig.visibility.userOverridesByEmail?.[emailKey] || {})
+                    : [];
+                  const subByIdKeys = Object.keys(draftConfig.visibility.equiposSubTabUserOverrides?.[u.id] || {}).map((k) => `eq_${k}`);
+                  const subByEmailKeys = emailKey
+                    ? Object.keys(draftConfig.visibility.equiposSubTabUserOverridesByEmail?.[emailKey] || {}).map((k) => `eq_${k}`)
+                    : [];
+                  const customCount = new Set([...byIdKeys, ...byEmailKeys, ...subByIdKeys, ...subByEmailKeys]).size;
+
+                  return (
+                    <button
+                      key={u.id}
+                      type="button"
+                      onClick={() => setSelectedUserId(u.id)}
+                      className={`w-full text-left p-2.5 rounded-xl border text-xs flex items-center justify-between transition-colors ${
+                        isSelected
+                          ? 'bg-purple-950/60 border-purple-500 text-white'
+                          : 'bg-slate-950/60 border-slate-800 text-slate-300 hover:border-slate-700'
+                      }`}
+                    >
+                      <div className="min-w-0">
+                        <span className="font-bold block truncate">{u.name}</span>
+                        <span className="text-[10px] text-slate-400 block truncate">
+                          {u.email} · {u.role === 'admin' ? 'Admin' : 'Operador'}
+                        </span>
+                      </div>
+                      {customCount > 0 && (
+                        <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-purple-900/70 text-purple-200 border border-purple-700 shrink-0 ml-2">
+                          {customCount} regla{customCount > 1 ? 's' : ''}
+                        </span>
+                      )}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Active Target User Role & Override Matrix */}
+            {activeTargetUser ? (
+              <div className="flex-1 bg-slate-950/70 border border-slate-800 rounded-xl p-4 space-y-3">
+                <div className="flex items-center justify-between gap-2 pb-2 border-b border-slate-800">
+                  <div className="min-w-0">
+                    <span className="text-xs font-bold text-white block truncate">
+                      {activeTargetUser.name}
+                    </span>
+                    <span className="text-[10px] text-cyan-400 font-semibold uppercase">
+                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin' ? 'Administrador' : 'Usuario Normal (Operador)'}
+                    </span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleClearUserOverrides(activeTargetUser)}
+                    className="text-[11px] text-slate-400 hover:text-white underline shrink-0"
+                  >
+                    Restablecer al Rol
+                  </button>
+                </div>
+
+                {/* Direct Role & Account Status Controls in Control Maestro */}
+                {(onUpdateUserRole || onToggleUserStatus) && (
+                  <div className="p-2.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-2">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400">
+                        Asignar Rol en Plataforma
+                      </span>
+                      {onToggleUserStatus && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            const willActivate = activeTargetUser.status !== 'activo';
+                            onToggleUserStatus(activeTargetUser.id);
+                            showNotice(
+                              'success',
+                              `Cuenta de ${activeTargetUser.name} ${willActivate ? 'activada' : 'desactivada'} en Firebase RTDB.`
+                            );
+                          }}
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold border transition-colors ${
+                            activeTargetUser.status === 'activo'
+                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                              : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                          }`}
+                        >
+                          {activeTargetUser.status === 'activo' ? 'Cuenta Activa' : 'Cuenta Desactivada'}
+                        </button>
+                      )}
+                    </div>
+
+                    {onUpdateUserRole && (
+                      <div className="grid grid-cols-2 gap-2 text-[11px] font-bold">
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (activeTargetUser.role === 'operador') return;
+                            onUpdateUserRole(activeTargetUser.id, 'operador');
+                            showNotice(
+                              'success',
+                              `Rol actualizado a Usuario Normal (Operador) para ${activeTargetUser.name}.`
+                            );
+                          }}
+                          className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
+                            activeTargetUser.role === 'operador'
+                              ? 'bg-amber-600 text-white border-amber-400 shadow-sm'
+                              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-amber-300 hover:border-amber-800'
+                          }`}
+                        >
+                          <HardHat className="w-3.5 h-3.5" />
+                          <span>Operador (Normal)</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (activeTargetUser.role === 'admin') return;
+                            onUpdateUserRole(activeTargetUser.id, 'admin');
+                            showNotice(
+                              'success',
+                              `Permisos de Administrador otorgados a ${activeTargetUser.name}.`
+                            );
+                          }}
+                          className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
+                            activeTargetUser.role === 'admin'
+                              ? 'bg-cyan-600 text-white border-cyan-400 shadow-sm'
+                              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-cyan-300 hover:border-cyan-800'
+                          }`}
+                        >
+                          <Shield className="w-3.5 h-3.5" />
+                          <span>Administrador</span>
+                        </button>
+                      </div>
+                    )}
+                  </div>
+                )}
+
+                {(() => {
+                  const activeEmailKey = normalizeEmailOverrideKey(activeTargetUser.email);
+                  const mainOverrideCount = new Set([
+                    ...Object.keys(draftConfig.visibility.userOverrides?.[activeTargetUser.id] || {}),
+                    ...(activeEmailKey
+                      ? Object.keys(draftConfig.visibility.userOverridesByEmail?.[activeEmailKey] || {})
+                      : []),
+                  ]).size;
+                  const subOverrideCount = new Set([
+                    ...Object.keys(
+                      draftConfig.visibility.equiposSubTabUserOverrides?.[activeTargetUser.id] || {}
+                    ),
+                    ...(activeEmailKey
+                      ? Object.keys(
+                          draftConfig.visibility.equiposSubTabUserOverridesByEmail?.[activeEmailKey] || {}
+                        )
+                      : []),
+                  ]).size;
+
+                  const roleKey = activeTargetUser.role === 'admin' ? 'admin' : 'operador';
+                  const parentById = draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.equipos;
+                  const parentByEmail = activeEmailKey
+                    ? draftConfig.visibility.userOverridesByEmail?.[activeEmailKey]?.equipos
+                    : undefined;
+                  const parentOverride: WindowOverrideValue =
+                    (parentById && parentById !== 'inherit' ? parentById : parentByEmail) || 'inherit';
+                  const parentRoleVisible = draftConfig.visibility.rolePermissions[roleKey].equipos;
+                  const isParentEquiposVisible =
+                    parentOverride === 'allow'
+                      ? true
+                      : parentOverride === 'block'
+                      ? false
+                      : parentRoleVisible;
+
+                  return (
+                    <>
+                      {/* Switcher between Main Windows and Equipos Sub-Windows for selected user */}
+                      <div className="grid grid-cols-2 gap-1.5 p-1 rounded-xl bg-slate-900 border border-slate-800">
+                        <button
+                          type="button"
+                          onClick={() => setUserOverrideSection('main')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                            userOverrideSection === 'main'
+                              ? 'bg-purple-600 text-white shadow-sm'
+                              : 'text-slate-400 hover:text-white'
+                          }`}
+                        >
+                          <span>Ventanas Principales</span>
+                          <span
+                            className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                              userOverrideSection === 'main'
+                                ? 'bg-purple-800 text-purple-100'
+                                : 'bg-slate-800 text-slate-300'
+                            }`}
+                          >
+                            {mainOverrideCount > 0 ? `${mainOverrideCount}/${CONTROLLABLE_WINDOWS.length}` : `${CONTROLLABLE_WINDOWS.length}`}
+                          </span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setUserOverrideSection('equipos')}
+                          className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold flex items-center justify-center gap-1.5 transition-colors ${
+                            userOverrideSection === 'equipos'
+                              ? 'bg-cyan-600 text-white shadow-sm'
+                              : 'text-slate-400 hover:text-cyan-300'
+                          }`}
+                        >
+                          <span>Sub-ventanas Equipos</span>
+                          <span
+                            className={`px-1.5 py-0.2 rounded text-[10px] font-mono ${
+                              userOverrideSection === 'equipos'
+                                ? 'bg-cyan-800 text-cyan-100'
+                                : 'bg-slate-800 text-cyan-300'
+                            }`}
+                          >
+                            {subOverrideCount > 0 ? `${subOverrideCount}/4` : '4'}
+                          </span>
+                        </button>
+                      </div>
+
+                      {userOverrideSection === 'main' ? (
+                        <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
+                          {CONTROLLABLE_WINDOWS.map((win) => {
+                            const roleDefault = draftConfig.visibility.rolePermissions[roleKey][win.id];
+                            const byIdVal =
+                              draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.[win.id];
+                            const byEmailVal = activeEmailKey
+                              ? draftConfig.visibility.userOverridesByEmail?.[activeEmailKey]?.[win.id]
+                              : undefined;
+                            const currentOverride: WindowOverrideValue =
+                              (byIdVal && byIdVal !== 'inherit' ? byIdVal : byEmailVal) || 'inherit';
+
+                            return (
+                              <div
+                                key={win.id}
+                                className="p-2.5 rounded-lg bg-slate-900/80 border border-slate-800/80 flex items-center justify-between gap-2"
+                              >
+                                <div className="min-w-0">
+                                  <span className="text-xs font-semibold text-slate-200 block truncate">
+                                    {win.label}
+                                  </span>
+                                  <span className="text-[10px] text-slate-400">
+                                    Por rol: {roleDefault ? 'Visible' : 'Bloqueada'}
+                                  </span>
+                                </div>
+
+                                <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold">
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleUserWindowOverride(activeTargetUser, win.id, 'inherit')
+                                    }
+                                    className={`px-2 py-1 rounded border transition-colors ${
+                                      currentOverride === 'inherit'
+                                        ? 'bg-slate-700 text-white border-slate-500'
+                                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                                    }`}
+                                  >
+                                    Rol
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleUserWindowOverride(activeTargetUser, win.id, 'allow')
+                                    }
+                                    className={`px-2 py-1 rounded border transition-colors ${
+                                      currentOverride === 'allow'
+                                        ? 'bg-emerald-600 text-white border-emerald-400'
+                                        : 'bg-slate-950 text-emerald-400/70 border-slate-800 hover:text-emerald-300'
+                                    }`}
+                                  >
+                                    Ver
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() =>
+                                      handleUserWindowOverride(activeTargetUser, win.id, 'block')
+                                    }
+                                    className={`px-2 py-1 rounded border flex items-center gap-1 transition-colors ${
+                                      currentOverride === 'block'
+                                        ? 'bg-rose-600 text-white border-rose-400'
+                                        : 'bg-slate-950 text-rose-400/70 border-slate-800 hover:text-rose-300'
+                                    }`}
+                                  >
+                                    <Lock className="w-2.5 h-2.5" />
+                                    <span>Bloquear</span>
+                                  </button>
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <div className="space-y-2.5">
+                          {!isParentEquiposVisible && (
+                            <div className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-700/70 flex flex-col gap-2">
+                              <div className="flex items-start gap-2 text-[11px] text-amber-200">
+                                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                                <span>
+                                  Este usuario tiene bloqueada la pestaña principal{' '}
+                                  <strong>Equipos y Arriendos</strong>. Habilítala para que pueda entrar a las sub-ventanas permitidas.
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleUserWindowOverride(activeTargetUser, 'equipos', 'allow')
+                                }
+                                className="self-start px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold transition-colors"
+                              >
+                                Habilitar &quot;Equipos y Arriendos&quot; para este usuario
+                              </button>
+                            </div>
+                          )}
+
+                          <div className="flex flex-wrap items-center justify-between gap-2 px-1">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-400">
+                              Sub-ventanas de Equipos y Arriendos
+                            </span>
+                            <div className="flex items-center gap-1 text-[10px] font-bold">
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSetAllUserEquiposSubTabs(activeTargetUser, 'inherit')
+                                }
+                                className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-slate-300 hover:text-white transition-colors"
+                              >
+                                Seguir Rol
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSetAllUserEquiposSubTabs(activeTargetUser, 'allow')
+                                }
+                                className="px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-700 text-emerald-300 hover:bg-emerald-900/60 transition-colors"
+                              >
+                                Permitir 4
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  handleSetAllUserEquiposSubTabs(activeTargetUser, 'block')
+                                }
+                                className="px-2 py-0.5 rounded bg-rose-950/70 border border-rose-700 text-rose-300 hover:bg-rose-900/60 transition-colors"
+                              >
+                                Bloquear 4
+                              </button>
+                            </div>
+                          </div>
+
+                          <div className="space-y-2">
+                            {EQUIPOS_SUB_WINDOWS.map((sub) => {
+                              const roleDefault =
+                                draftConfig.visibility.equiposSubTabRolePermissions?.[roleKey]?.[
+                                  sub.id
+                                ] ?? true;
+                              const byIdVal =
+                                draftConfig.visibility.equiposSubTabUserOverrides?.[
+                                  activeTargetUser.id
+                                ]?.[sub.id];
+                              const byEmailVal = activeEmailKey
+                                ? draftConfig.visibility.equiposSubTabUserOverridesByEmail?.[
+                                    activeEmailKey
+                                  ]?.[sub.id]
+                                : undefined;
+                              const currentSubOverride: WindowOverrideValue =
+                                (byIdVal && byIdVal !== 'inherit' ? byIdVal : byEmailVal) ||
+                                'inherit';
+
+                              return (
+                                <div
+                                  key={sub.id}
+                                  className="p-2.5 rounded-lg bg-slate-900/70 border border-cyan-950/70 flex items-center justify-between gap-2"
+                                >
+                                  <div className="min-w-0">
+                                    <span className="text-xs font-semibold text-slate-200 block truncate">
+                                      {sub.label}
+                                    </span>
+                                    <span className="text-[10px] text-slate-400">
+                                      Por rol: {roleDefault ? 'Visible' : 'Bloqueada'}
+                                    </span>
+                                  </div>
+
+                                  <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserEquiposSubTabOverride(
+                                          activeTargetUser,
+                                          sub.id,
+                                          'inherit'
+                                        )
+                                      }
+                                      className={`px-2 py-1 rounded border transition-colors ${
+                                        currentSubOverride === 'inherit'
+                                          ? 'bg-slate-700 text-white border-slate-500'
+                                          : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                                      }`}
+                                    >
+                                      Rol
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserEquiposSubTabOverride(
+                                          activeTargetUser,
+                                          sub.id,
+                                          'allow'
+                                        )
+                                      }
+                                      className={`px-2 py-1 rounded border transition-colors ${
+                                        currentSubOverride === 'allow'
+                                          ? 'bg-emerald-600 text-white border-emerald-400'
+                                          : 'bg-slate-950 text-emerald-400/70 border-slate-800 hover:text-emerald-300'
+                                      }`}
+                                    >
+                                      Ver
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserEquiposSubTabOverride(
+                                          activeTargetUser,
+                                          sub.id,
+                                          'block'
+                                        )
+                                      }
+                                      className={`px-2 py-1 rounded border flex items-center gap-1 transition-colors ${
+                                        currentSubOverride === 'block'
+                                          ? 'bg-rose-600 text-white border-rose-400'
+                                          : 'bg-slate-950 text-rose-400/70 border-slate-800 hover:text-rose-300'
+                                      }`}
+                                    >
+                                      <Lock className="w-2.5 h-2.5" />
+                                      <span>Bloquear</span>
+                                    </button>
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      )}
+                    </>
+                  );
+                })()}
+              </div>
+            ) : (
+              <div className="p-6 text-center text-xs text-slate-400 bg-slate-950/60 rounded-xl border border-slate-800">
+                No hay otros usuarios disponibles para personalizar.
+              </div>
+            )}
+          </div>
+        </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB 2: AJUSTE DE TODAS LAS MÉTRICAS Y UMBRALES DE LA PLATAFORMA
+         ===================================================================== */}
+      {subTab === 'metrics' && (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Card 1: Gas CO / MQ-2 */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center gap-2.5 pb-3 border-b border-slate-800">
+              <div className="p-2 rounded-lg bg-amber-950 border border-amber-800 text-amber-400">
+                <Flame className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Gas Monóxido / Combustibles (MQ-2)</h3>
+                <p className="text-[11px] text-slate-400">Umbrales ADC / motor de alertas y límite seguro de gráficos (ppm)</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1">Preventivo (ADC)</label>
+                <input
+                  type="number"
+                  value={m.coPreventivo}
+                  onChange={(e) => handleMetricChange('coPreventivo', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Advertencia (ADC)</label>
+                <input
+                  type="number"
+                  value={m.coAdvertencia}
+                  onChange={(e) => handleMetricChange('coAdvertencia', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-amber-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Crítico (ADC)</label>
+                <input
+                  type="number"
+                  value={m.coCritico}
+                  onChange={(e) => handleMetricChange('coCritico', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Límite Gráfico (ppm)</label>
+                <input
+                  type="number"
+                  value={m.coChartSafeMax}
+                  onChange={(e) => handleMetricChange('coChartSafeMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-cyan-300 font-mono"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Card 2: Polvo PM2.5 */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center gap-2.5 pb-3 border-b border-slate-800">
+              <div className="p-2 rounded-lg bg-cyan-950 border border-cyan-800 text-cyan-400">
+                <Wind className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Material Particulado (Polvo PM2.5)</h3>
+                <p className="text-[11px] text-slate-400">Umbrales ópticos ESP32 y límite de referencia normativa (µg/m³)</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1">Preventivo</label>
+                <input
+                  type="number"
+                  value={m.pm25Preventivo}
+                  onChange={(e) => handleMetricChange('pm25Preventivo', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Advertencia</label>
+                <input
+                  type="number"
+                  value={m.pm25Advertencia}
+                  onChange={(e) => handleMetricChange('pm25Advertencia', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-amber-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Crítico</label>
+                <input
+                  type="number"
+                  value={m.pm25Critico}
+                  onChange={(e) => handleMetricChange('pm25Critico', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Límite Gráfico (µg/m³)</label>
+                <input
+                  type="number"
+                  value={m.pm25ChartSafeMax}
+                  onChange={(e) => handleMetricChange('pm25ChartSafeMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-cyan-300 font-mono"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Card 3: Temperatura & Humedad */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center gap-2.5 pb-3 border-b border-slate-800">
+              <div className="p-2 rounded-lg bg-blue-950 border border-blue-800 text-blue-400">
+                <Thermometer className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Clima Subterráneo: Temperatura (°C) y Humedad (%)</h3>
+                <p className="text-[11px] text-slate-400">Rangos térmicos e higrométricos para el Dashboard y alertas DHT</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1">Temp. Mín (°C)</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={m.tempMin}
+                  onChange={(e) => handleMetricChange('tempMin', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Temp. Preventivo</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={m.tempPreventivo}
+                  onChange={(e) => handleMetricChange('tempPreventivo', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Temp. Advertencia</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={m.tempAdvertencia}
+                  onChange={(e) => handleMetricChange('tempAdvertencia', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-amber-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Temp. Crítico</label>
+                <input
+                  type="number"
+                  step="0.5"
+                  value={m.tempCritico}
+                  onChange={(e) => handleMetricChange('tempCritico', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1">Humedad Mín (%)</label>
+                <input
+                  type="number"
+                  value={m.humMin}
+                  onChange={(e) => handleMetricChange('humMin', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-200 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Hum. Preventivo</label>
+                <input
+                  type="number"
+                  value={m.humPreventivo}
+                  onChange={(e) => handleMetricChange('humPreventivo', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Hum. Advertencia</label>
+                <input
+                  type="number"
+                  value={m.humAdvertencia}
+                  onChange={(e) => handleMetricChange('humAdvertencia', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-amber-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Hum. Crítico</label>
+                <input
+                  type="number"
+                  value={m.humCritico}
+                  onChange={(e) => handleMetricChange('humCritico', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* Card 4: Gases Secundarios, Ventilación, O2, Ruido y Emergencia */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex items-center gap-2.5 pb-3 border-b border-slate-800">
+              <div className="p-2 rounded-lg bg-emerald-950 border border-emerald-800 text-emerald-400">
+                <Gauge className="w-5 h-5" />
+              </div>
+              <div>
+                <h3 className="text-sm font-bold text-white">Ventilación, Gases Secundarios y Emergencia Global</h3>
+                <p className="text-[11px] text-slate-400">Parámetros para CO₂, CH₄, O₂, Ruido, Flujo de Aire, Batería y Gateway ESP32</p>
+              </div>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+              <div>
+                <label className="text-slate-400 block mb-1">Flujo Aire Mín (m/s)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={m.airFlowMin}
+                  onChange={(e) => handleMetricChange('airFlowMin', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Flujo Aire Máx (m/s)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={m.airFlowMax}
+                  onChange={(e) => handleMetricChange('airFlowMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1 flex items-center gap-1">
+                  <Battery className="w-3 h-3 text-emerald-400" /> Batería Mín (%)
+                </label>
+                <input
+                  type="number"
+                  value={m.batteryMin}
+                  onChange={(e) => handleMetricChange('batteryMin', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1">CO₂ Seguro (ppm)</label>
+                <input
+                  type="number"
+                  value={m.co2SafeMax}
+                  onChange={(e) => handleMetricChange('co2SafeMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Metano CH₄ (% LEL)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={m.ch4SafeMax}
+                  onChange={(e) => handleMetricChange('ch4SafeMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Oxígeno O₂ Mín (%)</label>
+                <input
+                  type="number"
+                  step="0.1"
+                  value={m.o2MinSafe}
+                  onChange={(e) => handleMetricChange('o2MinSafe', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-400 block mb-1 flex items-center gap-1">
+                  <Volume2 className="w-3 h-3 text-rose-400" /> Ruido Máx (dB)
+                </label>
+                <input
+                  type="number"
+                  value={m.noiseSafeMax}
+                  onChange={(e) => handleMetricChange('noiseSafeMax', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1 flex items-center gap-1">
+                  <Cpu className="w-3 h-3 text-cyan-400" /> Timeout ESP32 (s)
+                </label>
+                <input
+                  type="number"
+                  value={m.gatewayTimeoutSeconds}
+                  onChange={(e) => handleMetricChange('gatewayTimeoutSeconds', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-cyan-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Banner Gas Crítico</label>
+                <input
+                  type="number"
+                  value={m.emergencyGasThreshold}
+                  onChange={(e) => handleMetricChange('emergencyGasThreshold', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-400 block mb-1">Banner Polvo Crítico</label>
+                <input
+                  type="number"
+                  value={m.emergencyDustThreshold}
+                  onChange={(e) => handleMetricChange('emergencyDustThreshold', Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-rose-300 font-mono"
+                />
+              </div>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* =====================================================================
+          TAB 3: CONFIGURACIÓN GENERAL DE LA PÁGINA
+         ===================================================================== */}
+      {subTab === 'page' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Identity & Texts */}
+          <div className="lg:col-span-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4 text-xs">
+            <div className="pb-3 border-b border-slate-800">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Layout className="w-4 h-4 text-emerald-400" />
+                Textos e Identidad de la Página
+              </h2>
+              <p className="text-slate-400 mt-0.5">
+                Personaliza encabezados, etiqueta de faena activa y comunicado superior para todo el personal conectado.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Título Principal del Dashboard</label>
+              <input
+                type="text"
+                value={draftConfig.appearance.platformTitle}
+                onChange={(e) => handleAppearanceChange('platformTitle', e.target.value)}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+              />
+            </div>
+
+            <div>
+              <label className="text-slate-300 font-semibold block mb-1">Subtítulo Operacional</label>
+              <textarea
+                rows={2}
+                value={draftConfig.appearance.platformSubtitle}
+                onChange={(e) => handleAppearanceChange('platformSubtitle', e.target.value)}
+                className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+              />
+            </div>
+
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Etiqueta de Faena (Barra Superior)</label>
+                <input
+                  type="text"
+                  value={draftConfig.appearance.siteBadgeText}
+                  onChange={(e) => handleAppearanceChange('siteBadgeText', e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-cyan-300 font-mono"
+                />
+              </div>
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Texto Normativo (Pie de Página)</label>
+                <input
+                  type="text"
+                  value={draftConfig.appearance.footerText}
+                  onChange={(e) => handleAppearanceChange('footerText', e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-slate-300"
+                />
+              </div>
+            </div>
+
+            {/* Global Announcement Banner */}
+            <div className="p-4 rounded-xl bg-slate-950/70 border border-slate-800 space-y-3">
+              <div className="flex items-center justify-between">
+                <span className="font-bold text-white flex items-center gap-2">
+                  <Megaphone className="w-4 h-4 text-amber-400" />
+                  Aviso / Comunicado Global en Cabecera
+                </span>
+                <button
+                  type="button"
+                  onClick={() =>
+                    handleAppearanceChange('announcementEnabled', !draftConfig.appearance.announcementEnabled)
+                  }
+                  className={`px-3 py-1 rounded-lg font-bold text-[11px] border ${
+                    draftConfig.appearance.announcementEnabled
+                      ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                      : 'bg-slate-900 text-slate-400 border-slate-700'
+                  }`}
+                >
+                  {draftConfig.appearance.announcementEnabled ? 'Activado' : 'Desactivado'}
+                </button>
+              </div>
+
+              <input
+                type="text"
+                placeholder="Ej: Mantención programada de sensores en Nivel -510m de 14:00 a 15:00 hrs."
+                value={draftConfig.appearance.announcementText}
+                onChange={(e) => handleAppearanceChange('announcementText', e.target.value)}
+                className="w-full px-3 py-2 bg-slate-900 border border-slate-800 rounded-lg text-white"
+              />
+
+              <div className="flex items-center gap-2">
+                <span className="text-slate-400">Nivel del aviso:</span>
+                {(['info', 'warning', 'critical'] as const).map((tone) => (
+                  <button
+                    key={tone}
+                    type="button"
+                    onClick={() => handleAppearanceChange('announcementTone', tone)}
+                    className={`px-2.5 py-1 rounded border text-[11px] font-semibold ${
+                      draftConfig.appearance.announcementTone === tone
+                        ? 'bg-cyan-950 text-cyan-200 border-cyan-500'
+                        : 'bg-slate-900 text-slate-400 border-slate-800'
+                    }`}
+                  >
+                    {tone === 'info' ? 'Informativo' : tone === 'warning' ? 'Preventivo' : 'Crítico'}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Dashboard Modules & Operational Controls */}
+          <div className="lg:col-span-6 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-3 text-xs">
+            <div className="pb-3 border-b border-slate-800">
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Activity className="w-4 h-4 text-cyan-400" />
+                Módulos Visibles y Controles de la Página
+              </h2>
+              <p className="text-slate-400 mt-0.5">
+                Activa o desactiva bloques completos del Dashboard y funciones operativas para el resto de la plataforma.
+              </p>
+            </div>
+
+            {(
+              [
+                {
+                  key: 'showChartsAndUsers',
+                  title: 'Panel de Gráficos de Sensores y Listado de Usuarios',
+                  desc: 'Muestra la bienvenida, gráfico de barras de 9 sensores y directorio en vivo en el Dashboard.',
+                },
+                {
+                  key: 'showESP32Section',
+                  title: 'Sección Gateway ESP32 en Tiempo Real',
+                  desc: 'Control de conexión ESP-NOW, estado del enlace y botón de auditoría CSV.',
+                },
+                {
+                  key: 'showDualSensorCards',
+                  title: 'Tarjetas de Lectura Dual (Amigable vs. Técnica)',
+                  desc: 'Comparativa simplificada para operadores junto con lectura ADC/ppm técnica.',
+                },
+                {
+                  key: 'showHeroMetricCards',
+                  title: '6 Tarjetas Principales de Métricas (Clima, CO, Polvo, Batería, Flujo)',
+                  desc: 'Grilla superior de indicadores numéricos con tendencias en vivo.',
+                },
+                {
+                  key: 'showCapabilitiesGrid',
+                  title: 'Grilla de 12 Capacidades Operacionales',
+                  desc: 'Tarjetas de acceso rápido a módulos y protocolos DS 132.',
+                },
+                {
+                  key: 'showAdditionalGasesRow',
+                  title: 'Fila de Atmósferas Explosivas y Ruido Subterráneo',
+                  desc: 'Indicadores complementarios de Metano (CH4), CO, PM2.5 y dB al final del Dashboard.',
+                },
+                {
+                  key: 'allowHardwareControlsForNonSuperAdmin',
+                  title: 'Controles Rápidos de Hardware (Luz / Alarma / Reset) en Barra Superior',
+                  desc: 'Permite que Admin y Operador vean los botones rápidos de baliza/sirena en el Navbar.',
+                },
+                {
+                  key: 'allowEmergencyButtonForOperador',
+                  title: 'Botón de Evacuación / Emergencia para Operadores',
+                  desc: 'Si se desactiva, el botón rojo de emergencia en el Navbar solo lo ven Admin y SuperAdmin.',
+                },
+              ] as Array<{
+                key: keyof PlatformConfig['appearance'];
+                title: string;
+                desc: string;
+              }>
+            ).map((item) => {
+              const active = Boolean(draftConfig.appearance[item.key]);
+              return (
+                <div
+                  key={item.key}
+                  className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex items-center justify-between gap-3"
+                >
+                  <div>
+                    <span className="font-bold text-slate-200 block">{item.title}</span>
+                    <span className="text-[11px] text-slate-400">{item.desc}</span>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => handleAppearanceChange(item.key, !active as any)}
+                    className={`px-3 py-1.5 rounded-lg font-bold text-[11px] border shrink-0 flex items-center gap-1.5 transition-colors ${
+                      active
+                        ? 'bg-emerald-950/80 text-emerald-300 border-emerald-700'
+                        : 'bg-slate-900 text-slate-400 border-slate-700'
+                    }`}
+                  >
+                    {active ? (
+                      <>
+                        <Eye className="w-3.5 h-3.5" />
+                        <span>Visible</span>
+                      </>
+                    ) : (
+                      <>
+                        <EyeOff className="w-3.5 h-3.5" />
+                        <span>Oculto</span>
+                      </>
+                    )}
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* SUB-TAB 4: GESTIÓN DE DISPOSITIVOS (SENSORES Y GATEWAYS)             */}
+      {/* ==================================================================== */}
+      {subTab === 'devices' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {/* Columna Izquierda: Formulario para agregar Sensor o Gateway */}
+          <div className="lg:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
+            <div className="pb-3 border-b border-slate-800 flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Plus className="w-4 h-4 text-amber-400" />
+                  {editingDeviceId ? 'Editar Dispositivo' : 'Agregar Sensor o Gateway'}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Registra nuevos nodos sensores (MQ-2/PM2.5/DHT11) o Gateways ESP-NOW para habilitarlos en toda la plataforma.
+                </p>
+              </div>
+              {editingDeviceId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingDeviceId(null);
+                    setNewDevId('');
+                    setNewDevName('');
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-white underline"
+                >
+                  Cancelar edición
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleAddOrUpdateDevice} className="space-y-3.5 text-xs">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1.5">Tipo de Dispositivo</label>
+                <div className="grid grid-cols-3 gap-2">
+                  {(
+                    [
+                      { id: 'sensor', label: 'Nodo Sensor', icon: <Radio className="w-3.5 h-3.5" /> },
+                      { id: 'gateway', label: 'Gateway Central', icon: <Server className="w-3.5 h-3.5" /> },
+                      { id: 'gateway_sensor', label: 'Híbrido', icon: <Cpu className="w-3.5 h-3.5" /> },
+                    ] as Array<{ id: DeviceCategory; label: string; icon: React.ReactNode }>
+                  ).map((cat) => (
+                    <button
+                      key={cat.id}
+                      type="button"
+                      onClick={() => setNewDevCategory(cat.id)}
+                      className={`p-2 rounded-xl border font-bold flex flex-col items-center gap-1 transition-colors ${
+                        newDevCategory === cat.id
+                          ? 'bg-amber-950/80 border-amber-500 text-amber-200'
+                          : 'bg-slate-950/70 border-slate-800 text-slate-400 hover:text-white'
+                      }`}
+                    >
+                      {cat.icon}
+                      <span className="text-[11px]">{cat.label}</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">
+                  ID del Nodo en Firebase (<span className="font-mono text-cyan-400">/dispositivos/ID</span>)
+                </label>
+                <input
+                  type="text"
+                  value={newDevId}
+                  onChange={(e) => setNewDevId(e.target.value)}
+                  disabled={Boolean(editingDeviceId)}
+                  placeholder="Ej: device_B4E62D901122 o NODO_SENSOR_02"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono disabled:opacity-60"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Nombre Visible</label>
+                <input
+                  type="text"
+                  value={newDevName}
+                  onChange={(e) => setNewDevName(e.target.value)}
+                  placeholder="Ej: Sensor Galería Sur 02 / Gateway Nivel -400"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Sector / Faena Asignada</label>
+                <input
+                  type="text"
+                  value={newDevSector}
+                  onChange={(e) => setNewDevSector(e.target.value)}
+                  placeholder="Mina Chuquicamata - Rampa Principal"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+
+              {organizations.length > 0 && (
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Organización / Empresa</label>
+                  <select
+                    value={newDevOrganizationId}
+                    onChange={(e) => setNewDevOrganizationId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    {organizations.map((org) => (
+                      <option key={org.id} value={org.id}>
+                        {org.name} ({org.rut || org.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              {newDevCategory === 'sensor' && (
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">
+                    Enlace Gateway ESP-NOW (Opcional)
+                  </label>
+                  <select
+                    value={newDevParentGateway}
+                    onChange={(e) => setNewDevParentGateway(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    <option value="">Wi-Fi Directo a Firebase (sin Gateway intermedio)</option>
+                    {gatewayOptions.map((gw) => (
+                      <option key={gw.id} value={gw.id}>
+                        Vía Gateway: {gw.name} ({gw.id})
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">IP Local WebServer ESP32</label>
+                <input
+                  type="text"
+                  value={newDevLocalIp}
+                  onChange={(e) => setNewDevLocalIp(e.target.value)}
+                  placeholder="192.168.4.1"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-cyan-300 font-mono"
+                />
+              </div>
+
+              <label className="flex items-center gap-2.5 p-2.5 rounded-xl bg-slate-950/60 border border-slate-800 cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={initNodeInRTDB}
+                  onChange={(e) => setInitNodeInRTDB(e.target.checked)}
+                  className="rounded border-slate-600 bg-slate-900 text-amber-500"
+                />
+                <span className="text-[11px] text-slate-300">
+                  Crear / actualizar automáticamente el nodo en Firebase RTDB (<span className="font-mono">/dispositivos</span>)
+                </span>
+              </label>
+
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="w-full py-2.5 px-4 rounded-xl bg-amber-600 hover:bg-amber-500 text-slate-950 font-black flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              >
+                {editingDeviceId ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                <span>
+                  {isSaving
+                    ? 'Guardando en Firebase...'
+                    : editingDeviceId
+                    ? 'Guardar Cambios del Dispositivo'
+                    : 'Agregar Dispositivo a la Plataforma'}
+                </span>
+              </button>
+            </form>
+          </div>
+
+          {/* Columna Derecha: Lista de Dispositivos Activos y Detectados */}
+          <div className="lg:col-span-7 space-y-5">
+            {/* Filtro de Modo Único / Controlado */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  Modo Lista Controlada de Dispositivos
+                </h3>
+                <p className="text-[11px] text-slate-400 mt-0.5">
+                  Cuando está activo, la página muestra únicamente los dispositivos habilitados aquí (ideal para trabajar con 1 solo dispositivo ahora e ir sumando más luego).
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  soundAlert.playFeedbackBeep();
+                  setDraftConfig((prev) => ({
+                    ...prev,
+                    onlyShowRegisteredDevices: !prev.onlyShowRegisteredDevices,
+                  }));
+                }}
+                className={`px-3.5 py-2 rounded-xl font-bold text-xs border shrink-0 transition-colors ${
+                  draftConfig.onlyShowRegisteredDevices
+                    ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600'
+                    : 'bg-slate-950 text-slate-300 border-slate-700'
+                }`}
+              >
+                {draftConfig.onlyShowRegisteredDevices ? 'Activo: Solo Registrados' : 'Desactivado: Mostrar Todos RTDB'}
+              </button>
+            </div>
+
+            {/* Dispositivos Registrados */}
+            <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
+              <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Cpu className="w-4 h-4 text-cyan-400" />
+                  Dispositivos Configurados ({registeredDevices.length})
+                </h3>
+                <span className="text-[11px] text-slate-400">
+                  Recuerda pulsar <strong className="text-purple-300">Guardar Todos los Cambios</strong> si ocultas o eliminas nodos.
+                </span>
+              </div>
+
+              <div className="space-y-2.5">
+                {registeredDevices.map((dev) => {
+                  const live = rtdbDevices.find((r) => r.id === dev.id);
+                  const isOnline = Boolean(live?.gatewayOnline);
+                  return (
+                    <div
+                      key={dev.id}
+                      className={`p-3.5 rounded-xl border transition-colors ${
+                        dev.enabled
+                          ? 'bg-slate-950/80 border-slate-800'
+                          : 'bg-slate-950/30 border-slate-900 opacity-60'
+                      }`}
+                    >
+                      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className="font-bold text-sm text-white truncate">{dev.name}</span>
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                                dev.category === 'gateway'
+                                  ? 'bg-purple-950/80 text-purple-300 border-purple-700'
+                                  : dev.category === 'sensor'
+                                  ? 'bg-cyan-950/80 text-cyan-300 border-cyan-700'
+                                  : 'bg-amber-950/80 text-amber-300 border-amber-700'
+                              }`}
+                            >
+                              {dev.category === 'gateway'
+                                ? 'Gateway Central'
+                                : dev.category === 'sensor'
+                                ? 'Nodo Sensor'
+                                : 'Gateway + Sensores'}
+                            </span>
+                            {live && (
+                              <span
+                                className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold ${
+                                  isOnline
+                                    ? 'bg-emerald-950 text-emerald-300 border border-emerald-700'
+                                    : 'bg-slate-900 text-slate-400 border border-slate-700'
+                                }`}
+                              >
+                                {isOnline ? <Wifi className="w-3 h-3" /> : <WifiOff className="w-3 h-3" />}
+                                {isOnline ? 'En línea' : 'Desconectado'}
+                              </span>
+                            )}
+                          </div>
+                          <div className="text-[11px] text-slate-400 font-mono mt-1 flex flex-wrap items-center gap-x-3 gap-y-1">
+                            <span>ID: {dev.id}</span>
+                            <span>• Sector: {dev.sectorName}</span>
+                            {dev.parentGatewayId && <span>• Vía Gateway: {dev.parentGatewayId}</span>}
+                          </div>
+                          {live && (
+                            <div className="text-[11px] text-slate-300 font-mono mt-1.5 bg-slate-900/90 px-2.5 py-1 rounded border border-slate-800 inline-flex flex-wrap gap-3">
+                              <span>CO: <strong className="text-cyan-300">{live.rawCO ?? live.metrics.co}</strong></span>
+                              <span>PM2.5: <strong className="text-amber-300">{live.rawPM25 ?? live.metrics.polvoPM}</strong></span>
+                              <span>Temp: <strong className="text-emerald-300">{live.metrics.temperatura}°C</strong></span>
+                              <span>Hum: <strong className="text-blue-300">{live.metrics.humedad}%</strong></span>
+                            </div>
+                          )}
+                        </div>
+
+                        <div className="flex items-center gap-1.5 shrink-0">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleDeviceEnabled(dev.id)}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border ${
+                              dev.enabled
+                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700'
+                                : 'bg-slate-900 text-slate-400 border-slate-700'
+                            }`}
+                          >
+                            {dev.enabled ? 'Activo' : 'Oculto'}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleStartEditDevice(dev)}
+                            className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700"
+                            title="Editar dispositivo"
+                          >
+                            <Edit3 className="w-3.5 h-3.5" />
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteRegisteredDevice(dev.id)}
+                            className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800"
+                            title="Quitar de la lista"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+
+            {/* Nodos detectados en Firebase RTDB pendientes de activar */}
+            {unregisteredRTDBDevices.length > 0 && (
+              <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3">
+                <div className="pb-2 border-b border-slate-800">
+                  <h3 className="text-sm font-bold text-slate-200">
+                    Otros nodos detectados en Firebase RTDB ({unregisteredRTDBDevices.length})
+                  </h3>
+                  <p className="text-[11px] text-slate-400">
+                    Estos nodos existen en tu base de datos <span className="font-mono">/dispositivos</span>, pero están ocultos porque dejaste solo los dispositivos activos de arriba. Puedes habilitarlos con 1 clic cuando los conectes:
+                  </p>
+                </div>
+
+                <div className="space-y-2">
+                  {unregisteredRTDBDevices.map((rtDev) => (
+                    <div
+                      key={rtDev.id}
+                      className="p-3 rounded-xl bg-slate-950/60 border border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs"
+                    >
+                      <div>
+                        <span className="font-mono font-bold text-slate-200">{rtDev.id}</span>
+                        <span className="text-slate-400 ml-2">({rtDev.sectorName})</span>
+                        <div className="text-[10px] text-slate-500 font-mono mt-0.5">
+                          CO: {rtDev.rawCO ?? rtDev.metrics.co} · PM2.5: {rtDev.rawPM25 ?? rtDev.metrics.polvoPM} · Temp: {rtDev.metrics.temperatura}°C · Hum: {rtDev.metrics.humedad}%
+                        </div>
+                      </div>
+                      <div className="flex items-center gap-1.5 shrink-0">
+                        <button
+                          type="button"
+                          onClick={() => handleImportRTDBDevice(rtDev, 'sensor')}
+                          disabled={isSaving}
+                          className="px-2.5 py-1 rounded-lg bg-cyan-950 hover:bg-cyan-900 text-cyan-200 border border-cyan-700 font-bold text-[11px]"
+                        >
+                          + Agregar como Sensor
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleImportRTDBDevice(rtDev, 'gateway')}
+                          disabled={isSaving}
+                          className="px-2.5 py-1 rounded-lg bg-purple-950 hover:bg-purple-900 text-purple-200 border border-purple-700 font-bold text-[11px]"
+                        >
+                          + Agregar como Gateway
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
+      {/* SUB-TAB 5: ORGANIZACIONES MULTI-EMPRESA (/organizaciones)            */}
+      {/* ==================================================================== */}
+      {subTab === 'organizations' && (
+        <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          <div className="lg:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
+            <div className="pb-3 border-b border-slate-800 flex items-center justify-between gap-2">
+              <div>
+                <h2 className="text-base font-bold text-white flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-cyan-400" />
+                  {editingOrgId ? 'Editar Organización' : 'Nueva Empresa / Organización'}
+                </h2>
+                <p className="text-xs text-slate-400 mt-0.5">
+                  Crea y administra empresas mandantes o divisiones para filtrar faenas, usuarios, dispositivos y alertas en modo multi-empresa.
+                </p>
+              </div>
+              {editingOrgId && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setEditingOrgId(null);
+                    setOrgName('');
+                    setOrgRut('');
+                    setOrgIndustry('Minería Subterránea & Rajo');
+                    setOrgStatus('activa');
+                  }}
+                  className="text-[11px] text-slate-400 hover:text-white underline"
+                >
+                  Cancelar edición
+                </button>
+              )}
+            </div>
+
+            <form onSubmit={handleSaveOrg} className="space-y-3.5 text-xs">
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Nombre Comercial / Faena Mandante</label>
+                <input
+                  type="text"
+                  required
+                  value={orgName}
+                  onChange={(e) => setOrgName(e.target.value)}
+                  placeholder="Ej: Minera Los Bronces División Sur"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa</label>
+                  <input
+                    type="text"
+                    value={orgRut}
+                    onChange={(e) => setOrgRut(e.target.value)}
+                    placeholder="76.123.456-7"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 font-semibold block mb-1">Estado Operativo</label>
+                  <select
+                    value={orgStatus}
+                    onChange={(e) => setOrgStatus(e.target.value as 'activa' | 'suspendida')}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    <option value="activa">Activa</option>
+                    <option value="suspendida">Suspendida</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 font-semibold block mb-1">Rubro / Tipo de Operación</label>
+                <input
+                  type="text"
+                  value={orgIndustry}
+                  onChange={(e) => setOrgIndustry(e.target.value)}
+                  placeholder="Minería Subterránea & Rajo"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSaving}
+                className="w-full py-2.5 px-4 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-bold flex items-center justify-center gap-2 transition-colors disabled:opacity-50"
+              >
+                {editingOrgId ? <Check className="w-4 h-4" /> : <Plus className="w-4 h-4" />}
+                <span>
+                  {isSaving
+                    ? 'Guardando en Firebase RTDB...'
+                    : editingOrgId
+                    ? 'Guardar Cambios de Organización'
+                    : 'Registrar Organización en RTDB'}
+                </span>
+              </button>
+            </form>
+          </div>
+
+          <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
+            <div className="pb-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
+              <div>
+                <h3 className="text-base font-bold text-white flex items-center gap-2">
+                  <Building2 className="w-4 h-4 text-cyan-400" />
+                  Organizaciones Registradas ({organizations.length})
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  Cambia el contexto activo para filtrar el dashboard, equipos, usuarios y faenas por empresa.
+                </p>
+              </div>
+              {onSelectOrganization && (
+                <button
+                  type="button"
+                  onClick={() => onSelectOrganization('all')}
+                  className={`px-3 py-1.5 rounded-lg text-xs font-bold border ${
+                    activeOrganizationId === 'all'
+                      ? 'bg-cyan-600 text-white border-cyan-400'
+                      : 'bg-slate-950 text-slate-300 border-slate-700 hover:border-cyan-500'
+                  }`}
+                >
+                  Ver Todas las Empresas
+                </button>
+              )}
+            </div>
+
+            <div className="space-y-3">
+              {organizations.map((org) => {
+                const isSelectedOrg = activeOrganizationId === org.id;
+                const isDefaultOrg = org.id === DEFAULT_ORGANIZATION.id;
+                return (
+                  <div
+                    key={org.id}
+                    className={`p-4 rounded-xl border transition-colors ${
+                      isSelectedOrg
+                        ? 'bg-cyan-950/40 border-cyan-500'
+                        : 'bg-slate-950/70 border-slate-800'
+                    }`}
+                  >
+                    <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="font-bold text-sm text-white">{org.name}</span>
+                          {isDefaultOrg && (
+                            <span className="text-[10px] font-bold px-2 py-0.5 rounded bg-purple-950 text-purple-300 border border-purple-700">
+                              Principal
+                            </span>
+                          )}
+                          <span
+                            className={`text-[10px] font-bold uppercase px-2 py-0.5 rounded border ${
+                              org.status === 'activa'
+                                ? 'bg-emerald-950 text-emerald-300 border-emerald-700'
+                                : 'bg-rose-950 text-rose-300 border-rose-700'
+                            }`}
+                          >
+                            {org.status}
+                          </span>
+                        </div>
+                        <div className="text-[11px] text-slate-400 font-mono mt-1 flex flex-wrap gap-3">
+                          <span>ID: {org.id}</span>
+                          {org.rut && <span>RUT: {org.rut}</span>}
+                          {org.industry && <span>Rubro: {org.industry}</span>}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 shrink-0">
+                        {onSelectOrganization && (
+                          <button
+                            type="button"
+                            onClick={() => onSelectOrganization(org.id)}
+                            className={`px-3 py-1.5 rounded-lg text-[11px] font-bold border ${
+                              isSelectedOrg
+                                ? 'bg-cyan-600 text-white border-cyan-400'
+                                : 'bg-slate-900 hover:bg-slate-800 text-cyan-300 border-slate-700'
+                            }`}
+                          >
+                            {isSelectedOrg ? 'Contexto Activo' : 'Activar Filtro'}
+                          </button>
+                        )}
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setEditingOrgId(org.id);
+                            setOrgName(org.name);
+                            setOrgRut(org.rut || '');
+                            setOrgIndustry(org.industry || 'Minería');
+                            setOrgStatus(org.status || 'activa');
+                          }}
+                          className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700"
+                          title="Editar organización"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                        </button>
+                        {!isDefaultOrg && (
+                          <button
+                            type="button"
+                            onClick={() => handleDeleteOrg(org)}
+                            disabled={isSaving}
+                            className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
+                            title="Eliminar organización"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};

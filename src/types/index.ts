@@ -1,0 +1,404 @@
+export type AlertSeverity = 'normal' | 'preventivo' | 'advertencia' | 'critico' | 'desconectado';
+
+export interface Organization {
+  id: string;
+  name: string;
+  rut?: string;
+  industry?: string;
+  status: 'activa' | 'suspendida';
+  createdAt: number;
+  updatedAt?: number;
+  createdBy?: string;
+}
+
+export interface TelemetryHistoryPoint {
+  timestamp: number;
+  co: number | null;
+  pm25: number | null;
+  temperatura: number | null;
+  humedad: number | null;
+}
+
+export interface AlertAttachment {
+  id: string;
+  alertId: string;
+  fileName: string;
+  contentType: string;
+  sizeBytes: number;
+  downloadUrl: string;
+  storagePath: string;
+  uploadedBy: string;
+  createdAt: number;
+}
+
+export interface TelemetryVariable {
+  id: string;
+  name: string;
+  shortName: string;
+  value: number;
+  unit: string;
+  trend: 'estable' | 'leve alza' | 'leve caida' | 'alza critica';
+  status: AlertSeverity;
+  statusLabel: string;
+  thresholdMin?: number;
+  thresholdMax?: number;
+  lastUpdateSeconds: number;
+  isSimulated?: boolean;
+  historical: { timestamp: string; value: number }[];
+}
+
+export interface SensorDevice {
+  id: string;
+  code: string;
+  name: string;
+  type: 'multigas_portatil' | 'estacion_fija' | 'flujo_ventilacion' | 'sensor_geomecanico' | 'camara_termica';
+  organizationId?: string;
+  sectorId: string;
+  sectorName: string;
+  batteryPct: number;
+  signalStrength: 'optima' | 'media' | 'debil' | 'sin_conexion';
+  lastPing: string;
+  status: AlertSeverity;
+  assignedTo?: string;
+  rawCO?: number;
+  rawPM25?: number;
+  rawTemp?: number;
+  rawHum?: number;
+  sensorFault?: boolean;
+  faultFields?: ('CO' | 'PM2_5' | 'temperatura' | 'humedad')[];
+  lastUpdateServer?: number;
+  gatewayOnline?: boolean;
+  metrics: {
+    temperatura: number;
+    humedad: number;
+    co2: number;
+    co: number;
+    ch4: number;
+    o2: number;
+    flujoAire: number;
+    ruido: number;
+    polvoPM: number;
+  };
+  alarmaActiva?: boolean;
+  origenAlarma?: string;
+  descripcionMonitoreo?: string;
+  fecha?: string;
+  hora?: string;
+  via?: string;
+  localIp?: string;
+  deviceCategory?: DeviceCategory;
+  parentGatewayId?: string;
+  registroAlarmas?: Record<string, any>;
+}
+
+export interface AlarmAuditRecord {
+  id: string;
+  deviceId: string;
+  deviceName: string;
+  fecha: string;
+  hora: string;
+  origen: string;
+  descripcion: string;
+  co: number;
+  pm25: number;
+  temperatura: number;
+  humedad: number;
+  via?: string;
+  timestampServer?: number;
+  metricSummary?: string;
+  correctiveActions?: string;
+  resolvedBy?: string;
+  sourceKind?: 'esp32' | 'bitacora_web';
+  alertTitle?: string;
+  closingTitle?: string;
+  attachments?: AlertAttachment[];
+}
+
+export interface ESP32GatewayData {
+  deviceId: string;
+  name: string;
+  co: number;
+  pm25: number;
+  temperature: number;
+  humidity: number;
+  lastUpdateServer: number;
+  isOnline: boolean;
+  secondsAgo: number;
+  localIp: string;
+  history?: { timestamp: number; co: number; pm25: number; temp: number; hum: number }[];
+}
+
+export interface MiningSector {
+  id: string;
+  name: string;
+  code: string;
+  depthMeters: number;
+  type: 'socavon' | 'piquepal' | 'galeria_extraccion' | 'taller_mantencion' | 'chimenea_ventilacion';
+  activeWorkers: number;
+  sensorsCount: number;
+  generalStatus: AlertSeverity;
+  ventilationFanStatus: 'operativo_normal' | 'ventilacion_forzada' | 'en_mantencion' | 'detenido';
+  assignedCrews?: string[];
+}
+
+export interface MiningSite {
+  id: string;
+  organizationId?: string;
+  name: string;
+  company: string;
+  location: string;
+  comuna?: string;
+  region: string;
+  type: 'subterranea' | 'rajo_abierto' | 'mixta';
+  elevationMsl: number;
+  activeSectors: MiningSector[];
+  isPreloaded?: boolean;
+}
+
+export type AlertResolutionType =
+  | 'emergencia_real'
+  | 'simulacro'
+  | 'falsa_alarma_sensor'
+  | 'prueba_operativa';
+
+export interface AlertResolutionDetails {
+  resolutionType: AlertResolutionType;
+  closingTitle?: string;
+  comment: string;
+  correctiveActions?: string;
+  resolvedBy: string;
+  resolvedAt: string;
+  attachments?: AlertAttachment[];
+}
+
+export interface DrillDebriefRecord {
+  id: string;
+  drillType: string;
+  classification: 'simulacro_exitoso' | 'simulacro_con_observaciones' | 'falsa_alarma' | 'emergencia_real';
+  notes: string;
+  correctiveActions?: string;
+  supervisorName: string;
+  timestamp: number;
+}
+
+export interface SafetyAlert {
+  id: string;
+  code: string;
+  organizationId?: string;
+  title: string;
+  severity: AlertSeverity;
+  variableName: string;
+  sensorId: string;
+  sensorCode: string;
+  sectorName: string;
+  recordedValue: string;
+  safeLimit: string;
+  timestamp: string;
+  timestampMs?: number;
+  acknowledged: boolean;
+  acknowledgedBy?: string;
+  acknowledgedAt?: number;
+  resolved: boolean;
+  suggestedAction: string;
+  resolutionDetails?: AlertResolutionDetails;
+}
+
+export interface DeviceRental {
+  id: string;
+  organizationId?: string;
+  contractNumber: string;
+  deviceCode: string;
+  deviceType: string;
+  provider: string;
+  startDate: string;
+  endDate: string;
+  monthlyCostClp: number;
+  paymentStatus: 'al_dia' | 'proximo_a_vencer' | 'pago_pendiente' | 'vencido';
+  lastPaymentDate: string;
+  nextDueDate: string;
+  assignedTechnician: string;
+  notes: string;
+}
+
+export interface WorkerAssignment {
+  id: string;
+  organizationId?: string;
+  workerRut: string;
+  workerName: string;
+  role: string;
+  crew: string;
+  sectorName: string;
+  assignedDeviceId: string;
+  assignedDeviceCode: string;
+  assignmentDate: string;
+  deviceBattery: number;
+  emergencyContact: string;
+}
+
+export type UserRole = 'superadmin' | 'admin' | 'operador';
+
+export interface UserProfile {
+  id: string;
+  organizationId?: string;
+  name: string;
+  email: string;
+  role: UserRole;
+  roleLabel: string;
+  rut: string;
+  shift: string;
+  avatarUrl?: string;
+  status: 'activo' | 'inactivo';
+  lastLogin?: string;
+  assignedSector?: string;
+  assignedDeviceCode?: string;
+}
+
+export type ControllableTab =
+  | 'dashboard'
+  | 'monitoreo'
+  | 'alertas'
+  | 'configuracion_alertas'
+  | 'equipos'
+  | 'reportes'
+  | 'faenas'
+  | 'usuarios';
+
+export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
+
+export type NavigationTab = ControllableTab | 'superadmin_panel';
+
+export type WindowOverrideValue = 'inherit' | 'allow' | 'block';
+
+export interface PlatformVisibilityConfig {
+  rolePermissions: {
+    admin: Record<ControllableTab, boolean>;
+    operador: Record<ControllableTab, boolean>;
+  };
+  userOverrides: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
+  userOverridesByEmail?: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
+  equiposSubTabRolePermissions?: {
+    admin: Record<EquiposSubTab, boolean>;
+    operador: Record<EquiposSubTab, boolean>;
+  };
+  equiposSubTabUserOverrides?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
+  equiposSubTabUserOverridesByEmail?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
+}
+
+export interface PlatformMetricsConfig {
+  coPreventivo: number;
+  coAdvertencia: number;
+  coCritico: number;
+  coChartSafeMax: number;
+  pm25Preventivo: number;
+  pm25Advertencia: number;
+  pm25Critico: number;
+  pm25ChartSafeMax: number;
+  tempMin: number;
+  tempPreventivo: number;
+  tempAdvertencia: number;
+  tempCritico: number;
+  humMin: number;
+  humPreventivo: number;
+  humAdvertencia: number;
+  humCritico: number;
+  airFlowMin: number;
+  airFlowMax: number;
+  batteryMin: number;
+  co2SafeMax: number;
+  co2CriticalMax: number;
+  ch4SafeMax: number;
+  ch4CriticalMax: number;
+  o2MinSafe: number;
+  noiseSafeMax: number;
+  noiseCriticalMax: number;
+  gatewayTimeoutSeconds: number;
+  emergencyGasThreshold: number;
+  emergencyDustThreshold: number;
+}
+
+export interface PlatformAppearanceConfig {
+  platformTitle: string;
+  platformSubtitle: string;
+  siteBadgeText: string;
+  footerText: string;
+  announcementEnabled: boolean;
+  announcementText: string;
+  announcementTone: 'info' | 'warning' | 'critical';
+  showChartsAndUsers: boolean;
+  showESP32Section: boolean;
+  showDualSensorCards: boolean;
+  showHeroMetricCards: boolean;
+  showCapabilitiesGrid: boolean;
+  showAdditionalGasesRow: boolean;
+  allowHardwareControlsForNonSuperAdmin: boolean;
+  allowEmergencyButtonForOperador: boolean;
+}
+
+export type DeviceCategory = 'sensor' | 'gateway' | 'gateway_sensor';
+
+export interface RegisteredDeviceConfig {
+  id: string;
+  organizationId?: string;
+  name: string;
+  category: DeviceCategory;
+  sectorName: string;
+  parentGatewayId?: string;
+  localIp?: string;
+  enabled: boolean;
+  createdAt: number;
+}
+
+export interface PlatformConfig {
+  visibility: PlatformVisibilityConfig;
+  metrics: PlatformMetricsConfig;
+  appearance: PlatformAppearanceConfig;
+  registeredDevices: RegisteredDeviceConfig[];
+  onlyShowRegisteredDevices: boolean;
+  actualizado_en: number;
+  actualizado_por: string;
+}
+
+export type AlertThresholdLevel = 'normal' | 'preventivo' | 'advertencia' | 'critico';
+
+export interface ThresholdVariableConfig {
+  activo: boolean;
+  notificaciones: boolean;
+  preventivo: number;
+  advertencia: number;
+  critico: number;
+  unidad: string;
+  minVal: number;
+  maxVal: number;
+  label: string;
+  descripcion?: string;
+}
+
+export interface DeviceThresholdsConfig {
+  dispositivo_id: string;
+  dispositivo_nombre?: string;
+  pm25: ThresholdVariableConfig;
+  mq2: ThresholdVariableConfig;
+  temperatura: ThresholdVariableConfig;
+  humedad: ThresholdVariableConfig;
+  actualizado_en: number;
+  actualizado_por: string;
+  notas?: string;
+}
+
+export interface AlertEventRecord {
+  id: string;
+  dispositivo_id: string;
+  dispositivo_nombre: string;
+  sector_nombre: string;
+  variable: 'pm25' | 'mq2' | 'temperatura' | 'humedad';
+  variable_label: string;
+  valor_detectado: number;
+  umbral_superado: number;
+  nivel: 'preventivo' | 'advertencia' | 'critico';
+  unidad: string;
+  timestamp: number;
+  fecha_hora: string;
+  estado: 'activa' | 'recuperada';
+  recuperada_en?: number;
+  origen: 'motor_umbrales';
+}

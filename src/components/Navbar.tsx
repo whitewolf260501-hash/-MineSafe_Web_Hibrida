@@ -30,7 +30,8 @@ import {
   Moon,
   Building2,
   Box,
-  Router
+  Router,
+  BookOpen
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -154,6 +155,12 @@ export const Navbar: React.FC<NavbarProps> = ({
             label: 'Control Maestro',
             shortLabel: 'SuperAdmin',
             icon: <Crown className="w-4 h-4 shrink-0 text-purple-400" />,
+          },
+          {
+            id: 'superadmin_docs' as NavigationTab,
+            label: 'Entregables P031',
+            shortLabel: 'Docs',
+            icon: <BookOpen className="w-4 h-4 shrink-0 text-purple-400" />,
           },
         ]
       : []),
@@ -468,10 +475,10 @@ export const Navbar: React.FC<NavbarProps> = ({
                   }}
                   className={`flex items-center gap-2 px-3 py-1.5 text-xs lg:text-sm font-semibold rounded-lg transition-colors whitespace-nowrap shrink-0 ${
                     isActive
-                      ? item.id === 'superadmin_panel'
+                      ? (item.id === 'superadmin_panel' || item.id === 'superadmin_docs')
                         ? 'bg-purple-950/90 text-purple-200 border border-purple-500/80 shadow-sm shadow-purple-950/60'
                         : 'bg-cyan-950/80 text-cyan-300 border border-cyan-700/70 shadow-sm shadow-cyan-950/50'
-                      : item.id === 'superadmin_panel'
+                      : (item.id === 'superadmin_panel' || item.id === 'superadmin_docs')
                         ? 'text-purple-300 hover:text-purple-100 hover:bg-purple-950/40 border border-purple-900/50'
                         : 'text-slate-400 hover:text-slate-200 hover:bg-slate-900/60 border border-transparent'
                   }`}

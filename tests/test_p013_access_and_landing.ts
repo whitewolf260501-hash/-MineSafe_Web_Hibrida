@@ -188,6 +188,10 @@ assert.ok(!landingSrc.includes('firebase'), 'PublicLanding has zero Firebase imp
 assert.ok(!landingSrc.includes('mockData'), 'PublicLanding has zero internal mockData imports');
 assert.ok(!landingSrc.includes('manuelcrisostomovega@gmail.com'), 'PublicLanding leaks no internal personal emails');
 assert.ok(!landingSrc.includes('192.168.'), 'PublicLanding exposes no internal IP addresses');
+assert.ok(landingSrc.includes('device-node-sensors.jpg'), 'PublicLanding embeds device sensor photo');
+assert.ok(landingSrc.includes('device-gateway.jpg'), 'PublicLanding embeds gateway device photo');
+assert.ok(landingSrc.includes('device-mine-deployment.jpg'), 'PublicLanding embeds mine deployment photo');
+assert.ok(landingSrc.includes('device-architecture-plan.jpg'), 'PublicLanding embeds operational architecture plan image');
 
 assert.ok(!loginViewSrc.includes('registerWithFirebaseAuth'), 'LoginView exposes no public registration handler');
 assert.ok(!loginViewSrc.includes('PRELOADED_USERS'), 'LoginView leaks no preloaded profile cards');
@@ -197,7 +201,7 @@ assert.ok(!fs.existsSync(path.join(rootDir, 'src/components/UserManagementModal.
 
 assert.ok(firebaseSrc.includes('auth/public-registration-disabled'), 'firebase.ts explicitly disables public self-registration');
 assert.ok(firebaseSrc.includes('auth/unauthorized-profile'), 'firebase.ts rejects Firebase Auth logins without authorized active /usuarios profile');
-assert.ok(rtdbRulesSrc.includes("/isActive').val() !== false"), 'database.rules.json blocks inactive accounts from RTDB access');
+assert.ok(rtdbRulesSrc.includes("/isActive').val() === true"), 'database.rules.json strictly requires active accounts for RTDB access');
 assert.ok(!firestoreRulesSrc.includes("incoming().role == 'operador'"), 'firestore.rules disallows client self-registration on /users');
 
 console.log('✅ 4. Static P013 separation, no-self-registration & privacy invariants passed');

@@ -17,6 +17,15 @@ export interface TelemetryHistoryPoint {
   pm25: number | null;
   temperatura: number | null;
   humedad: number | null;
+  originTimestamp?: number;
+  serverTimestamp?: number;
+}
+
+export interface TelemetryHistoryPageResult {
+  points: TelemetryHistoryPoint[];
+  pagesFetched: number;
+  truncated: boolean;
+  error: string | null;
 }
 
 export type TelemetryRangeKey = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom';
@@ -31,6 +40,7 @@ export interface AlertAttachment {
   downloadUrl: string;
   storagePath: string;
   uploadedBy: string;
+  uploadedByUid?: string;
   createdAt: number;
 }
 
@@ -176,6 +186,7 @@ export interface AlertResolutionDetails {
 
 export interface DrillDebriefRecord {
   id: string;
+  organizationId?: string;
   drillType: string;
   classification: 'simulacro_exitoso' | 'simulacro_con_observaciones' | 'falsa_alarma' | 'emergencia_real';
   notes: string;
@@ -270,7 +281,7 @@ export type ControllableTab =
 
 export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
 
-export type NavigationTab = ControllableTab | 'superadmin_panel';
+export type NavigationTab = ControllableTab | 'superadmin_panel' | 'superadmin_docs';
 
 export type WindowOverrideValue = 'inherit' | 'allow' | 'block';
 

@@ -50,7 +50,7 @@ jobs:
         run: |
           rm -rf dist/assets/aistudio
           cp dist/index.html dist/404.html
-          touch dist/.nojekyll
+          echo "# GitHub Pages static site marker (Jekyll disabled)" > dist/.nojekyll
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

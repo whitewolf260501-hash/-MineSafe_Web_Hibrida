@@ -36,9 +36,9 @@ interface UsersManagementViewProps {
   usersList: UserProfile[];
   organizations?: Organization[];
   activeOrganizationId?: string;
-  onAddUser: (newUser: UserProfile) => void;
-  onUpdateUserRole: (userId: string, newRole: UserRole) => void;
-  onToggleUserStatus: (userId: string) => void;
+  onAddUser: (newUser: UserProfile) => Promise<void> | void;
+  onUpdateUserRole: (userId: string, newRole: UserRole) => Promise<void> | void;
+  onToggleUserStatus: (userId: string) => Promise<void> | void;
 }
 
 export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
@@ -87,7 +87,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     return matchesSearch && matchesRole;
   });
 
-  const handleRoleSelectChange = (targetUser: UserProfile, nextRole: UserRole) => {
+  const handleRoleSelectChange = async (targetUser: UserProfile, nextRole: UserRole) => {
     const check = canModifyTargetUser(currentUser, targetUser, nextRole);
     if (!check.allowed) {
       soundAlert.playFeedbackBeep();
@@ -95,27 +95,35 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       return;
     }
 
-    onUpdateUserRole(targetUser.id, nextRole);
-    showToast(
-      'success',
-      nextRole === 'admin'
-        ? `Permisos de Administrador otorgados a ${targetUser.name}.`
-        : `Rol actualizado a Operador (Usuario Normal) para ${targetUser.name}.`
-    );
+    try {
+      await onUpdateUserRole(targetUser.id, nextRole);
+      showToast(
+        'success',
+        nextRole === 'admin'
+          ? `Permisos de Administrador otorgados a ${targetUser.name}.`
+          : `Rol actualizado a Operador (Usuario Normal) para ${targetUser.name}.`
+      );
+    } catch (err: any) {
+      showToast('error', err?.message || 'No se pudo actualizar el rol en Firebase RTDB.');
+    }
   };
 
-  const handleStatusToggleClick = (targetUser: UserProfile) => {
+  const handleStatusToggleClick = async (targetUser: UserProfile) => {
     const check = canModifyTargetUser(currentUser, targetUser);
     if (!check.allowed) {
       soundAlert.playFeedbackBeep();
       showToast('error', check.reason || 'Acción denegada.');
       return;
     }
-    onToggleUserStatus(targetUser.id);
-    showToast(
-      'success',
-      `Cuenta de ${targetUser.name} ${targetUser.status === 'activo' ? 'desactivada' : 'activada'}.`
-    );
+    try {
+      await onToggleUserStatus(targetUser.id);
+      showToast(
+        'success',
+        `Cuenta de ${targetUser.name} ${targetUser.status === 'activo' ? 'desactivada' : 'activada'}.`
+      );
+    } catch (err: any) {
+      showToast('error', err?.message || 'No se pudo actualizar el estado en Firebase RTDB.');
+    }
   };
 
   const handleSendPasswordReset = async (targetUser: UserProfile) => {
@@ -205,15 +213,22 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       lastLogin: 'Pre-registro administrativo (sin clave Auth)',
     };
 
-    onAddUser(created);
-    soundAlert.playFeedbackBeep();
-    showToast('success', `Perfil RTDB de ${created.name} guardado (${safeRole}).`);
-    setShowAddModal(false);
-    setNewName('');
-    setNewEmail('');
-    setNewRut('');
-    setNewPassword('');
-    setNewRole('operador');
+    setIsCreating(true);
+    try {
+      await onAddUser(created);
+      soundAlert.playFeedbackBeep();
+      showToast('success', `Perfil RTDB de ${created.name} guardado (${safeRole}).`);
+      setShowAddModal(false);
+      setNewName('');
+      setNewEmail('');
+      setNewRut('');
+      setNewPassword('');
+      setNewRole('operador');
+    } catch (err: any) {
+      setCreateError(err?.message || 'Error al registrar perfil en Firebase RTDB.');
+    } finally {
+      setIsCreating(false);
+    }
   };
 
   const getRoleBadge = (role: UserRole) => {

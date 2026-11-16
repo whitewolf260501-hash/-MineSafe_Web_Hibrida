@@ -32,6 +32,9 @@ interface HistoricalReportsViewProps {
   alertEvents?: AlertEventRecord[];
   alerts?: SafetyAlert[];
   onRangeChange?: (window: TelemetryRangeWindow) => void;
+  isHistoryLoading?: boolean;
+  historyTruncated?: boolean;
+  historyError?: string | null;
 }
 
 export const RANGE_HOURS: Record<Exclude<TelemetryRangeKey, 'custom'>, number> = {
@@ -126,6 +129,72 @@ export function buildTelemetryCsvContent(params: {
   return '\uFEFF' + headers + '\n' + lines.join('\n') + (lines.length > 0 ? '\n' : '');
 }
 
+/**
+ * Construcción asíncrona de CSV por bloques para evitar congelamiento del hilo principal
+ * al exportar ventanas de varios días (> 10.000 registros).
+ */
+export async function buildTelemetryCsvContentAsync(
+  params: {
+    rows: CsvTelemetryRow[];
+    deviceId: string;
+    variableName: string;
+    unit: string;
+    siteName: string;
+    sectorName: string;
+  },
+  chunkSize: number = 2000
+): Promise<string> {
+  const sorted = [...params.rows].sort((a, b) => a.timestamp - b.timestamp);
+  const headers = [
+    'Dispositivo',
+    'Marca_Temporal_ISO',
+    'Fecha_Hora_Local',
+    'Variable',
+    'Valor_Registrado',
+    'Unidad',
+    'Faena',
+    'Sector',
+  ].join(',');
+
+  const safeChunkSize = Math.max(250, chunkSize);
+  const lines: string[] = [];
+
+  for (let i = 0; i < sorted.length; i += safeChunkSize) {
+    const slice = sorted.slice(i, i + safeChunkSize);
+    for (const pt of slice) {
+      const validTs = Number.isFinite(pt.timestamp) && pt.timestamp > 0;
+      const iso = validTs ? new Date(pt.timestamp).toISOString() : '';
+      const localStr = validTs
+        ? new Date(pt.timestamp).toLocaleString('es-CL', {
+            day: '2-digit',
+            month: '2-digit',
+            year: 'numeric',
+            hour: '2-digit',
+            minute: '2-digit',
+            second: '2-digit',
+          })
+        : 'Lectura Actual';
+      lines.push(
+        [
+          escapeCsvCell(params.deviceId),
+          escapeCsvCell(iso),
+          escapeCsvCell(localStr),
+          escapeCsvCell(params.variableName),
+          escapeCsvCell(pt.value),
+          escapeCsvCell(params.unit),
+          escapeCsvCell(params.siteName),
+          escapeCsvCell(params.sectorName),
+        ].join(',')
+      );
+    }
+    if (i + safeChunkSize < sorted.length) {
+      await new Promise<void>((resolve) => setTimeout(resolve, 0));
+    }
+  }
+
+  return '\uFEFF' + headers + '\n' + lines.join('\n') + (lines.length > 0 ? '\n' : '');
+}
+
 export function downsampleChartPoints<T>(items: T[], maxPoints: number = 48): T[] {
   if (items.length <= maxPoints || maxPoints < 2) return items;
   const result: T[] = [];
@@ -146,6 +215,9 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   alertEvents = [],
   alerts = [],
   onRangeChange,
+  isHistoryLoading = false,
+  historyTruncated = false,
+  historyError = null,
 }) => {
   const [selectedVarId, setSelectedVarId] = useState<string>('temp');
   const [timeRange, setTimeRange] = useState<TelemetryRangeKey>('24h');
@@ -157,6 +229,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
     return new Date().toISOString().split('T')[0];
   });
   const [showExportSuccess, setShowExportSuccess] = useState(false);
+  const [isExportingCsv, setIsExportingCsv] = useState(false);
 
   const currentVar = variables.find((v) => v.id === selectedVarId) || variables[0];
 
@@ -302,29 +375,35 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
       .slice(0, 50);
   }, [alertEvents, alerts]);
 
-  const handleExportCSV = () => {
+  const handleExportCSV = async () => {
+    if (isExportingCsv) return;
+    setIsExportingCsv(true);
     soundAlert.playFeedbackBeep();
-    const csvContent = buildTelemetryCsvContent({
-      rows: fullSeries.map((pt) => ({ timestamp: pt.timestamp, value: pt.value })),
-      deviceId: activeDeviceId,
-      variableName: currentVar.name,
-      unit: currentVar.unit,
-      siteName: currentSite.name,
-      sectorName: currentSite.activeSectors?.[0]?.name || activeDeviceName || 'Sector Minero',
-    });
+    try {
+      const csvContent = await buildTelemetryCsvContentAsync({
+        rows: fullSeries.map((pt) => ({ timestamp: pt.timestamp, value: pt.value })),
+        deviceId: activeDeviceId,
+        variableName: currentVar.name,
+        unit: currentVar.unit,
+        siteName: currentSite.name,
+        sectorName: currentSite.activeSectors?.[0]?.name || activeDeviceName || 'Sector Minero',
+      });
 
-    const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `minesafe_reporte_${activeDeviceId}_${currentVar.id}_${timeRange}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(url);
+      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.setAttribute('download', `minesafe_reporte_${activeDeviceId}_${currentVar.id}_${timeRange}.csv`);
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
 
-    setShowExportSuccess(true);
-    setTimeout(() => setShowExportSuccess(false), 3000);
+      setShowExportSuccess(true);
+      setTimeout(() => setShowExportSuccess(false), 3000);
+    } finally {
+      setIsExportingCsv(false);
+    }
   };
 
   const labelStep = Math.max(1, Math.ceil(chartSeries.length / 8));
@@ -346,13 +425,37 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           <div className="flex flex-wrap items-center gap-2">
             <button
               onClick={handleExportCSV}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors cursor-pointer"
+              disabled={isExportingCsv}
+              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-lg transition-colors cursor-pointer"
             >
               <Download className="w-4 h-4" />
-              Exportar Datos CSV ({fullSeries.length} muestras)
+              {isExportingCsv
+                ? `Generando CSV (${fullSeries.length} muestras)...`
+                : `Exportar Datos CSV (${fullSeries.length} muestras)`}
             </button>
           </div>
         </div>
+
+        {historyError && (
+          <div className="mt-4 p-3 bg-rose-950/75 border border-rose-800 text-rose-200 rounded-lg text-xs flex items-center gap-2">
+            <Info className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>Error consultando el historial de telemetría en Firebase RTDB: {historyError}</span>
+          </div>
+        )}
+
+        {historyTruncated && !historyError && (
+          <div className="mt-4 p-3 bg-amber-950/70 border border-amber-800 text-amber-200 rounded-lg text-xs flex items-center gap-2">
+            <Info className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>La ventana solicitada alcanzó el límite máximo de páginas ({fullSeries.length} muestras cargadas). Reduce el rango para inspeccionar registros anteriores sin truncamiento.</span>
+          </div>
+        )}
+
+        {isHistoryLoading && (
+          <div className="mt-4 p-2.5 bg-cyan-950/40 border border-cyan-800/50 text-cyan-200 rounded-lg text-xs flex items-center gap-2">
+            <Info className="w-4 h-4 text-cyan-400 shrink-0" />
+            <span>Sincronizando páginas históricas desde Firebase RTDB...</span>
+          </div>
+        )}
 
         {showExportSuccess && (
           <div className="mt-4 p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-300 rounded-lg text-xs flex items-center gap-2 animate-in fade-in">

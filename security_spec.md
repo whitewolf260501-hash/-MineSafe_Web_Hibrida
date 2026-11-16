@@ -13,6 +13,7 @@
    - Once an alert reaches `status == 'resuelta'` (`resolved == true`), non-admin users CANNOT reopen or alter its historical record.
    - `createdAt`, `ownerId`, and `id` MUST remain immutable across updates (`incoming().ownerId == existing().ownerId`, `incoming().createdAt == existing().createdAt`).
 7. **Temporal Integrity:** All `createdAt` on create and `updatedAt` on update MUST equal server `request.time`.
+8. **Multi-Tenant Read & Operational State Isolation (P031):** Document `get` rules in Firestore and node reads/writes in RTDB (`/dispositivos`, `/historial_telemetria`, `/simulacro/{orgId}`, `/emergencia/{orgId}`, `/simulacros_bitacora`, `/configuracion_alertas`, `/bitacora_configuracion_umbrales`) MUST enforce matching `organizationId` (no un-tagged `!exists()` cross-tenant bypasses) and `isActive === true` with user node existence. Storage attachments use `/adjuntos/{organizationId}/{alertId}/{fileName}` with immutable `create`-only semantics.
 
 ---
 

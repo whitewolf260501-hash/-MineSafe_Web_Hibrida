@@ -95,6 +95,19 @@ async function runTests() {
         createdAt: now,
         updatedAt: now,
       });
+      await setDoc(doc(db, 'alerts', 'alt_tenant_b'), {
+        id: 'alt_tenant_b',
+        ownerId: OTHER_USER_ID,
+        organizationId: 'org-minera-norte',
+        code: 'ALT-B1',
+        title: 'Gas CO Elevado Tenant B',
+        severity: 'critico',
+        acknowledged: false,
+        resolved: false,
+        status: 'activa',
+        createdAt: now,
+        updatedAt: now,
+      });
     });
 
     const serverTs = Timestamp.now();
@@ -129,6 +142,9 @@ async function runTests() {
 
     // DD-04: PII Cross-User Read
     await assertFails(getDoc(doc(opDb, 'users', OTHER_USER_ID)));
+
+    // DD-04B: Cross-Tenant Alert Read
+    await assertFails(getDoc(doc(opDb, 'alerts', 'alt_tenant_b')));
 
     // DD-05: Shadow / Ghost Field Injection
     await assertFails(
@@ -242,7 +258,7 @@ async function runTests() {
 
     // Positive sanity check: verified owner reads own user doc
     await assertSucceeds(getDoc(doc(opDb, 'alerts', 'alt_open_1')));
-    assert.ok(true, 'All 12 Dirty Dozen payloads rejected and authorized paths succeeded.');
+    assert.ok(true, 'All 12 Dirty Dozen payloads + cross-tenant get rejected and authorized paths succeeded.');
   } finally {
     await testEnv.cleanup();
   }

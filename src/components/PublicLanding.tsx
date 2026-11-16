@@ -25,6 +25,10 @@ import {
   buildContactMailtoHref,
   ContactFormPayload,
 } from '../utils/contactValidation';
+import nodeSensorsPhoto from '../assets/device-node-sensors.jpg';
+import gatewayDevicePhoto from '../assets/device-gateway.jpg';
+import mineDeploymentPhoto from '../assets/device-mine-deployment.jpg';
+import architecturePlanPhoto from '../assets/device-architecture-plan.jpg';
 
 export interface TeamMemberSlot {
   id: string;
@@ -35,13 +39,14 @@ export interface TeamMemberSlot {
 }
 
 /**
- * Espacio reservado para incorporar fotografías reales y nómina del equipo
- * únicamente cuando sean autorizadas para publicación pública.
+ * Fotografías del prototipo físico y despliegue en galería incorporadas
+ * para exhibición pública autorizada en la portada de MineSafe.
  */
 export const APPROVED_MEDIA = {
-  heroPrototypePhotoUrl: '' as string,
-  nodePhotoUrl: '' as string,
-  gatewayPhotoUrl: '' as string,
+  heroPrototypePhotoUrl: mineDeploymentPhoto as string,
+  nodePhotoUrl: nodeSensorsPhoto as string,
+  gatewayPhotoUrl: gatewayDevicePhoto as string,
+  architecturePlanPhotoUrl: architecturePlanPhoto as string,
 };
 
 export const APPROVED_TEAM_MEMBERS: TeamMemberSlot[] = [];
@@ -86,17 +91,22 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
     text: string;
   } | null>(null);
   const [isSendingContact, setIsSendingContact] = useState(false);
+  const [lightboxMedia, setLightboxMedia] = useState<{ src: string; alt: string; caption: string } | null>(null);
   const lastSentRef = useRef<number>(0);
 
   useEffect(() => {
     const handleKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape' && mobileMenuOpen) {
-        setMobileMenuOpen(false);
+      if (e.key === 'Escape') {
+        if (lightboxMedia) {
+          setLightboxMedia(null);
+        } else if (mobileMenuOpen) {
+          setMobileMenuOpen(false);
+        }
       }
     };
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [mobileMenuOpen]);
+  }, [mobileMenuOpen, lightboxMedia]);
 
   const scrollToSection = (sectionId: string) => {
     setMobileMenuOpen(false);
@@ -355,13 +365,26 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
                 <div className="rounded-2xl border border-[#2C3E57] bg-[#0F172A]/90 p-5 sm:p-6 shadow-xl space-y-4">
                   {APPROVED_MEDIA.heroPrototypePhotoUrl ? (
                     <figure className="space-y-2.5">
-                      <img
-                        src={APPROVED_MEDIA.heroPrototypePhotoUrl}
-                        alt="Fotografía real del prototipo MineSafe en pruebas de laboratorio"
-                        className="w-full aspect-[16/10] object-cover rounded-xl border border-[#253349]"
-                      />
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLightboxMedia({
+                            src: APPROVED_MEDIA.heroPrototypePhotoUrl,
+                            alt: 'Despliegue del prototipo MineSafe en galería subterránea con nodos a 0 m, 50 m y 100 m y gateway con antena',
+                            caption: 'Despliegue subterráneo de nodos ambientales y gateway MineSafe en galería (puntos a 0 m, 50 m y 100 m).',
+                          })
+                        }
+                        className={`block w-full text-left rounded-xl overflow-hidden border border-[#253349] hover:border-[#2DD4BF]/60 transition-colors cursor-zoom-in ${focusRing}`}
+                        title="Ampliar fotografía del despliegue"
+                      >
+                        <img
+                          src={APPROVED_MEDIA.heroPrototypePhotoUrl}
+                          alt="Despliegue del prototipo MineSafe en galería subterránea con nodos a 0 m, 50 m y 100 m y gateway con antena"
+                          className="w-full aspect-[16/10] object-cover"
+                        />
+                      </button>
                       <figcaption className="text-xs text-[#94A3B8]">
-                        Prototipo físico MineSafe (registro fotográfico autorizado del equipo).
+                        Despliegue en galería subterránea: nodo sensor y gateway con antena en cabecera (0 m) y nodos distribuidos a 50 m y 100 m.
                       </figcaption>
                     </figure>
                   ) : (
@@ -445,11 +468,29 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
 
                 <div className="mt-6">
                   {APPROVED_MEDIA.nodePhotoUrl ? (
-                    <img
-                      src={APPROVED_MEDIA.nodePhotoUrl}
-                      alt="Fotografía autorizada del nodo ambiental MineSafe"
-                      className="w-full h-44 object-cover rounded-xl border border-[#E2E8F0]"
-                    />
+                    <figure className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLightboxMedia({
+                            src: APPROVED_MEDIA.nodePhotoUrl,
+                            alt: 'Nodo ambiental MineSafe montado en roca con pantalla TFT, sensor de gas MQ-2, módulo PM2.5 y sensor DHT11',
+                            caption: 'Nodo ambiental MineSafe: pantalla TFT 1.8", sensor de gases MQ-2 (superior), cámara óptica de polvo PM2.5 (centro) y módulo de temperatura/humedad DHT11 (inferior).',
+                          })
+                        }
+                        className={`block w-full text-left rounded-xl overflow-hidden border border-[#E2E8F0] hover:border-[#0D9488] transition-colors cursor-zoom-in ${lightFocusRing}`}
+                        title="Ampliar fotografía del nodo y sus sensores"
+                      >
+                        <img
+                          src={APPROVED_MEDIA.nodePhotoUrl}
+                          alt="Nodo ambiental MineSafe montado en roca con pantalla TFT, sensor de gas MQ-2, módulo PM2.5 y sensor DHT11"
+                          className="w-full h-60 object-cover object-center"
+                        />
+                      </button>
+                      <figcaption className="text-xs text-[#64748B] leading-relaxed">
+                        Carcasa con pantalla TFT 1.8&quot; y sensores integrados en el lateral: gas MQ-2 (superior), polvo óptico PM2.5 (centro) y temperatura/humedad DHT11 (inferior).
+                      </figcaption>
+                    </figure>
                   ) : (
                     <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-4 flex items-center gap-3 text-xs text-[#64748B]">
                       <Camera className="w-4 h-4 text-[#0F766E] shrink-0" />
@@ -478,11 +519,29 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
 
                 <div className="mt-6">
                   {APPROVED_MEDIA.gatewayPhotoUrl ? (
-                    <img
-                      src={APPROVED_MEDIA.gatewayPhotoUrl}
-                      alt="Fotografía autorizada del gateway MineSafe"
-                      className="w-full h-44 object-cover rounded-xl border border-[#E2E8F0]"
-                    />
+                    <figure className="space-y-2">
+                      <button
+                        type="button"
+                        onClick={() =>
+                          setLightboxMedia({
+                            src: APPROVED_MEDIA.gatewayPhotoUrl,
+                            alt: 'Gateway concentrador MineSafe con antena externa, pantalla TFT y módulo ESP32-C3 montado en galería subterránea',
+                            caption: 'Gateway MineSafe (ESP32-C3 + ESP-NOW) con antena externa, pantalla TFT de estado, puerto de programación e interruptor lateral montado en galería.',
+                          })
+                        }
+                        className={`block w-full text-left rounded-xl overflow-hidden border border-[#E2E8F0] hover:border-[#0D9488] transition-colors cursor-zoom-in ${lightFocusRing}`}
+                        title="Ampliar fotografía del gateway MineSafe"
+                      >
+                        <img
+                          src={APPROVED_MEDIA.gatewayPhotoUrl}
+                          alt="Gateway concentrador MineSafe con antena externa, pantalla TFT y módulo ESP32-C3 montado en galería subterránea"
+                          className="w-full h-60 object-cover object-center"
+                        />
+                      </button>
+                      <figcaption className="text-xs text-[#64748B] leading-relaxed">
+                        Carcasa física del Gateway (ESP32-C3 / ESP-NOW) con antena superior, pantalla TFT de estado, puerto lateral e interruptor de encendido.
+                      </figcaption>
+                    </figure>
                   ) : (
                     <div className="rounded-xl border border-dashed border-[#CBD5E1] bg-[#F8FAFC] p-4 flex items-center gap-3 text-xs text-[#64748B]">
                       <Camera className="w-4 h-4 text-[#0F766E] shrink-0" />
@@ -647,6 +706,52 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
                 </li>
               ))}
             </ol>
+
+            {/* Plan operativo y despliegue en todos los sectores (superficie y subterráneo) */}
+            {APPROVED_MEDIA.architecturePlanPhotoUrl && (
+              <div className="mt-10 rounded-2xl border border-[#E2E8F0] bg-[#0F172A] p-5 sm:p-7 shadow-lg text-[#F8FAFC]">
+                <div className="flex flex-col md:flex-row md:items-end justify-between gap-4 mb-5">
+                  <div>
+                    <p className="text-xs font-bold uppercase tracking-[0.16em] text-[#2DD4BF]">
+                      Plan operativo en faena
+                    </p>
+                    <h3 className="mt-1 text-xl sm:text-2xl font-bold text-[#FFFFFF]">
+                      Arquitectura de cobertura integral en superficie y sectores subterráneos
+                    </h3>
+                    <p className="mt-1.5 text-sm text-[#CBD5E1] max-w-3xl leading-relaxed">
+                      Despliegue proyectado en malla inalámbrica ESP-NOW cada 50 metros conectando los nodos ambientales de superficie y galerías con gateways hacia la plataforma web y sistema de alertas.
+                    </p>
+                  </div>
+                  <span className="text-xs font-mono font-semibold text-[#2DD4BF] bg-[#131E31] border border-[#253349] px-3 py-1.5 rounded-lg self-start md:self-auto shrink-0">
+                    Clic en la imagen para ampliar
+                  </span>
+                </div>
+
+                <figure className="space-y-3">
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setLightboxMedia({
+                        src: APPROVED_MEDIA.architecturePlanPhotoUrl,
+                        alt: 'Arquitectura general y plan operativo MineSafe con despliegue de nodos cada 50 metros en superficie y sectores subterráneos conectados a gateways, Firebase y plataforma web',
+                        caption: 'MineSafe — Arquitectura general y plan operativo: red en malla ESP-NOW entre nodos cada 50 m en superficie y niveles subterráneos, gateways, Firebase y plataforma de alertas.',
+                      })
+                    }
+                    className={`block w-full text-left rounded-xl overflow-hidden border border-[#253349] hover:border-[#2DD4BF]/60 transition-colors cursor-zoom-in ${focusRing}`}
+                    title="Ampliar diagrama de arquitectura y plan operativo"
+                  >
+                    <img
+                      src={APPROVED_MEDIA.architecturePlanPhotoUrl}
+                      alt="Arquitectura general y plan operativo MineSafe con despliegue de nodos cada 50 metros en superficie y sectores subterráneos conectados a gateways, Firebase y plataforma web"
+                      className="w-full h-auto object-cover"
+                    />
+                  </button>
+                  <figcaption className="text-xs text-[#94A3B8] leading-relaxed">
+                    Esquema operativo multisector: nodos ambientales interconectados (~50 m) con enrutamiento redundante hacia gateways en superficie y niveles subterráneos, transmisión en tiempo real y alertas tempranas.
+                  </figcaption>
+                </figure>
+              </div>
+            )}
           </div>
         </section>
 
@@ -959,6 +1064,46 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
           </div>
         </div>
       </footer>
+
+      {/* Lightbox accesible para inspeccionar las fotografías del dispositivo y sensores */}
+      {lightboxMedia && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Vista ampliada de fotografía del dispositivo"
+          onClick={() => setLightboxMedia(null)}
+          className="fixed inset-0 z-[70] bg-[#020617]/90 backdrop-blur-sm flex items-center justify-center p-4 sm:p-6"
+        >
+          <div
+            onClick={(e) => e.stopPropagation()}
+            className="max-w-4xl w-full bg-[#0F172A] border border-[#334155] rounded-2xl overflow-hidden shadow-2xl"
+          >
+            <div className="flex items-center justify-between px-4 py-3 border-b border-[#1E293B]">
+              <span className="text-xs font-semibold uppercase tracking-wider text-[#2DD4BF]">
+                Prototipo físico MineSafe
+              </span>
+              <button
+                type="button"
+                onClick={() => setLightboxMedia(null)}
+                aria-label="Cerrar vista ampliada"
+                className={`p-1.5 rounded-lg text-[#CBD5E1] hover:text-[#FFFFFF] hover:bg-[#1E293B] cursor-pointer ${focusRing}`}
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+            <div className="bg-[#020617] flex items-center justify-center p-2 sm:p-4">
+              <img
+                src={lightboxMedia.src}
+                alt={lightboxMedia.alt}
+                className="max-h-[75vh] w-auto object-contain rounded-lg"
+              />
+            </div>
+            <div className="px-4 py-3 border-t border-[#1E293B] text-xs sm:text-sm text-[#CBD5E1]">
+              {lightboxMedia.caption}
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 };

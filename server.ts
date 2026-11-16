@@ -3,6 +3,7 @@ import express, { type Request, type Response } from 'express';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
+import { defaultTelemetryCollector } from './src/services/telemetryCollector';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -12,6 +13,51 @@ const isProduction = process.env.NODE_ENV === 'production';
 async function startServer() {
   const app = express();
   app.use(express.json({ limit: '4mb' }));
+
+  app.get('/api/telemetry/health', (_req: Request, res: Response) => {
+    res.json({
+      status: 'ok',
+      collector: defaultTelemetryCollector.getStats(),
+      rtdbUrlConfigured: Boolean(process.env.FIREBASE_RTDB_URL || process.env.VITE_FIREBASE_RTDB_URL),
+    });
+  });
+
+  app.post('/api/telemetry/ingest', async (req: Request, res: Response) => {
+    const decision = defaultTelemetryCollector.processIngest(req.body || {});
+    if (!decision.accepted || !decision.sample || !decision.rtdbPath) {
+      const code = decision.reason === 'invalid_device' || decision.reason === 'no_telemetry' ? 400 : 202;
+      res.status(code).json({ ok: false, reason: decision.reason });
+      return;
+    }
+
+    const rtdbBase = (
+      process.env.FIREBASE_RTDB_URL ||
+      process.env.VITE_FIREBASE_RTDB_URL ||
+      ''
+    ).replace(/\/+$/, '');
+    const dbSecret = process.env.FIREBASE_DB_SECRET || '';
+    let persistedToRtdb = false;
+
+    if (rtdbBase && dbSecret) {
+      const upstream = await fetch(
+        `${rtdbBase}/${decision.rtdbPath}.json?auth=${encodeURIComponent(dbSecret)}`,
+        {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(decision.sample),
+        }
+      ).catch(() => null);
+      persistedToRtdb = Boolean(upstream?.ok);
+    }
+
+    res.status(201).json({
+      ok: true,
+      reason: decision.reason,
+      rtdbPath: decision.rtdbPath,
+      persistedToRtdb,
+      sample: decision.sample,
+    });
+  });
 
   app.use((req, res, next) => {
     if (req.url && (req.url.endsWith('.apk') || req.url.includes('MineSafe_IoT_Mobile'))) {

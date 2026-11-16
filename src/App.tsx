@@ -15,6 +15,7 @@ import { alertEngine } from './services/alertEngine';
 
 const Node3DInspectorView = lazy(() => import('./components/Node3DInspectorView'));
 const Gateway3DInspectorView = lazy(() => import('./components/Gateway3DInspectorView'));
+const SuperAdminDocsView = lazy(() => import('./components/SuperAdminDocsView'));
 
 
 import { 
@@ -70,10 +71,12 @@ import {
   subscribeToAlertEvents,
   recordTelemetryHistoryPoint,
   subscribeToTelemetryHistory,
+  fetchPaginatedTelemetryHistory,
   DEFAULT_ORGANIZATION,
   addUserToRTDB,
   updateUserInRTDB,
   addRentalContractToRTDB,
+  updateRentalContractInRTDB,
   recordPaymentInRTDB,
   toggleGatewayAlarmInRTDB,
   shutdownAlarmCompletelyInRTDB,
@@ -156,6 +159,9 @@ export default function App({
   const [organizations, setOrganizations] = useState<Organization[]>([DEFAULT_ORGANIZATION]);
   const [activeOrganizationId, setActiveOrganizationId] = useState<string>('all');
   const [telemetryHistory, setTelemetryHistory] = useState<TelemetryHistoryPoint[]>([]);
+  const [isHistoryLoading, setIsHistoryLoading] = useState<boolean>(false);
+  const [historyTruncated, setHistoryTruncated] = useState<boolean>(false);
+  const [historyError, setHistoryError] = useState<string | null>(null);
   const [alertEvents, setAlertEvents] = useState<AlertEventRecord[]>([]);
   const [rentals, setRentals] = useState<DeviceRental[]>(INITIAL_RENTALS);
   const [assignments, setAssignments] = useState<WorkerAssignment[]>(INITIAL_ASSIGNMENTS);
@@ -247,56 +253,32 @@ export default function App({
     });
   }, []);
 
-  // Suscripciones globales de plataforma, umbrales, simulacros y chequeo de conexión/latencia
+  // Suscripciones globales de plataforma y umbrales + chequeo periódico de latencia de dispositivos
   useEffect(() => {
-    let unsubDrill: (() => void) | null = null;
     let unsubPlatform: (() => void) | null = null;
     let unsubThresholds: (() => void) | null = null;
 
     const staleCheckInterval = setInterval(recomputeDevicesFromRaw, 2000);
 
-    async function initGlobalListeners() {
-      const connected = await testConnection();
-      setIsFirebaseConnected(connected);
-
-      unsubThresholds = subscribeToAllThresholdConfigs((configs) => {
-        if (configs.global) {
-          alertEngine.setGlobalConfig(configs.global);
-        }
-        Object.entries(configs).forEach(([id, cfg]) => {
-          if (id !== 'global') {
-            alertEngine.setDeviceConfig(id, cfg);
-          }
-        });
-      });
-
-      unsubDrill = subscribeToRTDBDrill((drillState) => {
-        if (drillState.active) {
-          setIsDrillActive(true);
-          setDrillType((drillState.type as DrillType) || 'gas_critico');
-          setIsAlarmActive(true);
-          setIsLightActive(true);
-          setDismissEmergencyBanner(false);
-        } else {
-          setIsDrillActive(false);
-          setDrillType(null);
-          setIsAlarmActive(false);
-          setIsLightActive(false);
+    unsubThresholds = subscribeToAllThresholdConfigs((configs) => {
+      if (configs.global) {
+        alertEngine.setGlobalConfig(configs.global);
+      }
+      Object.entries(configs).forEach(([id, cfg]) => {
+        if (id !== 'global') {
+          alertEngine.setDeviceConfig(id, cfg);
         }
       });
+    });
 
-      unsubPlatform = subscribeToPlatformConfig((cfg) => {
-        setPlatformConfig(cfg);
-        timeoutSecondsRef.current = cfg.metrics.gatewayTimeoutSeconds || 20;
-        recomputeDevicesFromRaw();
-      });
-    }
-
-    initGlobalListeners();
+    unsubPlatform = subscribeToPlatformConfig((cfg) => {
+      setPlatformConfig(cfg);
+      timeoutSecondsRef.current = cfg.metrics.gatewayTimeoutSeconds || 20;
+      recomputeDevicesFromRaw();
+    });
 
     return () => {
       clearInterval(staleCheckInterval);
-      if (unsubDrill) unsubDrill();
       if (unsubPlatform) unsubPlatform();
       if (unsubThresholds) unsubThresholds();
       soundAlert.stopContinuousAlarm();
@@ -305,6 +287,39 @@ export default function App({
       alertEngine.clearActiveIncidents();
     };
   }, [recomputeDevicesFromRaw]);
+
+  // Verificación acotada de conexión y suscripción aislada por organización a simulacros
+  useEffect(() => {
+    let cancelled = false;
+    testConnection(subscriptionScope)
+      .then((connected) => {
+        if (!cancelled) setIsFirebaseConnected(connected);
+      })
+      .catch(() => {
+        if (!cancelled) setIsFirebaseConnected(false);
+      });
+
+    const drillOrgId = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
+    const unsubDrill = subscribeToRTDBDrill((drillState) => {
+      if (drillState.active) {
+        setIsDrillActive(true);
+        setDrillType((drillState.type as DrillType) || 'gas_critico');
+        setIsAlarmActive(true);
+        setIsLightActive(true);
+        setDismissEmergencyBanner(false);
+      } else {
+        setIsDrillActive(false);
+        setDrillType(null);
+        setIsAlarmActive(false);
+        setIsLightActive(false);
+      }
+    }, drillOrgId);
+
+    return () => {
+      cancelled = true;
+      unsubDrill();
+    };
+  }, [subscriptionScope, effectiveOrgId]);
 
   // Suscripciones operativas en RTDB estrictamente acotadas por rol y organización activa
   useEffect(() => {
@@ -515,25 +530,77 @@ export default function App({
     );
   }, []);
 
-  // Suscripción a historial real de telemetría para el nodo activo y rango seleccionado
+  // Paginación completa por cursor + cola viva en tiempo real para historial de telemetría
   useEffect(() => {
     if (!activeTelemetryDeviceId) {
       setTelemetryHistory([]);
+      setIsHistoryLoading(false);
+      setHistoryTruncated(false);
+      setHistoryError(null);
       return;
     }
-    const limit = telemetryWindow.key === '24h' ? 2500 : telemetryWindow.key === '6h' || telemetryWindow.key === '1h' ? 2500 : 15000;
+
+    let cancelled = false;
+    setIsHistoryLoading(true);
+    setHistoryError(null);
+    setHistoryTruncated(false);
+
+    fetchPaginatedTelemetryHistory(activeTelemetryDeviceId, {
+      startMs: telemetryWindow.startMs,
+      endMs: telemetryWindow.endMs,
+    })
+      .then((res) => {
+        if (cancelled) return;
+        setTelemetryHistory((prev) => {
+          const merged = new Map<number, TelemetryHistoryPoint>();
+          res.points.forEach((p) => merged.set(p.timestamp, p));
+          prev
+            .filter((p) => p.timestamp >= telemetryWindow.startMs && p.timestamp <= telemetryWindow.endMs)
+            .forEach((p) => {
+              if (!merged.has(p.timestamp)) merged.set(p.timestamp, p);
+            });
+          return Array.from(merged.values()).sort((a, b) => a.timestamp - b.timestamp);
+        });
+        setHistoryTruncated(res.truncated);
+        setHistoryError(res.error);
+      })
+      .catch((err: any) => {
+        if (cancelled) return;
+        setHistoryError(err?.message || 'Error cargando historial de telemetría.');
+      })
+      .finally(() => {
+        if (!cancelled) setIsHistoryLoading(false);
+      });
+
+    const tailStart = Math.max(telemetryWindow.startMs, Date.now() - 2 * 3600 * 1000);
     const unsubHist = subscribeToTelemetryHistory(
       activeTelemetryDeviceId,
       {
-        startMs: telemetryWindow.startMs,
+        startMs: tailStart,
         endMs: telemetryWindow.endMs,
-        limit,
+        limit: 300,
       },
-      (points) => {
-        setTelemetryHistory(points);
+      (tailPoints, meta) => {
+        if (cancelled) return;
+        if (meta?.error) {
+          setHistoryError(meta.error);
+          return;
+        }
+        setTelemetryHistory((prev) => {
+          const map = new Map<number, TelemetryHistoryPoint>();
+          prev.forEach((p) => map.set(p.timestamp, p));
+          tailPoints.forEach((p) => map.set(p.timestamp, p));
+          return Array.from(map.values())
+            .filter((p) => p.timestamp >= telemetryWindow.startMs && p.timestamp <= telemetryWindow.endMs)
+            .sort((a, b) => a.timestamp - b.timestamp);
+        });
       }
     );
-    return () => unsubHist();
+
+    return () => {
+      cancelled = true;
+      unsubHist();
+    };
   }, [activeTelemetryDeviceId, telemetryWindow]);
 
   // Evaluar mediciones en tiempo real únicamente sobre los dispositivos visibles
@@ -777,7 +844,8 @@ export default function App({
 
   const handleResolveAlert = useCallback(async (alertId: string) => {
     soundAlert.playFeedbackBeep();
-    const targetAlert = alertsRef.current.find((a) => a.id === alertId);
+    const prevAlerts = alertsRef.current;
+    const targetAlert = prevAlerts.find((a) => a.id === alertId);
     const defaultDetails: AlertResolutionDetails = targetAlert?.resolutionDetails || {
       resolutionType: 'prueba_operativa',
       comment: 'Alerta marcada como resuelta desde consola de seguridad.',
@@ -798,8 +866,14 @@ export default function App({
           : a
       )
     );
-    await resolveAlertInRTDB(targetAlert || alertId, defaultDetails).catch(() => {});
-  }, [currentUser]);
+    try {
+      await resolveAlertInRTDB(targetAlert || alertId, defaultDetails);
+    } catch (err: any) {
+      setAlerts(prevAlerts);
+      showAlarmFeedback(err?.message || 'Error al resolver alerta en Firebase RTDB.', 'error');
+      throw err;
+    }
+  }, [currentUser, showAlarmFeedback]);
 
   const handleResolveAlertWithDetails = useCallback(async (alertId: string, details: AlertResolutionDetails) => {
     soundAlert.playFeedbackBeep();
@@ -821,8 +895,14 @@ export default function App({
   }, [showAlarmFeedback]);
 
   const handleSaveDrillDebrief = useCallback(async (record: DrillDebriefRecord) => {
-    await saveDrillDebriefInRTDB(record);
-  }, []);
+    const orgId =
+      record.organizationId ||
+      (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId);
+    await saveDrillDebriefInRTDB({
+      ...record,
+      organizationId: orgId,
+    });
+  }, [effectiveOrgId]);
 
 
   const handleTriggerForcedVentilation = useCallback((sectorName: string) => {
@@ -1069,8 +1149,18 @@ export default function App({
 
     setAlerts(prev => [newAlert, ...prev]);
 
-    // Broadcast drill and save drill alert to Firebase Realtime Database (/simulacro + /alertas)
-    await broadcastDrillToRTDB(true, type, dev?.id || 'device_38A839E81F84').catch(() => {});
+    // Broadcast drill and save drill alert to Firebase Realtime Database (/simulacro/{orgId} + /alertas)
+    const drillOrgId =
+      dev?.organizationId ||
+      (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId);
+    await broadcastDrillToRTDB(
+      true,
+      type,
+      dev?.id || 'device_38A839E81F84',
+      drillOrgId
+    ).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al activar simulacro en Firebase RTDB.', 'error');
+    });
     await broadcastAlertToRTDB(newAlert).catch((err: any) => {
       showAlarmFeedback(err?.message || 'Error al guardar alerta de simulacro en Firebase RTDB.', 'error');
     });
@@ -1177,10 +1267,22 @@ export default function App({
       organizationId: targetOrg,
       id: `rent-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
     };
-    await addRentalContractToRTDB(created, currentUser);
+    await addRentalContractToRTDB(created, currentUser, platformConfig.registeredDevices);
     setRentals((prev) => (prev.some((r) => r.id === created.id) ? prev : [created, ...prev]));
     showAlarmFeedback(`Contrato ${created.contractNumber} registrado en Firebase RTDB.`, 'success');
-  }, [effectiveOrgId, currentSite.organizationId, currentUser, showAlarmFeedback]);
+  }, [effectiveOrgId, currentSite.organizationId, currentUser, platformConfig.registeredDevices, showAlarmFeedback]);
+
+  const handleUpdateRentalContract = useCallback(async (contractId: string, updates: Partial<DeviceRental>) => {
+    const updated = await updateRentalContractInRTDB(
+      contractId,
+      updates,
+      currentUser,
+      platformConfig.registeredDevices
+    );
+    setRentals((prev) => prev.map((r) => (r.id === contractId ? updated : r)));
+    soundAlert.playFeedbackBeep();
+    showAlarmFeedback(`Contrato ${updated.contractNumber} actualizado en Firebase RTDB.`, 'success');
+  }, [currentUser, platformConfig.registeredDevices, showAlarmFeedback]);
 
   const handleRecordPayment = useCallback(async (contractId: string) => {
     const targetRental = rentals.find((r) => r.id === contractId);
@@ -1190,9 +1292,12 @@ export default function App({
       showAlarmFeedback(access.reason || 'Permisos insuficientes para registrar pagos.', 'error');
       throw new Error(access.reason || 'Permisos insuficientes para registrar pagos.');
     }
-    const amount = targetRental?.monthlyCostClp && targetRental.monthlyCostClp > 0
-      ? targetRental.monthlyCostClp
-      : 185000;
+    if (!targetRental || !Number.isFinite(targetRental.monthlyCostClp) || targetRental.monthlyCostClp <= 0) {
+      const msg = 'No se puede registrar el pago: el contrato seleccionado no tiene un monto mensual válido (> 0 CLP).';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+    const amount = targetRental.monthlyCostClp;
     const res = await recordPaymentInRTDB(contractId, amount, {
       organizationId: targetOrg,
       actingUser: currentUser,
@@ -1219,19 +1324,23 @@ export default function App({
     };
     setSites((prev) => mergeMiningSites(prev, [scopedNewSite]));
     setCurrentSite(scopedNewSite);
-    saveSiteToRTDB(scopedNewSite).catch(() => {});
-  }, [effectiveOrgId]);
+    saveSiteToRTDB(scopedNewSite).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al guardar faena en Firebase RTDB.', 'error');
+    });
+  }, [effectiveOrgId, showAlarmFeedback]);
 
   const handleUpdateSite = useCallback((updatedSite: MiningSite) => {
     setSites((prev) =>
       prev.map((s) => (s.id === updatedSite.id ? updatedSite : s))
     );
     setCurrentSite((prev) => (prev.id === updatedSite.id ? updatedSite : prev));
-    saveSiteToRTDB(updatedSite).catch(() => {});
-  }, []);
+    saveSiteToRTDB(updatedSite).catch((err: any) => {
+      showAlarmFeedback(err?.message || 'Error al actualizar faena en Firebase RTDB.', 'error');
+    });
+  }, [showAlarmFeedback]);
 
   // User Management Handlers
-  const handleAddUser = useCallback((newUser: UserProfile) => {
+  const handleAddUser = useCallback(async (newUser: UserProfile) => {
     // Regla: Solo existe un único SuperAdmin en toda la plataforma y respeta el ámbito de organización
     const safeRole: UserRole = newUser.role === 'superadmin' ? 'admin' : newUser.role;
     const targetOrgId =
@@ -1241,8 +1350,9 @@ export default function App({
 
     const provisionCheck = canProvisionUserInOrganization(currentUser, targetOrgId, safeRole);
     if (!provisionCheck.allowed) {
-      showAlarmFeedback(provisionCheck.reason || 'Permisos insuficientes para crear usuario.', 'error');
-      return;
+      const msg = provisionCheck.reason || 'Permisos insuficientes para crear usuario.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
     }
 
     const safeUser: UserProfile = {
@@ -1254,20 +1364,28 @@ export default function App({
           ? 'Administrador / Prevencionista Sernageomin'
           : 'Usuario Normal / Operador de Faena',
     };
+    const prevUsers = usersList;
     setUsersList((prev) => [safeUser, ...prev]);
-    addUserToRTDB(safeUser, currentUser).catch((err: any) => {
-      showAlarmFeedback(err?.message || 'Error al registrar usuario en Firebase RTDB.', 'error');
-    });
-  }, [currentUser, showAlarmFeedback]);
+    try {
+      await addUserToRTDB(safeUser, currentUser);
+      showAlarmFeedback(`Usuario ${safeUser.name} registrado en Firebase RTDB.`, 'success');
+    } catch (err: any) {
+      setUsersList(prevUsers);
+      const msg = err?.message || 'Error al registrar usuario en Firebase RTDB.';
+      showAlarmFeedback(msg, 'error');
+      throw err;
+    }
+  }, [currentUser, usersList, showAlarmFeedback]);
 
-  const handleUpdateUserRole = useCallback((userId: string, newRole: UserRole) => {
+  const handleUpdateUserRole = useCallback(async (userId: string, newRole: UserRole) => {
     const targetUser = usersList.find((u) => u.id === userId);
     if (!targetUser) return;
 
     const check = canModifyTargetUser(currentUser, targetUser, newRole);
     if (!check.allowed) {
-      showAlarmFeedback(check.reason || 'Acción denegada.', 'error');
-      return;
+      const msg = check.reason || 'Acción denegada.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
     }
 
     soundAlert.playFeedbackBeep();
@@ -1276,6 +1394,9 @@ export default function App({
       admin: 'Administrador / Prevencionista Sernageomin',
       operador: 'Usuario Normal / Operador de Faena',
     };
+
+    const prevUsers = usersList;
+    const prevCurrentUser = currentUser;
 
     setUsersList((prev) =>
       prev.map((u) =>
@@ -1293,33 +1414,44 @@ export default function App({
       }));
     }
 
-    updateUserInRTDB(
-      userId,
-      {
-        name: targetUser.name,
-        email: targetUser.email,
-        rut: targetUser.rut,
-        role: newRole,
-        roleLabel: roleLabels[newRole],
-      },
-      currentUser
-    ).catch((err: any) => {
-      showAlarmFeedback(err?.message || 'Error al actualizar el rol del usuario en Firebase RTDB.', 'error');
-    });
+    try {
+      await updateUserInRTDB(
+        userId,
+        {
+          name: targetUser.name,
+          email: targetUser.email,
+          rut: targetUser.rut,
+          role: newRole,
+          roleLabel: roleLabels[newRole],
+        },
+        currentUser
+      );
+      showAlarmFeedback(`Rol actualizado para ${targetUser.name} en Firebase RTDB.`, 'success');
+    } catch (err: any) {
+      setUsersList(prevUsers);
+      if (prevCurrentUser.id === userId) {
+        setCurrentUser(prevCurrentUser);
+      }
+      const msg = err?.message || 'Error al actualizar el rol del usuario en Firebase RTDB.';
+      showAlarmFeedback(msg, 'error');
+      throw err;
+    }
   }, [currentUser, usersList, showAlarmFeedback]);
 
-  const handleToggleUserStatus = useCallback((userId: string) => {
+  const handleToggleUserStatus = useCallback(async (userId: string) => {
     const targetUser = usersList.find(u => u.id === userId);
     if (!targetUser) return;
 
     const check = canModifyTargetUser(currentUser, targetUser);
     if (!check.allowed) {
-      showAlarmFeedback(check.reason || 'Acción denegada.', 'error');
-      return;
+      const msg = check.reason || 'Acción denegada.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
     }
 
     soundAlert.playFeedbackBeep();
     const nextStatus = targetUser.status === 'activo' ? 'inactivo' : 'activo';
+    const prevUsers = usersList;
 
     setUsersList((prev) =>
       prev.map((u) =>
@@ -1329,17 +1461,23 @@ export default function App({
       )
     );
 
-    updateUserInRTDB(
-      userId,
-      {
-        name: targetUser.name,
-        email: targetUser.email,
-        status: nextStatus,
-      },
-      currentUser
-    ).catch((err: any) => {
-      showAlarmFeedback(err?.message || 'Error al actualizar estado del usuario en Firebase RTDB.', 'error');
-    });
+    try {
+      await updateUserInRTDB(
+        userId,
+        {
+          name: targetUser.name,
+          email: targetUser.email,
+          status: nextStatus,
+        },
+        currentUser
+      );
+      showAlarmFeedback(`Estado de ${targetUser.name} cambiado a ${nextStatus} en Firebase RTDB.`, 'success');
+    } catch (err: any) {
+      setUsersList(prevUsers);
+      const msg = err?.message || 'Error al actualizar estado del usuario en Firebase RTDB.';
+      showAlarmFeedback(msg, 'error');
+      throw err;
+    }
   }, [currentUser, usersList, showAlarmFeedback]);
 
   const handleLogin = useCallback((user: UserProfile) => {
@@ -1430,7 +1568,7 @@ export default function App({
 
   const handleSelectTab = useCallback((tab: NavigationTab) => {
     if (!currentUser) return;
-    if (tab === 'superadmin_panel' && currentUser.role !== 'superadmin') {
+    if ((tab === 'superadmin_panel' || tab === 'superadmin_docs') && currentUser.role !== 'superadmin') {
       return;
     }
     if (!isTabVisibleForUser(tab, currentUser, platformConfig)) {
@@ -1700,6 +1838,7 @@ export default function App({
                 activeOrganizationId={effectiveOrgId}
                 onAddAssignment={handleAddAssignment}
                 onAddRentalContract={handleAddRentalContract}
+                onUpdateRentalContract={handleUpdateRentalContract}
                 onRecordPayment={handleRecordPayment}
               />
             )}
@@ -1714,6 +1853,9 @@ export default function App({
                 alertEvents={scopedAlertEvents}
                 alerts={scopedAlerts}
                 onRangeChange={handleReportRangeChange}
+                isHistoryLoading={isHistoryLoading}
+                historyTruncated={historyTruncated}
+                historyError={historyError}
               />
             )}
 
@@ -1786,6 +1928,19 @@ export default function App({
                 onUpdateUserRole={handleUpdateUserRole}
                 onToggleUserStatus={handleToggleUserStatus}
               />
+            )}
+
+            {currentTab === 'superadmin_docs' && currentUser.role === 'superadmin' && (
+              <Suspense
+                fallback={
+                  <div className="p-10 text-center bg-slate-900/80 border border-slate-800 rounded-2xl max-w-xl mx-auto my-12">
+                    <div className="w-8 h-8 rounded-full border-2 border-purple-500 border-t-transparent animate-spin mx-auto mb-3" />
+                    <p className="text-sm font-semibold text-slate-200">Cargando Centro Documental P031...</p>
+                  </div>
+                }
+              >
+                <SuperAdminDocsView currentUser={currentUser} />
+              </Suspense>
             )}
           </>
         )}

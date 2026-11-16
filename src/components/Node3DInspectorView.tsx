@@ -193,12 +193,94 @@ interface Node3DInspectorViewProps {
   activeDevice?: SensorDevice;
 }
 
-interface TelemetrySnapshot {
-  temp: number;
-  hum: number;
-  co: number;
-  pm: number;
+export type Node3DTelemetryMode = 'simulacion' | 'vivo' | 'falla_canal' | 'desconectado';
+
+export interface TelemetrySnapshot {
+  temp: number | null;
+  hum: number | null;
+  co: number | null;
+  pm: number | null;
   over: boolean;
+  mode: Node3DTelemetryMode;
+  badgeLabel: string;
+  faultChannels: string[];
+}
+
+export function resolveNode3DLiveTelemetry(
+  device: SensorDevice | undefined,
+  alarmSim: boolean,
+  useLiveNode: boolean
+): TelemetrySnapshot | null {
+  if (!useLiveNode) {
+    return null;
+  }
+  if (!device) {
+    return {
+      temp: null,
+      hum: null,
+      co: null,
+      pm: null,
+      over: Boolean(alarmSim),
+      mode: 'desconectado',
+      badgeLabel: 'SIN NODO ACTIVO',
+      faultChannels: [],
+    };
+  }
+
+  const faultList = Array.isArray(device.faultFields) ? device.faultFields : [];
+  const faults = new Set(faultList);
+  const hasLiveBaseline =
+    device.gatewayOnline ||
+    device.status !== 'desconectado' ||
+    (typeof device.lastUpdateServer === 'number' && device.lastUpdateServer > 0);
+
+  if (!hasLiveBaseline) {
+    return {
+      temp: null,
+      hum: null,
+      co: null,
+      pm: null,
+      over: Boolean(alarmSim),
+      mode: 'desconectado',
+      badgeLabel: 'NODO DESCONECTADO',
+      faultChannels: faultList,
+    };
+  }
+
+  const readFinite = (val: unknown): number | null =>
+    typeof val === 'number' && Number.isFinite(val) ? val : null;
+
+  const temp = faults.has('temperatura')
+    ? null
+    : readFinite(device.rawTemp ?? device.metrics?.temperatura);
+  const hum = faults.has('humedad')
+    ? null
+    : readFinite(device.rawHum ?? device.metrics?.humedad);
+  const co = faults.has('CO')
+    ? null
+    : readFinite(device.rawCO ?? device.metrics?.co);
+  const pm = faults.has('PM2_5')
+    ? null
+    : readFinite(device.rawPM25 ?? device.metrics?.polvoPM);
+
+  const hasFault =
+    faults.size > 0 || temp === null || hum === null || co === null || pm === null;
+  const over = Boolean(
+    alarmSim ||
+      (!faults.has('CO') && co !== null && co > ALERT_CO_THRESHOLD) ||
+      device.status === 'critico'
+  );
+
+  return {
+    temp,
+    hum,
+    co,
+    pm,
+    over,
+    mode: hasFault ? 'falla_canal' : 'vivo',
+    badgeLabel: hasFault ? 'FALLA DE CANAL' : 'DATOS EN VIVO',
+    faultChannels: faultList,
+  };
 }
 
 interface TooltipState {
@@ -259,6 +341,9 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
     co: 4,
     pm: 11,
     over: false,
+    mode: 'simulacion',
+    badgeLabel: 'MODO SIMULACIÓN',
+    faultChannels: [],
   });
   const [tooltip, setTooltip] = useState<TooltipState>({
     visible: false,
@@ -288,6 +373,9 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
     co: 4,
     pm: 11,
     over: false,
+    mode: 'simulacion',
+    badgeLabel: 'MODO SIMULACIÓN',
+    faultChannels: [],
   });
 
   const activeDeviceRef = useRef<SensorDevice | undefined>(activeDevice);
@@ -364,38 +452,43 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
   // Telemetry ticker (simulated or mirrored from active node if live mode enabled)
   useEffect(() => {
     const step = () => {
-      const dev = activeDeviceRef.current;
-      if (simStateRef.current.useLiveNode && dev) {
-        const liveTemp = Number(dev.metrics?.temperatura ?? 23.4);
-        const liveHum = Number(dev.metrics?.humedad ?? 48);
-        const liveCo = Number(dev.rawCO ?? dev.metrics?.co ?? 0);
-        const livePm = Number(dev.rawPM25 ?? dev.metrics?.polvoPM ?? 0);
-        const over = simStateRef.current.alarm || liveCo > ALERT_CO_THRESHOLD || dev.status === 'critico';
-        const next: TelemetrySnapshot = {
-          temp: Number.isFinite(liveTemp) ? liveTemp : 23.4,
-          hum: Number.isFinite(liveHum) ? liveHum : 48,
-          co: Number.isFinite(liveCo) ? liveCo : 0,
-          pm: Number.isFinite(livePm) ? livePm : 0,
-          over,
-        };
-        telemetryRef.current = next;
-        simStateRef.current.over = over;
-        setTelemetry(next);
+      const liveResolved = resolveNode3DLiveTelemetry(
+        activeDeviceRef.current,
+        simStateRef.current.alarm,
+        simStateRef.current.useLiveNode
+      );
+      if (liveResolved) {
+        telemetryRef.current = liveResolved;
+        simStateRef.current.over = liveResolved.over;
+        setTelemetry(liveResolved);
         return;
       }
 
       const prev = telemetryRef.current;
+      const baseTemp = prev.temp ?? 23.4;
+      const baseHum = prev.hum ?? 48;
+      const baseCo = prev.co ?? 4;
+      const basePm = prev.pm ?? 11;
       const rnd = (s: number) => (Math.random() - 0.5) * s;
       const alarm = simStateRef.current.alarm;
-      const temp = THREE.MathUtils.clamp(prev.temp + rnd(0.3), 20, 28);
-      const hum = THREE.MathUtils.clamp(prev.hum + rnd(1.0), 35, 65);
+      const temp = THREE.MathUtils.clamp(baseTemp + rnd(0.3), 20, 28);
+      const hum = THREE.MathUtils.clamp(baseHum + rnd(1.0), 35, 65);
       const coTarget = alarm ? 120 : 4;
       const pmTarget = alarm ? 85 : 11;
-      const co = Math.max(0, prev.co + (coTarget - prev.co) * (alarm ? 0.35 : 0.2) + rnd(1.2));
-      const pm = Math.max(0, prev.pm + (pmTarget - prev.pm) * 0.2 + rnd(0.8));
+      const co = Math.max(0, baseCo + (coTarget - baseCo) * (alarm ? 0.35 : 0.2) + rnd(1.2));
+      const pm = Math.max(0, basePm + (pmTarget - basePm) * 0.2 + rnd(0.8));
       const over = co > ALERT_CO_THRESHOLD;
 
-      const next: TelemetrySnapshot = { temp, hum, co, pm, over };
+      const next: TelemetrySnapshot = {
+        temp,
+        hum,
+        co,
+        pm,
+        over,
+        mode: 'simulacion',
+        badgeLabel: 'MODO SIMULACIÓN',
+        faultChannels: [],
+      };
       telemetryRef.current = next;
       simStateRef.current.over = over;
       setTelemetry(next);
@@ -962,7 +1055,7 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
         sctx.fillText('GAS PELIGROSO', 120, 105);
         sctx.fillStyle = '#fde047';
         sctx.font = 'bold 54px sans-serif';
-        sctx.fillText(String(Math.round(tele.co)), 120, 160);
+        sctx.fillText(tele.co !== null ? String(Math.round(tele.co)) : '--', 120, 160);
         sctx.fillStyle = '#fecaca';
         sctx.font = '16px sans-serif';
         sctx.fillText('ppm CO', 120, 195);
@@ -971,17 +1064,17 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
         sctx.fillText('EVACUAR ZONA', 120, 222);
         sctx.textAlign = 'left';
       } else if (simStateRef.current.page === 0) {
-        sctx.fillStyle = '#38bdf8';
+        sctx.fillStyle = tele.mode === 'vivo' ? '#34d399' : tele.mode === 'simulacion' ? '#38bdf8' : '#fbbf24';
         sctx.font = 'bold 13px sans-serif';
-        sctx.fillText('ENTORNO', 14, 56);
-        drawRow('Temperatura', tele.temp.toFixed(1), '°C', 82, '#7dd3fc');
-        drawRow('Humedad', String(Math.round(tele.hum)), '%', 150, '#7dd3fc');
+        sctx.fillText(tele.badgeLabel, 14, 56);
+        drawRow('Temperatura', tele.temp !== null ? tele.temp.toFixed(1) : '--', '°C', 82, tele.temp !== null ? '#7dd3fc' : '#f87171');
+        drawRow('Humedad', tele.hum !== null ? String(Math.round(tele.hum)) : '--', '%', 150, tele.hum !== null ? '#7dd3fc' : '#f87171');
       } else {
-        sctx.fillStyle = '#fbbf24';
+        sctx.fillStyle = tele.mode === 'vivo' ? '#34d399' : '#fbbf24';
         sctx.font = 'bold 13px sans-serif';
-        sctx.fillText('CALIDAD DEL AIRE', 14, 56);
-        drawRow('Monóxido (CO)', String(Math.round(tele.co)), 'ppm', 82, '#fcd34d');
-        drawRow('Partículas PM2.5', String(Math.round(tele.pm)), 'µg/m³', 150, '#fcd34d');
+        sctx.fillText(tele.mode === 'vivo' ? 'AIRE EN VIVO' : tele.badgeLabel, 14, 56);
+        drawRow('Monóxido (CO)', tele.co !== null ? String(Math.round(tele.co)) : '--', 'ppm', 82, tele.co !== null ? '#fcd34d' : '#f87171');
+        drawRow('Partículas PM2.5', tele.pm !== null ? String(Math.round(tele.pm)) : '--', 'µg/m³', 150, tele.pm !== null ? '#fcd34d' : '#f87171');
       }
 
       if (!over) {
@@ -1519,15 +1612,16 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
       });
 
       pmIrMat.emissiveIntensity = Math.floor(t * 20) % 2 === 0 ? 1.4 : 0.15;
-      const pmLevel = tele.pm > 55 ? 2 : tele.pm > 35 ? 1 : 0;
-      const pmCol = [0x22c55e, 0xf59e0b, 0xef4444][pmLevel];
+      const pmVal = typeof tele.pm === 'number' ? tele.pm : 0;
+      const pmLevel = pmVal > 55 ? 2 : pmVal > 35 ? 1 : 0;
+      const pmCol = tele.pm === null ? 0xf59e0b : [0x22c55e, 0xf59e0b, 0xef4444][pmLevel];
       pmLedMat.emissive.setHex(pmCol);
       pmLedMat.color.setHex(pmCol);
       pmLedMat.emissiveIntensity = pmLevel === 2 ? (blink ? 1.5 : 0.1) : 0.9;
 
       for (let i = 0; i < PM_N; i++) {
         const p = pmSeeds[i];
-        p.t += dt * 0.3 * p.s * (1 + tele.pm / 40);
+        p.t += dt * 0.3 * p.s * (1 + pmVal / 40);
         if (p.t > 1) p.t -= 1;
         const r = p.r0 * (0.9 * (1 - p.t) + 0.08);
         pmPos[i * 3] = r * Math.cos(p.a);
@@ -1535,8 +1629,8 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
         pmPos[i * 3 + 2] = 0.4 + (1 - p.t) * 0.55;
       }
       pmGeo.attributes.position.needsUpdate = true;
-      pmPointsMat.opacity = THREE.MathUtils.clamp(0.15 + tele.pm / 70, 0.15, 1);
-      pmPointsMat.size = 0.05 + Math.min(tele.pm, 100) / 1200;
+      pmPointsMat.opacity = tele.pm === null ? 0.12 : THREE.MathUtils.clamp(0.15 + pmVal / 70, 0.15, 1);
+      pmPointsMat.size = 0.05 + Math.min(pmVal, 100) / 1200;
 
       const strobe = over && Math.floor(t * 8) % 2 === 0;
       domeMat.emissiveIntensity = strobe ? 2.4 : 0.15;
@@ -1731,16 +1825,20 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
           <section>
             <div className="flex items-center justify-between pb-2 border-b border-slate-800 gap-2">
               <h2 className="text-xs font-semibold text-orange-400 uppercase tracking-wide">
-                {useLiveNode && activeDevice ? 'Telemetría del nodo activo' : 'Telemetría simulada'}
+                {useLiveNode ? 'Telemetría del nodo activo' : 'Telemetría simulada'}
               </h2>
               <span
                 className={`text-[11px] px-2 py-0.5 rounded-full border font-semibold ${
                   telemetry.over
                     ? 'bg-red-900/70 text-red-200 border-red-500'
-                    : 'bg-emerald-900/50 text-emerald-300 border-emerald-700/60'
+                    : telemetry.mode === 'vivo'
+                    ? 'bg-emerald-900/60 text-emerald-300 border-emerald-600/70'
+                    : telemetry.mode === 'falla_canal' || telemetry.mode === 'desconectado'
+                    ? 'bg-amber-900/60 text-amber-200 border-amber-600/70'
+                    : 'bg-cyan-900/50 text-cyan-200 border-cyan-700/60'
                 }`}
               >
-                {telemetry.over ? 'ALERTA GAS' : 'NORMAL'}
+                {telemetry.over ? 'ALERTA GAS' : telemetry.badgeLabel}
               </span>
             </div>
 
@@ -1756,7 +1854,7 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
               >
                 <span className="inline-flex items-center gap-1.5">
                   <Radio className="w-3.5 h-3.5 text-cyan-400" />
-                  <span>{useLiveNode ? 'Espejando lecturas en vivo' : 'Usar lecturas reales en la pantalla 3D'}</span>
+                  <span>{useLiveNode ? 'Espejando lecturas reales (RTDB)' : 'Usar lecturas reales en la pantalla 3D'}</span>
                 </span>
                 <span className="text-[10px] uppercase font-bold">
                   {useLiveNode ? 'Vivo' : 'Sim.'}
@@ -1767,26 +1865,30 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
             <div className="grid grid-cols-2 gap-2 mt-3">
               <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
                 <div className="text-[10px] text-slate-400 uppercase">Temperatura</div>
-                <div className="text-lg font-bold text-sky-300">
-                  {telemetry.temp.toFixed(1)} <span className="text-xs font-normal text-slate-400">°C</span>
+                <div className={`text-lg font-bold ${telemetry.temp === null ? 'text-rose-400' : 'text-sky-300'}`}>
+                  {telemetry.temp !== null ? telemetry.temp.toFixed(1) : '--'}{' '}
+                  <span className="text-xs font-normal text-slate-400">°C</span>
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
                 <div className="text-[10px] text-slate-400 uppercase">Humedad</div>
-                <div className="text-lg font-bold text-sky-300">
-                  {Math.round(telemetry.hum)} <span className="text-xs font-normal text-slate-400">%</span>
+                <div className={`text-lg font-bold ${telemetry.hum === null ? 'text-rose-400' : 'text-sky-300'}`}>
+                  {telemetry.hum !== null ? Math.round(telemetry.hum) : '--'}{' '}
+                  <span className="text-xs font-normal text-slate-400">%</span>
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
                 <div className="text-[10px] text-slate-400 uppercase">CO</div>
-                <div className={`text-lg font-bold ${telemetry.over ? 'text-red-400' : 'text-amber-300'}`}>
-                  {Math.round(telemetry.co)} <span className="text-xs font-normal text-slate-400">ppm</span>
+                <div className={`text-lg font-bold ${telemetry.co === null ? 'text-rose-400' : telemetry.over ? 'text-red-400' : 'text-amber-300'}`}>
+                  {telemetry.co !== null ? Math.round(telemetry.co) : '--'}{' '}
+                  <span className="text-xs font-normal text-slate-400">ppm</span>
                 </div>
               </div>
               <div className="p-2.5 rounded-lg bg-slate-950/70 border border-slate-800">
                 <div className="text-[10px] text-slate-400 uppercase">PM2.5</div>
-                <div className="text-lg font-bold text-amber-300">
-                  {Math.round(telemetry.pm)} <span className="text-xs font-normal text-slate-400">µg/m³</span>
+                <div className={`text-lg font-bold ${telemetry.pm === null ? 'text-rose-400' : 'text-amber-300'}`}>
+                  {telemetry.pm !== null ? Math.round(telemetry.pm) : '--'}{' '}
+                  <span className="text-xs font-normal text-slate-400">µg/m³</span>
                 </div>
               </div>
             </div>

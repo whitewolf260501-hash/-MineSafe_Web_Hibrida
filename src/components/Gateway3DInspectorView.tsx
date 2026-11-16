@@ -157,6 +157,88 @@ interface Gateway3DInspectorViewProps {
   isFirebaseConnected?: boolean;
 }
 
+export type Gateway3DTelemetryMode = 'vivo' | 'falla_canal' | 'sin_telemetria';
+
+export interface Gateway3DResolvedTelemetry {
+  mode: Gateway3DTelemetryMode;
+  badgeLabel: string;
+  deviceId: string;
+  co: number | null;
+  pm25: number | null;
+  temp: number | null;
+  hum: number | null;
+  batteryPct: number | null;
+  gatewayOnline: boolean;
+  firebaseOnline: boolean;
+  faultChannels: string[];
+}
+
+export function resolveGatewayLiveTelemetry(
+  device: SensorDevice | undefined,
+  isFirebaseConnected: boolean
+): Gateway3DResolvedTelemetry {
+  const deviceId = (device?.code || device?.id || 'SIN_NODO').replace(/^device_/, '');
+  const faultList = Array.isArray(device?.faultFields) ? device.faultFields : [];
+  const faults = new Set(faultList);
+  const hasLiveBaseline = Boolean(
+    device &&
+      (device.gatewayOnline ||
+        device.status !== 'desconectado' ||
+        (typeof device.lastUpdateServer === 'number' && device.lastUpdateServer > 0))
+  );
+
+  if (!device || !hasLiveBaseline) {
+    return {
+      mode: 'sin_telemetria',
+      badgeLabel: 'SIN TELEMETRÍA EN VIVO',
+      deviceId,
+      co: null,
+      pm25: null,
+      temp: null,
+      hum: null,
+      batteryPct:
+        device && typeof device.batteryPct === 'number' && Number.isFinite(device.batteryPct)
+          ? Math.round(device.batteryPct)
+          : null,
+      gatewayOnline: Boolean(device?.gatewayOnline),
+      firebaseOnline: Boolean(isFirebaseConnected),
+      faultChannels: faultList,
+    };
+  }
+
+  const readInt = (val: unknown): number | null =>
+    typeof val === 'number' && Number.isFinite(val) ? Math.round(val) : null;
+  const readOneDec = (val: unknown): number | null =>
+    typeof val === 'number' && Number.isFinite(val) ? Number(val.toFixed(1)) : null;
+
+  const co = faults.has('CO') ? null : readInt(device.rawCO ?? device.metrics?.co);
+  const pm25 = faults.has('PM2_5') ? null : readInt(device.rawPM25 ?? device.metrics?.polvoPM);
+  const temp = faults.has('temperatura')
+    ? null
+    : readOneDec(device.rawTemp ?? device.metrics?.temperatura);
+  const hum = faults.has('humedad')
+    ? null
+    : readInt(device.rawHum ?? device.metrics?.humedad);
+  const batteryPct = readInt(device.batteryPct);
+
+  const hasFault =
+    faults.size > 0 || co === null || pm25 === null || temp === null || hum === null;
+
+  return {
+    mode: hasFault ? 'falla_canal' : 'vivo',
+    badgeLabel: hasFault ? 'FALLA DE CANAL' : 'DATOS EN VIVO',
+    deviceId,
+    co,
+    pm25,
+    temp,
+    hum,
+    batteryPct,
+    gatewayOnline: Boolean(device.gatewayOnline),
+    firebaseOnline: Boolean(isFirebaseConnected),
+    faultChannels: faultList,
+  };
+}
+
 interface HoverTooltipState {
   visible: boolean;
   compId: GatewayPartId | null;
@@ -235,27 +317,9 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
   sceneStateRef.current.showLabels = showLabels;
   sceneStateRef.current.activeComponentId = activeComponentId;
 
-  const liveNodeRef = useRef({
-    deviceId: activeDevice?.code || activeDevice?.id || '38A839E81F84',
-    co: activeDevice?.rawCO ?? activeDevice?.metrics?.co ?? 45,
-    pm25: activeDevice?.rawPM25 ?? activeDevice?.metrics?.polvoPM ?? 25,
-    temp: activeDevice?.rawTemp ?? activeDevice?.metrics?.temperatura ?? 21.5,
-    hum: activeDevice?.rawHum ?? activeDevice?.metrics?.humedad ?? 48,
-    batteryPct: activeDevice?.batteryPct ?? 98,
-    gatewayOnline: Boolean(activeDevice?.gatewayOnline),
-    firebaseOnline: Boolean(isFirebaseConnected),
-  });
-
-  liveNodeRef.current = {
-    deviceId: (activeDevice?.code || activeDevice?.id || '38A839E81F84').replace(/^device_/, ''),
-    co: Number((activeDevice?.rawCO ?? activeDevice?.metrics?.co ?? 45).toFixed(0)),
-    pm25: Number((activeDevice?.rawPM25 ?? activeDevice?.metrics?.polvoPM ?? 25).toFixed(0)),
-    temp: Number((activeDevice?.rawTemp ?? activeDevice?.metrics?.temperatura ?? 21.5).toFixed(1)),
-    hum: Number((activeDevice?.rawHum ?? activeDevice?.metrics?.humedad ?? 48).toFixed(0)),
-    batteryPct: Math.round(activeDevice?.batteryPct ?? 98),
-    gatewayOnline: Boolean(activeDevice?.gatewayOnline),
-    firebaseOnline: Boolean(isFirebaseConnected),
-  };
+  const liveTelemetry = resolveGatewayLiveTelemetry(activeDevice, isFirebaseConnected);
+  const liveNodeRef = useRef<Gateway3DResolvedTelemetry>(liveTelemetry);
+  liveNodeRef.current = liveTelemetry;
 
   const sceneActionsRef = useRef<{
     selectComponent: (id: GatewayPartId, autoMoveCamera?: boolean) => void;
@@ -392,13 +456,17 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
       tftCtx.fillRect(14, 122, 228, 92);
       tftCtx.strokeRect(14, 122, 228, 92);
 
-      tftCtx.fillStyle = '#38bdf8';
-      tftCtx.font = 'bold 14px monospace';
-      tftCtx.fillText('DATOS PUENTE -> CLOUD', 24, 144);
+      tftCtx.fillStyle = snap.mode === 'vivo' ? '#38bdf8' : '#fbbf24';
+      tftCtx.font = 'bold 13px monospace';
+      tftCtx.fillText(snap.badgeLabel.slice(0, 22), 24, 144);
       tftCtx.fillStyle = '#f8fafc';
       tftCtx.font = '14px monospace';
-      tftCtx.fillText(`CO: ${snap.co} | PM: ${snap.pm25}`, 24, 168);
-      tftCtx.fillText(`T: ${snap.temp} C | H: ${snap.hum}%`, 24, 190);
+      const coText = snap.co !== null ? String(snap.co) : '--';
+      const pmText = snap.pm25 !== null ? String(snap.pm25) : '--';
+      const tempText = snap.temp !== null ? `${snap.temp.toFixed(1)}C` : '--';
+      const humText = snap.hum !== null ? `${snap.hum}%` : '--';
+      tftCtx.fillText(`CO: ${coText} | PM: ${pmText}`, 24, 168);
+      tftCtx.fillText(`T: ${tempText} | H: ${humText}`, 24, 190);
       tftCtx.fillStyle = snap.firebaseOnline ? '#4ade80' : '#fbbf24';
       tftCtx.fillText(snap.firebaseOnline ? 'Firebase RTDB: OK' : 'Firebase RTDB: SYNC', 24, 208);
 
@@ -412,7 +480,11 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
       tftCtx.fillText('BATERIA LIPO 105568', 24, 248);
       tftCtx.fillStyle = '#ffffff';
       tftCtx.font = '14px monospace';
-      tftCtx.fillText(`Cap: 5000mAh (${snap.batteryPct}%)`, 24, 270);
+      tftCtx.fillText(
+        `Cap: 5000mAh (${snap.batteryPct !== null ? `${snap.batteryPct}%` : '--'})`,
+        24,
+        270
+      );
       tftCtx.fillStyle = '#34d399';
       tftCtx.fillText('Nominal: 3.7V / 4.2V', 24, 292);
 
@@ -1729,25 +1801,39 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
           {/* Barra Inferior de Telemetría del Gateway */}
           <div className="absolute bottom-4 left-4 right-4 xl:right-auto bg-slate-900/92 px-4 py-2.5 rounded-xl border border-slate-700/80 shadow-2xl flex flex-wrap items-center gap-4 md:gap-6 text-xs z-20">
             <div>
+              <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Estado Telemetría</span>
+              <span
+                className={`font-bold flex items-center mt-0.5 font-mono ${
+                  liveTelemetry.mode === 'vivo'
+                    ? 'text-emerald-400'
+                    : liveTelemetry.mode === 'falla_canal'
+                    ? 'text-rose-400'
+                    : 'text-amber-300'
+                }`}
+              >
+                {liveTelemetry.badgeLabel}
+              </span>
+            </div>
+            <div className="border-l border-slate-700/80 pl-4">
               <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Enlace ESP-NOW (M2)</span>
               <span
                 className={`font-bold flex items-center mt-0.5 font-mono ${
                   activeDevice?.gatewayOnline ? 'text-emerald-400' : 'text-amber-300'
                 }`}
               >
-                {activeDevice?.gatewayOnline ? 'Activo (< 0.45s)' : 'En espera de trama'}
+                {activeDevice?.gatewayOnline ? 'Activo (< 0.45s)' : 'Sin enlace en vivo'}
               </span>
             </div>
             <div className="border-l border-slate-700/80 pl-4">
               <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Último Ping Gateway</span>
               <span className="text-cyan-400 font-bold mt-0.5 block font-mono">
-                {activeDevice?.lastPing || 'Sincronizando'}
+                {activeDevice?.lastPing || '--'}
               </span>
             </div>
             <div className="border-l border-slate-700/80 pl-4">
               <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Batería LiPo 105568</span>
               <span className="text-amber-400 font-bold mt-0.5 block font-mono">
-                5000mAh • {Math.round(activeDevice?.batteryPct ?? 98)}%
+                5000mAh • {liveTelemetry.batteryPct !== null ? `${liveTelemetry.batteryPct}%` : '--'}
               </span>
             </div>
             <div className="border-l border-slate-700/80 pl-4 hidden sm:block">

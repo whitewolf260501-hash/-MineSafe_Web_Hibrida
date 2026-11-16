@@ -96,10 +96,13 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
 
   const handleRemoveAttachment = async (att: AlertAttachment) => {
     try {
+      setErrorNotice(null);
       await deleteAlertAttachment(att);
       setAttachments((prev) => prev.filter((item) => item.id !== att.id));
-    } catch {
-      setAttachments((prev) => prev.filter((item) => item.id !== att.id));
+    } catch (err: any) {
+      setErrorNotice(
+        err?.message || 'No se pudo eliminar el adjunto en Firebase Storage/RTDB. Intenta nuevamente.'
+      );
     }
   };
 

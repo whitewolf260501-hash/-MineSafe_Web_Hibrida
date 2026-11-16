@@ -42,6 +42,14 @@ service cloud.firestore {
       return isVerifiedUser() && request.auth.uid == ownerId;
     }
 
+    function isSameOrgMember(orgId) {
+      return isVerifiedUser() &&
+        isValidId(orgId) &&
+        exists(/databases/$(database)/documents/users/$(request.auth.uid)) &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.status == 'activo' &&
+        get(/databases/$(database)/documents/users/$(request.auth.uid)).data.organizationId == orgId;
+    }
+
     // --- Validation Blueprints ---
     function isValidAdmin(data) {
       return data.keys().hasAll(['uid', 'email', 'role', 'createdAt']) &&
@@ -209,7 +217,7 @@ service cloud.firestore {
 
     // --- Organizations (Multi-Tenant Root) ---
     match /organizations/{organizationId} {
-      allow get: if isValidId(organizationId) && isVerifiedUser();
+      allow get: if isValidId(organizationId) && (isOwner(resource.data.ownerId) || isSameOrgMember(organizationId) || isAdmin());
       allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
       allow create: if isValidId(organizationId) &&
         isValidOrganization(incoming()) &&
@@ -260,7 +268,7 @@ service cloud.firestore {
 
     // --- IoT Sensor Devices ---
     match /devices/{deviceId} {
-      allow get: if isValidId(deviceId) && isVerifiedUser();
+      allow get: if isValidId(deviceId) && (isOwner(resource.data.ownerId) || isSameOrgMember(resource.data.organizationId) || isAdmin());
       allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
       allow create: if isValidId(deviceId) &&
         isValidDevice(incoming()) &&
@@ -288,7 +296,7 @@ service cloud.firestore {
 
     // --- Safety Contingency Alerts (Terminal State Locking) ---
     match /alerts/{alertId} {
-      allow get: if isValidId(alertId) && isVerifiedUser();
+      allow get: if isValidId(alertId) && (isOwner(resource.data.ownerId) || isSameOrgMember(resource.data.organizationId) || isAdmin());
       allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
       allow create: if isValidId(alertId) &&
         isValidAlert(incoming()) &&
@@ -309,6 +317,7 @@ service cloud.firestore {
           (
             existing().status == 'activa' &&
             existing().resolved == false &&
+            (isOwner(existing().ownerId) || isSameOrgMember(existing().organizationId)) &&
             (
               // Action 1: Acknowledge alert
               (
@@ -333,7 +342,7 @@ service cloud.firestore {
 
     // --- Equipment Rental Contracts ---
     match /rentals/{rentalId} {
-      allow get: if isValidId(rentalId) && isVerifiedUser();
+      allow get: if isValidId(rentalId) && (isOwner(resource.data.ownerId) || isSameOrgMember(resource.data.organizationId) || isAdmin());
       allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
       allow create: if isValidId(rentalId) &&
         isValidRental(incoming()) &&
@@ -357,7 +366,7 @@ service cloud.firestore {
 
     // --- Evidence Attachments (Master Gate: Parent Alert Must Exist) ---
     match /attachments/{attachmentId} {
-      allow get: if isValidId(attachmentId) && isVerifiedUser();
+      allow get: if isValidId(attachmentId) && (isOwner(resource.data.ownerId) || isSameOrgMember(resource.data.organizationId) || isAdmin());
       allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
       allow create: if isValidId(attachmentId) &&
         isValidAttachment(incoming()) &&

@@ -116,7 +116,11 @@ assert.ok(
 );
 
 const storageRules = readRoot('storage.rules');
-assert.ok(storageRules.includes('allow read: if request.auth != null;'), 'Storage restricts reads to signed-in users');
+assert.ok(
+  storageRules.includes('allow read: if request.auth != null') &&
+    storageRules.includes('match /adjuntos/{organizationId}/{alertId}/{fileName}'),
+  'Storage restricts reads to signed-in users scoped by organizationId'
+);
 assert.ok(storageRules.includes('5 * 1024 * 1024'), 'Storage enforces 5 MB upload ceiling');
 assert.ok(
   storageRules.includes('image/(jpeg|png|webp)|application/pdf'),

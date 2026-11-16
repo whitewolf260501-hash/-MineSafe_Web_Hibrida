@@ -18,6 +18,7 @@ import {
   Shield,
   Download,
   Lock,
+  Edit2,
   X
 } from 'lucide-react';
 import {
@@ -41,6 +42,7 @@ interface DevicesAndRentalsViewProps {
   activeOrganizationId?: string;
   onAddAssignment: (assignment: Omit<WorkerAssignment, 'id'>) => Promise<void> | void;
   onAddRentalContract: (contract: Omit<DeviceRental, 'id'>) => Promise<void> | void;
+  onUpdateRentalContract?: (contractId: string, updates: Partial<DeviceRental>) => Promise<DeviceRental | void> | void;
   onRecordPayment: (contractId: string) => Promise<void> | void;
 }
 
@@ -55,12 +57,14 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   activeOrganizationId,
   onAddAssignment,
   onAddRentalContract,
+  onUpdateRentalContract,
   onRecordPayment,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<EquiposSubTab>('asignaciones');
   const [searchQuery, setSearchQuery] = useState('');
   const [showAssignModal, setShowAssignModal] = useState(false);
   const [showNewContractModal, setShowNewContractModal] = useState(false);
+  const [editingContract, setEditingContract] = useState<DeviceRental | null>(null);
 
   const allowedSubTabs = useMemo<EquiposSubTab[]>(() => {
     if (!currentUser) return EQUIPOS_SUBTAB_ORDER;
@@ -86,13 +90,23 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const [newSelectedDeviceCode, setNewSelectedDeviceCode] = useState(devices[0]?.code || 'MS-GAS-101');
   const [newEmergencyContact, setNewEmergencyContact] = useState('+56 9 8765 4321');
 
-  // New contract form state
+  // New / edit contract form state
   const [newContractNumber, setNewContractNumber] = useState('');
   const [newDeviceCode, setNewDeviceCode] = useState('');
   const [newDeviceType, setNewDeviceType] = useState('Detector Portátil MultiGas 4-Canales');
   const [newProvider, setNewProvider] = useState('Dräger Safety Chile S.A.');
   const [newCostClp, setNewCostClp] = useState(195000);
+  const [newStartDate, setNewStartDate] = useState(() => new Date().toISOString().split('T')[0]);
   const [newEndDate, setNewEndDate] = useState('2026-12-31');
+  const [editDeviceCode, setEditDeviceCode] = useState('');
+  const [editDeviceType, setEditDeviceType] = useState('');
+  const [editProvider, setEditProvider] = useState('');
+  const [editCostClp, setEditCostClp] = useState(0);
+  const [editStartDate, setEditStartDate] = useState('');
+  const [editEndDate, setEditEndDate] = useState('');
+  const [editPaymentStatus, setEditPaymentStatus] = useState<DeviceRental['paymentStatus']>('al_dia');
+  const [editTechnician, setEditTechnician] = useState('');
+  const [editNotes, setEditNotes] = useState('');
 
   const [actionNotice, setActionNotice] = useState<{ text: string; tone: 'error' | 'success' } | null>(null);
   const [modalError, setModalError] = useState<string | null>(null);
@@ -171,6 +185,21 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
     }
   };
 
+  const validateContractDeviceCompat = (cleanDevCode: string, orgId: string): string | null => {
+    const matchedReg = (platformConfig?.registeredDevices || []).find(
+      (r) => r.id.toLowerCase() === cleanDevCode.toLowerCase() || r.name.toLowerCase() === cleanDevCode.toLowerCase()
+    );
+    if (matchedReg) {
+      if (matchedReg.enabled === false) {
+        return `El dispositivo "${cleanDevCode}" se encuentra deshabilitado en la plataforma.`;
+      }
+      if (matchedReg.organizationId && matchedReg.organizationId !== orgId) {
+        return `El dispositivo "${cleanDevCode}" pertenece a otra organización (${matchedReg.organizationId}).`;
+      }
+    }
+    return null;
+  };
+
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
     const cleanContractNum = newContractNumber.trim();
@@ -183,16 +212,21 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       setModalError('Permisos insuficientes: solo Administradores o SuperAdministrador pueden crear contratos.');
       return;
     }
-    if (Number(newCostClp) <= 0) {
+    if (!Number.isFinite(Number(newCostClp)) || Number(newCostClp) <= 0) {
       setModalError('El costo mensual (CLP) debe ser mayor a 0.');
+      return;
+    }
+    if (newStartDate && newEndDate && newEndDate < newStartDate) {
+      setModalError('La fecha de término de vigencia no puede ser anterior a la fecha de inicio.');
       return;
     }
     if (rentals.some((r) => r.contractNumber.toLowerCase() === cleanContractNum.toLowerCase())) {
       setModalError(`Ya existe un contrato activo con el número "${cleanContractNum}".`);
       return;
     }
-    if (enabledDeviceIds?.has(cleanDevCode)) {
-      setModalError(`El dispositivo "${cleanDevCode}" se encuentra deshabilitado en la plataforma.`);
+    const compatErr = validateContractDeviceCompat(cleanDevCode, effectiveOrgId);
+    if (compatErr) {
+      setModalError(compatErr);
       return;
     }
 
@@ -205,7 +239,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
         deviceCode: cleanDevCode,
         deviceType: newDeviceType.trim(),
         provider: newProvider.trim(),
-        startDate: new Date().toISOString().split('T')[0],
+        startDate: newStartDate || new Date().toISOString().split('T')[0],
         endDate: newEndDate,
         monthlyCostClp: Number(newCostClp),
         paymentStatus: 'al_dia',
@@ -222,6 +256,74 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       showTempNotice(`Contrato ${cleanContractNum} registrado y validado en RTDB.`, 'success');
     } catch (err: any) {
       setModalError(err?.message || 'Error al guardar el contrato en Firebase RTDB.');
+    } finally {
+      setIsSubmitting(false);
+    }
+  };
+
+  const openEditContractModal = (rental: DeviceRental) => {
+    setModalError(null);
+    setEditingContract(rental);
+    setEditDeviceCode(rental.deviceCode);
+    setEditDeviceType(rental.deviceType);
+    setEditProvider(rental.provider);
+    setEditCostClp(rental.monthlyCostClp);
+    setEditStartDate(rental.startDate);
+    setEditEndDate(rental.endDate);
+    setEditPaymentStatus(rental.paymentStatus);
+    setEditTechnician(rental.assignedTechnician);
+    setEditNotes(rental.notes || '');
+  };
+
+  const handleSaveEditedContract = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!editingContract || !onUpdateRentalContract) return;
+    if (!canManageContracts) {
+      setModalError('Permisos insuficientes para editar contratos.');
+      return;
+    }
+    const cleanDevCode = editDeviceCode.trim();
+    if (!cleanDevCode || !editProvider.trim()) {
+      setModalError('El código del dispositivo y el proveedor son obligatorios.');
+      return;
+    }
+    if (!Number.isFinite(Number(editCostClp)) || Number(editCostClp) <= 0) {
+      setModalError('El costo mensual (CLP) debe ser mayor a 0.');
+      return;
+    }
+    if (editStartDate && editEndDate && editEndDate < editStartDate) {
+      setModalError('La fecha de término de vigencia no puede ser anterior a la fecha de inicio.');
+      return;
+    }
+    const compatErr = validateContractDeviceCompat(
+      cleanDevCode,
+      editingContract.organizationId || effectiveOrgId
+    );
+    if (compatErr) {
+      setModalError(compatErr);
+      return;
+    }
+
+    try {
+      setIsSubmitting(true);
+      setModalError(null);
+      await onUpdateRentalContract(editingContract.id, {
+        deviceCode: cleanDevCode,
+        deviceType: editDeviceType.trim() || editingContract.deviceType,
+        provider: editProvider.trim(),
+        monthlyCostClp: Number(editCostClp),
+        startDate: editStartDate,
+        endDate: editEndDate,
+        nextDueDate: editEndDate,
+        paymentStatus: editPaymentStatus,
+        assignedTechnician: editTechnician.trim() || 'Ingeniería MineSafe',
+        notes: editNotes.trim(),
+      });
+      soundAlert.playFeedbackBeep();
+      showTempNotice(`Contrato ${editingContract.contractNumber} actualizado en Firebase RTDB.`, 'success');
+      setEditingContract(null);
+    } catch (err: any) {
+      setModalError(err?.message || 'Error al actualizar el contrato en Firebase RTDB.');
     } finally {
       setIsSubmitting(false);
     }
@@ -474,6 +576,9 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                     <th className="px-4 py-3">Vigencia</th>
                     <th className="px-4 py-3">Estado Pago</th>
                     <th className="px-4 py-3">Técnico Asignado</th>
+                    {canManageContracts && onUpdateRentalContract && (
+                      <th className="px-4 py-3">Acciones</th>
+                    )}
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/80">
@@ -491,6 +596,18 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                       </td>
                       <td className="px-4 py-3.5">{getPaymentStatusBadge(rental.paymentStatus)}</td>
                       <td className="px-4 py-3.5 text-slate-300">{rental.assignedTechnician}</td>
+                      {canManageContracts && onUpdateRentalContract && (
+                        <td className="px-4 py-3.5">
+                          <button
+                            type="button"
+                            onClick={() => openEditContractModal(rental)}
+                            className="inline-flex items-center gap-1 px-2.5 py-1 rounded-md bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-[11px] font-semibold"
+                          >
+                            <Edit2 className="w-3 h-3" />
+                            Editar
+                          </button>
+                        </td>
+                      )}
                     </tr>
                   ))}
                 </tbody>
@@ -788,18 +905,28 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </select>
               </div>
 
-              <div className="grid grid-cols-2 gap-2">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
                 <div>
                   <label className="text-slate-300 block mb-1">Costo Mensual (CLP)</label>
                   <input
                     type="number"
+                    min={1}
                     value={newCostClp}
                     onChange={(e) => setNewCostClp(Number(e.target.value))}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                   />
                 </div>
                 <div>
-                  <label className="text-slate-300 block mb-1">Término de Vigencia</label>
+                  <label className="text-slate-300 block mb-1">Inicio Vigencia</label>
+                  <input
+                    type="date"
+                    value={newStartDate}
+                    onChange={(e) => setNewStartDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 block mb-1">Término Vigencia</label>
                   <input
                     type="date"
                     value={newEndDate}
@@ -829,6 +956,137 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                   className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg font-semibold"
                 >
                   {isSubmitting ? 'Guardando...' : 'Guardar Contrato'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: EDITAR CONTRATO DE ARRIENDO */}
+      {editingContract && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-md w-full p-6 space-y-4 animate-in fade-in">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Edit2 className="w-4 h-4 text-cyan-400" />
+                Editar Contrato {editingContract.contractNumber}
+              </h3>
+              <button onClick={() => setEditingContract(null)} className="text-slate-400 hover:text-white">
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleSaveEditedContract} className="space-y-3 text-xs">
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-300 block mb-1">Dispositivo</label>
+                  <input
+                    type="text"
+                    required
+                    value={editDeviceCode}
+                    onChange={(e) => setEditDeviceCode(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 block mb-1">Estado Pago</label>
+                  <select
+                    value={editPaymentStatus}
+                    onChange={(e) => setEditPaymentStatus(e.target.value as DeviceRental['paymentStatus'])}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  >
+                    <option value="al_dia">Al Día</option>
+                    <option value="proximo_a_vencer">Próximo a Vencer</option>
+                    <option value="pago_pendiente">Pago Pendiente</option>
+                    <option value="vencido">Vencido</option>
+                  </select>
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1">Proveedor</label>
+                <input
+                  type="text"
+                  required
+                  value={editProvider}
+                  onChange={(e) => setEditProvider(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              <div className="grid grid-cols-3 gap-2">
+                <div>
+                  <label className="text-slate-300 block mb-1">Costo (CLP)</label>
+                  <input
+                    type="number"
+                    min={1}
+                    required
+                    value={editCostClp}
+                    onChange={(e) => setEditCostClp(Number(e.target.value))}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 block mb-1">Inicio</label>
+                  <input
+                    type="date"
+                    value={editStartDate}
+                    onChange={(e) => setEditStartDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 block mb-1">Término</label>
+                  <input
+                    type="date"
+                    value={editEndDate}
+                    onChange={(e) => setEditEndDate(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1">Técnico Asignado</label>
+                <input
+                  type="text"
+                  value={editTechnician}
+                  onChange={(e) => setEditTechnician(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1">Notas</label>
+                <textarea
+                  rows={2}
+                  value={editNotes}
+                  onChange={(e) => setEditNotes(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              {modalError && (
+                <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-200 text-xs">
+                  {modalError}
+                </div>
+              )}
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setEditingContract(null)}
+                  className="px-4 py-2 text-slate-300 bg-slate-800 rounded-lg"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isSubmitting}
+                  className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 rounded-lg font-semibold"
+                >
+                  {isSubmitting ? 'Guardando...' : 'Guardar Cambios'}
                 </button>
               </div>
             </form>

@@ -98,11 +98,21 @@ export const RootApp: React.FC = () => {
     const unsubStatus = subscribeToCurrentUserStatus(
       currentUser.id,
       authUid,
-      (status, updatedProfile) => {
-        if (status === 'inactivo') {
+      (status, updatedProfile, errorMessage) => {
+        if (status === 'inactivo' || status === 'deleted' || status === 'error') {
           logoutFromFirebaseAuth().catch(() => {});
+          try {
+            localStorage.removeItem('minesafe_active_user');
+          } catch { /* ignore */ }
           setCurrentUser(null);
-          setAuthError('Tu cuenta fue desactivada por administración. La sesión se cerró inmediatamente.');
+          setAuthError(
+            errorMessage ||
+              (status === 'deleted'
+                ? 'Tu perfil fue eliminado o revocado en Firebase RTDB. La sesión se cerró inmediatamente.'
+                : status === 'error'
+                ? 'No se pudo validar tu perfil autorizado en Firebase RTDB. La sesión se cerró por seguridad.'
+                : 'Tu cuenta fue desactivada por administración. La sesión se cerró inmediatamente.')
+          );
           if (routeState.route === 'panel') {
             navigateToAppRoute('login', { replace: true });
             setRouteState({ route: 'login' });

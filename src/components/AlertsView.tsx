@@ -48,6 +48,7 @@ interface AlertsViewProps {
   alerts: SafetyAlert[];
   devices?: SensorDevice[];
   currentUser?: UserProfile | null;
+  isReadOnly?: boolean;
   onAcknowledgeAlert: (alertId: string) => void;
   onResolveAlert: (alertId: string) => void;
   onResolveAlertWithDetails?: (alertId: string, details: AlertResolutionDetails) => Promise<void> | void;
@@ -60,6 +61,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   alerts,
   devices = [],
   currentUser,
+  isReadOnly = false,
   onAcknowledgeAlert,
   onResolveAlert,
   onResolveAlertWithDetails,
@@ -67,8 +69,11 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   onNavigateTab,
   onSelectSensor,
 }) => {
+  const isOperadorReadOnly = Boolean(isReadOnly || currentUser?.role === 'operador');
+
   // Main view switcher: Alertas Activas vs Auditoría Registro de Alarmas (RTDB / ESP32)
   const [subTab, setSubTab] = useState<'alertas_activas' | 'auditoria_rtdb'>('alertas_activas');
+  const effectiveSubTab = isOperadorReadOnly ? 'alertas_activas' : subTab;
 
   // Active alerts filters
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
@@ -273,58 +278,73 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
               <ShieldAlert className="w-5 h-5 text-rose-400" />
-              Gestión, Auditoría y Registro de Alertas de Seguridad
+              {isOperadorReadOnly
+                ? 'Consulta de Alertas y Descripciones'
+                : 'Gestión, Auditoría y Registro de Alertas de Seguridad'}
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Monitoreo centralizado de contingencias y auditoría de hardware ESP32 según normativa DS 132 (Sernageomin).
+              {isOperadorReadOnly
+                ? 'Visualización de datos, niveles detectados y descripciones de alertas de seguridad de tu empresa.'
+                : 'Monitoreo centralizado de contingencias y auditoría de hardware ESP32 según normativa DS 132 (Sernageomin).'}
             </p>
           </div>
 
-          <div className="flex items-center gap-2.5">
+          {!isOperadorReadOnly && (
+            <div className="flex items-center gap-2.5">
+              <button
+                onClick={() => soundAlert.playCriticalAlert()}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+              >
+                <Volume2 className="w-4 h-4 text-cyan-400" />
+                Probar Sirena
+              </button>
+            </div>
+          )}
+        </div>
+
+        {isOperadorReadOnly ? (
+          <div className="p-3 rounded-xl bg-amber-950/35 border border-amber-800/60 text-xs text-amber-200 flex items-center gap-2.5">
+            <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Modo Solo Lectura — Operador:</strong> solo puedes visualizar los datos y la descripción de las alertas de tu empresa. No es posible reconocer, editar, resolver alertas ni acceder a otros módulos.
+            </span>
+          </div>
+        ) : (
+          /* View Switcher: Alertas Activas vs Auditoría de Alarmas ESP32 */
+          <div className="flex flex-wrap items-center gap-2 p-1.5 bg-slate-950 rounded-xl border border-slate-800">
             <button
-              onClick={() => soundAlert.playCriticalAlert()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+              type="button"
+              onClick={() => setSubTab('alertas_activas')}
+              className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                effectiveSubTab === 'alertas_activas'
+                  ? 'bg-rose-950 text-rose-200 border border-rose-700 shadow-md shadow-rose-950/50'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
+              }`}
             >
-              <Volume2 className="w-4 h-4 text-cyan-400" />
-              Probar Sirena
+              <Bell className="w-4 h-4 text-rose-400" />
+              <span>Alertas Activas de Faena</span>
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-900/90 text-rose-200 font-mono font-bold">
+                {activeAlertsCount}
+              </span>
+            </button>
+
+            <button
+              type="button"
+              onClick={() => setSubTab('auditoria_rtdb')}
+              className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                effectiveSubTab === 'auditoria_rtdb'
+                  ? 'bg-cyan-950 text-cyan-200 border border-cyan-700 shadow-md shadow-cyan-950/50'
+                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
+              }`}
+            >
+              <Radio className="w-4 h-4 text-cyan-400" />
+              <span>Auditoría y Registro de Alarmas (RTDB / ESP32)</span>
+              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-900/90 text-cyan-200 font-mono font-bold">
+                {allAuditRecords.length}
+              </span>
             </button>
           </div>
-        </div>
-
-        {/* View Switcher: Alertas Activas vs Auditoría de Alarmas ESP32 */}
-        <div className="flex flex-wrap items-center gap-2 p-1.5 bg-slate-950 rounded-xl border border-slate-800">
-          <button
-            type="button"
-            onClick={() => setSubTab('alertas_activas')}
-            className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-              subTab === 'alertas_activas'
-                ? 'bg-rose-950 text-rose-200 border border-rose-700 shadow-md shadow-rose-950/50'
-                : 'text-slate-400 hover:text-white hover:bg-slate-900'
-            }`}
-          >
-            <Bell className="w-4 h-4 text-rose-400" />
-            <span>Alertas Activas de Faena</span>
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-rose-900/90 text-rose-200 font-mono font-bold">
-              {activeAlertsCount}
-            </span>
-          </button>
-
-          <button
-            type="button"
-            onClick={() => setSubTab('auditoria_rtdb')}
-            className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-              subTab === 'auditoria_rtdb'
-                ? 'bg-cyan-950 text-cyan-200 border border-cyan-700 shadow-md shadow-cyan-950/50'
-                : 'text-slate-400 hover:text-white hover:bg-slate-900'
-            }`}
-          >
-            <Radio className="w-4 h-4 text-cyan-400" />
-            <span>Auditoría y Registro de Alarmas (RTDB / ESP32)</span>
-            <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-900/90 text-cyan-200 font-mono font-bold">
-              {allAuditRecords.length}
-            </span>
-          </button>
-        </div>
+        )}
 
         {/* Export / Save Feedback Toast */}
         {exportNotice && (
@@ -366,7 +386,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       {/* ==============================================================
           SUBTAB 1: ALERTAS ACTIVAS EN TIEMPO REAL
          ============================================================== */}
-      {subTab === 'alertas_activas' && (
+      {effectiveSubTab === 'alertas_activas' && (
         <div className="space-y-6">
           {/* Severity Count Cards */}
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
@@ -551,45 +571,47 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                       )}
                     </div>
 
-                    <div className="flex items-center gap-2 shrink-0">
-                      <button
-                        onClick={() => {
-                          onSelectSensor(alert.sensorId);
-                          onNavigateTab('monitoreo');
-                        }}
-                        className="p-1.5 text-slate-400 hover:text-cyan-400 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-                        title="Ver telemetría del sensor"
-                      >
-                        <ExternalLink className="w-4 h-4" />
-                      </button>
+                    {!isOperadorReadOnly && (
+                      <div className="flex items-center gap-2 shrink-0">
+                        <button
+                          onClick={() => {
+                            onSelectSensor(alert.sensorId);
+                            onNavigateTab('monitoreo');
+                          }}
+                          className="p-1.5 text-slate-400 hover:text-cyan-400 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
+                          title="Ver telemetría del sensor"
+                        >
+                          <ExternalLink className="w-4 h-4" />
+                        </button>
 
-                      {!alert.acknowledged && (
-                        <button
-                          onClick={() => onAcknowledgeAlert(alert.id)}
-                          className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors"
-                        >
-                          Reconocer
-                        </button>
-                      )}
+                        {!alert.acknowledged && (
+                          <button
+                            onClick={() => onAcknowledgeAlert(alert.id)}
+                            className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors"
+                          >
+                            Reconocer
+                          </button>
+                        )}
 
-                      {!alert.resolved ? (
-                        <button
-                          onClick={() => setAlertToResolve(alert)}
-                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors shadow-sm cursor-pointer"
-                        >
-                          <CheckCircle className="w-3.5 h-3.5" />
-                          Describir y Dar por Resuelta
-                        </button>
-                      ) : (
-                        <button
-                          onClick={() => setAlertToResolve(alert)}
-                          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
-                        >
-                          <Edit3 className="w-3.5 h-3.5 text-cyan-400" />
-                          Editar Bitácora
-                        </button>
-                      )}
-                    </div>
+                        {!alert.resolved ? (
+                          <button
+                            onClick={() => setAlertToResolve(alert)}
+                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors shadow-sm cursor-pointer"
+                          >
+                            <CheckCircle className="w-3.5 h-3.5" />
+                            Describir y Dar por Resuelta
+                          </button>
+                        ) : (
+                          <button
+                            onClick={() => setAlertToResolve(alert)}
+                            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+                          >
+                            <Edit3 className="w-3.5 h-3.5 text-cyan-400" />
+                            Editar Bitácora
+                          </button>
+                        )}
+                      </div>
+                    )}
                   </div>
                 </div>
                 );
@@ -602,7 +624,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       {/* ==============================================================
           SUBTAB 2: AUDITORÍA Y REGISTRO DE ALARMAS (NODO registro_alarmas)
          ============================================================== */}
-      {subTab === 'auditoria_rtdb' && (
+      {effectiveSubTab === 'auditoria_rtdb' && (
         <div className="space-y-5 animate-in fade-in">
           
           {/* Auditoría Header & Export Bar */}
@@ -824,7 +846,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       )}
 
       {/* Modal para Clasificar y Describir la Alerta */}
-      {alertToResolve && (
+      {alertToResolve && !isOperadorReadOnly && (
         <AlertResolutionModal
           alert={alertToResolve}
           currentUser={currentUser}
@@ -842,7 +864,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       )}
 
       {/* Modal Imprimible In-App PDF (sin window.open) */}
-      {showPrintPreview && (() => {
+      {showPrintPreview && !isOperadorReadOnly && (() => {
         const rowsToExport = filteredAuditRecords.length > 0 ? filteredAuditRecords : allAuditRecords;
         return (
           <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/90 backdrop-blur-md p-3 sm:p-6 flex items-start justify-center">

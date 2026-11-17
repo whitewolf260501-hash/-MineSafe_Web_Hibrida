@@ -44,6 +44,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   updateProfile,
+  deleteUser,
   User as FirebaseUser
 } from 'firebase/auth';
 
@@ -75,9 +76,24 @@ import {
   WorkerAssignment
 } from '../types';
 import {
+  assertActiveSession,
+  canCreateOrEditOrganization,
+  canDeleteOrganization,
+  canManageContractsAndPayments,
   canProvisionUserInOrganization,
   DEFAULT_ORGANIZATION_ID,
+  EmailProfileEntry,
+  findUserEmailConflictInOrg,
+  isOrgAuthorizedForUser,
+  selectBestLoginProfileForEmail,
 } from '../utils/accessControl';
+import {
+  BulkAssignmentImportItem,
+  BulkRentalImportItem,
+  BulkSiteImportItem,
+  BulkUserImportItem,
+  buildCompanyUserProfile,
+} from '../utils/bulkCompanyImport';
 
 const DEFAULT_RTDB_URL = "https://minefase-fc5f5-default-rtdb.firebaseio.com/";
 
@@ -350,6 +366,7 @@ function mapFirebaseAuthError(err: any): FirebaseAuthActionError {
       );
     case 'auth/public-registration-disabled':
     case 'auth/unauthorized-profile':
+    case 'auth/account-recreation-required':
       return new FirebaseAuthActionError(
         err?.message || 'El acceso requiere una cuenta habilitada por un responsable autorizado.',
         code
@@ -377,6 +394,10 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     key === PRIMARY_SUPERADMIN_UID;
   const isSuper = isCanonicalSuper || data?.isSuperUser === true || data?.tipoUsuario === 'superadmin';
   const isAdmin = isSuper || data?.isAdmin === true || data?.tipoUsuario === 'admin' || data?.cargo === 'Administrador' || data?.tipoUsuario === 'supervisor';
+  const isMonotoriador =
+    !isAdmin &&
+    (String(data?.tipoUsuario || '').trim().toLowerCase() === 'monotoriador' ||
+      String(data?.cargo || '').trim().toLowerCase() === 'monotoriador');
 
   let role: UserRole = 'operador';
   let roleLabel = 'Usuario Normal / Operador Minero';
@@ -387,6 +408,9 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
   } else if (isAdmin) {
     role = 'admin';
     roleLabel = 'Administrador / Prevencionista de Faena';
+  } else if (isMonotoriador) {
+    role = 'monotoriador';
+    roleLabel = 'Monotoriador Ambiental';
   }
 
   const assignedSector = data?.geoMina 
@@ -406,29 +430,67 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     rut: data?.codigoId || data?.telefono || 'No registrado',
     shift: data?.cargo || data?.tipoMina || 'Turno Continuo A',
     status: data?.isActive !== false ? 'activo' : 'inactivo',
-    lastLogin: 'En línea (Firebase Auth)',
+    blockedReason: data?.blockedReason || undefined,
+    blockedAt: typeof data?.blockedAt === 'number' ? data.blockedAt : undefined,
+    blockedBy: data?.blockedBy || undefined,
+    pendingActivation: data?.pendingActivation === true,
+    claimedFromKey: data?.claimedFromKey || undefined,
+    lastLogin: data?.pendingActivation === true ? 'Pendiente crear nueva cuenta (/acceso)' : 'En línea (Firebase Auth)',
     assignedSector: assignedSector,
     assignedDeviceCode: assignedDev,
   };
 }
 
+let isAccountRecreationInProgress = false;
+
+async function claimPendingProfileForAuthUser(
+  fbUser: FirebaseUser,
+  pendingKey: string,
+  pendingRawData: any,
+  emailLower: string
+): Promise<UserProfile> {
+  const claimedPayload: Record<string, any> = {
+    nombre: pendingRawData?.nombre || fbUser.displayName || emailLower,
+    email: emailLower,
+    organizationId: pendingRawData?.organizationId || DEFAULT_ORGANIZATION.id,
+    isAdmin: pendingRawData?.isAdmin === true || pendingRawData?.tipoUsuario === 'admin',
+    isSuperUser: false,
+    tipoUsuario:
+      pendingRawData?.tipoUsuario === 'admin'
+        ? 'admin'
+        : pendingRawData?.tipoUsuario === 'monotoriador'
+        ? 'monotoriador'
+        : 'operador',
+    isActive: true,
+    pendingActivation: false,
+    claimedFromKey: pendingKey,
+    telefono: pendingRawData?.telefono || pendingRawData?.codigoId || 'No registrado',
+    cargo: pendingRawData?.cargo || 'Turno Continuo A',
+    geoMina: pendingRawData?.geoMina || 'Faena Minera Central',
+    deviceId: pendingRawData?.deviceId || '',
+    updatedAt: new Date().toISOString(),
+  };
+
+  await set(ref(rtdb, `usuarios/${fbUser.uid}`), claimedPayload);
+  await remove(ref(rtdb, `usuarios/${pendingKey}`)).catch(() => {});
+  return mapRTDBUserToUserProfile(fbUser.uid, claimedPayload);
+}
+
 export async function resolveUserProfileFromAuthUser(fbUser: FirebaseUser): Promise<UserProfile> {
   const emailLower = (fbUser.email || '').trim().toLowerCase();
+  const entriesMap = new Map<string, { profile: UserProfile; raw: any }>();
 
   // 1. Buscar directamente por UID en /usuarios/{uid}
   try {
     const byUidSnap = await get(ref(rtdb, `usuarios/${fbUser.uid}`));
     if (byUidSnap.exists()) {
-      const profile = mapRTDBUserToUserProfile(fbUser.uid, byUidSnap.val());
-      if (profile.status === 'inactivo') {
-        await signOut(auth).catch(() => {});
-        throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
-      }
-      return profile;
+      const raw = byUidSnap.val() || {};
+      entriesMap.set(fbUser.uid, {
+        profile: mapRTDBUserToUserProfile(fbUser.uid, raw),
+        raw,
+      });
     }
-  } catch (err: any) {
-    if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
-  }
+  } catch { /* ignore */ }
 
   // 2. Buscar por email en /usuarios usando consulta indexada (compatibles con reglas restrictivas para operadores)
   if (emailLower) {
@@ -437,39 +499,67 @@ export async function resolveUserProfileFromAuthUser(fbUser: FirebaseUser): Prom
       const byEmailSnap = await get(byEmailQuery);
       if (byEmailSnap.exists()) {
         const matchedObj = byEmailSnap.val() || {};
-        const matchedKey = Object.keys(matchedObj)[0];
-        if (matchedKey) {
-          const profile = mapRTDBUserToUserProfile(matchedKey, matchedObj[matchedKey]);
-          if (profile.status === 'inactivo') {
-            await signOut(auth).catch(() => {});
-            throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
-          }
-          return profile;
-        }
+        Object.keys(matchedObj).forEach((k) => {
+          const raw = matchedObj[k] || {};
+          entriesMap.set(k, {
+            profile: mapRTDBUserToUserProfile(k, raw),
+            raw,
+          });
+        });
       }
-    } catch (err: any) {
-      if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
-    }
+    } catch { /* ignore */ }
 
-    try {
-      const allUsersSnap = await get(ref(rtdb, 'usuarios'));
-      if (allUsersSnap.exists()) {
-        const allUsers = allUsersSnap.val() || {};
-        const matchedKey = Object.keys(allUsers).find(
-          (k) => (allUsers[k]?.email || '').trim().toLowerCase() === emailLower
-        );
-        if (matchedKey) {
-          const profile = mapRTDBUserToUserProfile(matchedKey, allUsers[matchedKey]);
-          if (profile.status === 'inactivo') {
-            await signOut(auth).catch(() => {});
-            throw new FirebaseAuthActionError('Tu cuenta se encuentra desactivada por administración.', 'auth/user-disabled');
-          }
-          return profile;
+    if (entriesMap.size === 0) {
+      try {
+        const allUsersSnap = await get(ref(rtdb, 'usuarios'));
+        if (allUsersSnap.exists()) {
+          const allUsers = allUsersSnap.val() || {};
+          Object.keys(allUsers).forEach((k) => {
+            if ((allUsers[k]?.email || '').trim().toLowerCase() === emailLower) {
+              const raw = allUsers[k] || {};
+              entriesMap.set(k, {
+                profile: mapRTDBUserToUserProfile(k, raw),
+                raw,
+              });
+            }
+          });
         }
-      }
-    } catch (err: any) {
-      if (err?.code === 'auth/user-disabled' || err?.message?.includes('desactivada')) throw err;
+      } catch { /* ignore */ }
     }
+  }
+
+  const entries: EmailProfileEntry[] = Array.from(entriesMap.entries()).map(([key, v]) => ({
+    key,
+    profile: v.profile,
+  }));
+  const resolution = selectBestLoginProfileForEmail(entries, fbUser.uid);
+
+  if (resolution.resolution === 'active_direct') {
+    return resolution.entry.profile;
+  }
+
+  if (resolution.resolution === 'auto_claim_pending') {
+    const pendingRaw = entriesMap.get(resolution.entry.key)?.raw;
+    return await claimPendingProfileForAuthUser(fbUser, resolution.entry.key, pendingRaw, emailLower);
+  }
+
+  if (resolution.resolution === 'requires_new_account') {
+    await signOut(auth).catch(() => {});
+    throw new FirebaseAuthActionError(
+      'Tu cuenta de la empresa anterior fue bloqueada y una nueva empresa ya habilitó tu acceso. Usa "Crear nueva cuenta con correo anterior" para activar tus nuevas credenciales.',
+      'auth/account-recreation-required'
+    );
+  }
+
+  if (resolution.resolution === 'blocked') {
+    await signOut(auth).catch(() => {});
+    const reason = resolution.blockedEntry.profile.blockedReason;
+    throw new FirebaseAuthActionError(
+      reason
+        ? `Tu cuenta fue bloqueada por tu empresa (${reason}). Si te contrataron en otra empresa, solicita que te registren y crea una nueva cuenta con tu correo.`
+        : 'Tu cuenta fue bloqueada/desactivada por administración. Si te contrataron en otra empresa, solicita el alta y crea una nueva cuenta con tu correo.',
+      'auth/user-disabled'
+    );
   }
 
   // 3. Únicamente el SuperAdministrador canónico tiene respaldo automático; cualquier otra cuenta
@@ -552,32 +642,81 @@ export async function createUserAccountByAdmin(params: {
   name: string;
   email: string;
   password: string;
-  role: 'admin' | 'operador';
+  role: 'admin' | 'operador' | 'monotoriador';
   rut: string;
   shift: string;
   assignedSector: string;
   assignedDeviceCode?: string;
   organizationId?: string;
+  organizations?: Organization[];
+  existingUsersInOrg?: UserProfile[];
   sendResetEmail?: boolean;
   actingUser?: UserProfile | null;
 }): Promise<UserProfile> {
-  const cleanEmail = params.email.trim();
+  const cleanEmail = params.email.trim().toLowerCase();
   const cleanName = params.name.trim();
   if (!cleanName || !cleanEmail || params.password.length < 6) {
     throw new Error('Nombre, correo válido y contraseña inicial (mínimo 6 caracteres) son obligatorios.');
   }
 
-  const safeRole: UserRole = params.role === 'admin' ? 'admin' : 'operador';
+  const safeRole: UserRole =
+    params.role === 'admin'
+      ? 'admin'
+      : params.role === 'monotoriador'
+      ? 'monotoriador'
+      : 'operador';
+
+  let authorizedOrgs = params.organizations;
+  const requestedOrg = params.organizationId || params.actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
+  if (
+    params.actingUser?.role === 'admin' &&
+    requestedOrg !== (params.actingUser.organizationId || DEFAULT_ORGANIZATION_ID) &&
+    (!authorizedOrgs || authorizedOrgs.length === 0)
+  ) {
+    const orgSnap = await get(ref(rtdb, `organizaciones/${requestedOrg}`)).catch(() => null);
+    if (orgSnap?.exists()) {
+      authorizedOrgs = [{ id: requestedOrg, ...(orgSnap.val() || {}) } as Organization];
+    }
+  }
+
   const targetOrgId =
     params.actingUser?.role === 'admin'
-      ? params.actingUser.organizationId || DEFAULT_ORGANIZATION_ID
-      : params.organizationId || DEFAULT_ORGANIZATION.id;
+      ? (isOrgAuthorizedForUser(params.actingUser, requestedOrg, authorizedOrgs)
+          ? requestedOrg
+          : params.actingUser.organizationId || DEFAULT_ORGANIZATION_ID)
+      : requestedOrg;
 
   if (params.actingUser) {
-    const check = canProvisionUserInOrganization(params.actingUser, targetOrgId, safeRole);
+    const check = canProvisionUserInOrganization(params.actingUser, targetOrgId, safeRole, authorizedOrgs);
     if (!check.allowed) {
       throw new Error(check.reason || 'Permisos insuficientes para crear cuentas.');
     }
+  }
+
+  // Verificar duplicados/bloqueos solo dentro de la MISMA empresa objetivo
+  let orgUsersToCheck: UserProfile[] = params.existingUsersInOrg || [];
+  if (orgUsersToCheck.length === 0) {
+    const orgUsersSnap = await get(
+      query(ref(rtdb, 'usuarios'), orderByChild('organizationId'), equalTo(targetOrgId))
+    ).catch(() => null);
+    if (orgUsersSnap?.exists()) {
+      const rawMap = orgUsersSnap.val() || {};
+      orgUsersToCheck = Object.keys(rawMap).map((k) => mapRTDBUserToUserProfile(k, rawMap[k]));
+    }
+  }
+
+  const sameOrgConflict = findUserEmailConflictInOrg(orgUsersToCheck, cleanEmail, targetOrgId);
+  if (sameOrgConflict.conflict === 'active_in_same_org') {
+    throw new FirebaseAuthActionError(
+      `El correo ${cleanEmail} ya posee una cuenta activa en esta empresa.`,
+      'auth/email-already-in-use'
+    );
+  }
+  if (sameOrgConflict.conflict === 'blocked_in_same_org') {
+    throw new FirebaseAuthActionError(
+      `El correo ${cleanEmail} se encuentra bloqueado en esta empresa. Usa el botón "Desbloquear" en la lista de usuarios si deseas rehabilitarlo aquí.`,
+      'auth/email-already-in-use'
+    );
   }
 
   const secondaryApp =
@@ -585,6 +724,13 @@ export async function createUserAccountByAdmin(params: {
     initializeApp(minefaseConfig, 'admin-provisioner');
   const secondaryAuth = getAuth(secondaryApp);
   let createdFbUser: FirebaseUser | null = null;
+
+  const roleLabel =
+    safeRole === 'admin'
+      ? 'Administrador / Prevencionista de Faena'
+      : safeRole === 'monotoriador'
+      ? 'Monotoriador Ambiental'
+      : 'Operador / Minero en Faena';
 
   try {
     const credential = await createUserWithEmailAndPassword(secondaryAuth, cleanEmail, params.password);
@@ -601,28 +747,158 @@ export async function createUserAccountByAdmin(params: {
       name: cleanName,
       email: cleanEmail,
       role: safeRole,
-      roleLabel:
-        safeRole === 'admin'
-          ? 'Administrador / Prevencionista de Faena'
-          : 'Operador / Minero en Faena',
+      roleLabel,
       rut: params.rut.trim() || 'No registrado',
       shift: params.shift.trim() || 'Turno Continuo A',
       status: 'activo',
+      pendingActivation: false,
       lastLogin: 'Cuenta creada por administración',
       assignedSector: params.assignedSector || 'Faena Minera Central',
       assignedDeviceCode: params.assignedDeviceCode || '',
     };
 
-    await addUserToRTDB(createdProfile, params.actingUser);
+    await addUserToRTDB(createdProfile, params.actingUser, authorizedOrgs);
     await signOut(secondaryAuth).catch(() => {});
     return createdProfile;
   } catch (err: any) {
+    // Si el correo ya existía en Firebase Auth (por pertenecer antes a otra empresa),
+    // habilitamos una ficha pendiente para que el trabajador cree una nueva cuenta con ese mismo correo en /acceso.
+    if (err?.code === 'auth/email-already-in-use') {
+      await signOut(secondaryAuth).catch(() => {});
+      const safeOrgSlug = targetOrgId.replace(/[^a-zA-Z0-9_-]/g, '_').slice(0, 28);
+      const pendingId = `pend_${safeOrgSlug}_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+      const pendingProfile: UserProfile = {
+        id: pendingId,
+        organizationId: targetOrgId,
+        name: cleanName,
+        email: cleanEmail,
+        role: safeRole,
+        roleLabel,
+        rut: params.rut.trim() || 'No registrado',
+        shift: params.shift.trim() || 'Turno Continuo A',
+        status: 'activo',
+        pendingActivation: true,
+        lastLogin: 'Pendiente crear nueva cuenta (/acceso)',
+        assignedSector: params.assignedSector || 'Faena Minera Central',
+        assignedDeviceCode: params.assignedDeviceCode || '',
+      };
+      await addUserToRTDB(pendingProfile, params.actingUser, authorizedOrgs);
+      return pendingProfile;
+    }
+
     // Revertir cuenta creada en Firebase Auth si falló el guardado del perfil en RTDB (anti-huérfano)
     if (createdFbUser) {
       await createdFbUser.delete().catch(() => {});
     }
     await signOut(secondaryAuth).catch(() => {});
     throw mapFirebaseAuthError(err);
+  }
+}
+
+/**
+ * Permite a un trabajador bloqueado o proveniente de otra empresa crear una nueva cuenta
+ * (nuevo UID y nueva contraseña en Firebase Auth) reutilizando su correo anterior,
+ * siempre que la nueva empresa haya habilitado una ficha pendiente activa para ese correo.
+ * Conserva intacto en RTDB el registro bloqueado de la empresa anterior.
+ */
+export async function createNewCompanyAccountWithPreviousEmail(params: {
+  email: string;
+  previousPassword: string;
+  newPassword: string;
+  rememberMe?: boolean;
+}): Promise<UserProfile> {
+  const cleanEmail = params.email.trim().toLowerCase();
+  if (!cleanEmail || !params.previousPassword || params.newPassword.length < 6) {
+    throw new FirebaseAuthActionError(
+      'Debes ingresar tu correo anterior, tu contraseña anterior y una nueva contraseña (mínimo 6 caracteres).',
+      'auth/invalid-input'
+    );
+  }
+
+  isAccountRecreationInProgress = true;
+  try {
+    await setPersistence(auth, params.rememberMe !== false ? browserLocalPersistence : browserSessionPersistence).catch(() => {});
+    const oldCred = await signInWithEmailAndPassword(auth, cleanEmail, params.previousPassword);
+    const oldFbUser = oldCred.user;
+    const oldUid = oldFbUser.uid;
+
+    // Consultar fichas por email y ficha directa del UID antiguo
+    const entriesMap = new Map<string, { profile: UserProfile; raw: any }>();
+    try {
+      const byUidSnap = await get(ref(rtdb, `usuarios/${oldUid}`));
+      if (byUidSnap.exists()) {
+        const raw = byUidSnap.val() || {};
+        entriesMap.set(oldUid, {
+          profile: mapRTDBUserToUserProfile(oldUid, raw),
+          raw,
+        });
+      }
+    } catch { /* ignore */ }
+
+    const byEmailQuery = query(ref(rtdb, 'usuarios'), orderByChild('email'), equalTo(cleanEmail));
+    const byEmailSnap = await get(byEmailQuery);
+    if (byEmailSnap.exists()) {
+      const matched = byEmailSnap.val() || {};
+      Object.keys(matched).forEach((k) => {
+        const raw = matched[k] || {};
+        entriesMap.set(k, {
+          profile: mapRTDBUserToUserProfile(k, raw),
+          raw,
+        });
+      });
+    }
+
+    const entries: EmailProfileEntry[] = Array.from(entriesMap.entries()).map(([key, v]) => ({
+      key,
+      profile: v.profile,
+    }));
+    const resolution = selectBestLoginProfileForEmail(entries, oldUid);
+
+    if (resolution.resolution === 'active_direct') {
+      await signOut(auth).catch(() => {});
+      throw new FirebaseAuthActionError(
+        'Tu cuenta actual sigue activa y no tienes pendiente una reincorporación en otra empresa. Inicia sesión normalmente.',
+        'auth/already-active'
+      );
+    }
+
+    if (resolution.resolution !== 'requires_new_account' && resolution.resolution !== 'auto_claim_pending') {
+      await signOut(auth).catch(() => {});
+      throw new FirebaseAuthActionError(
+        'No existe una invitación o ficha activa en una nueva empresa para este correo. Pide al administrador de la nueva empresa que te registre primero.',
+        'auth/unauthorized-profile'
+      );
+    }
+
+    const targetPending =
+      resolution.resolution === 'requires_new_account'
+        ? resolution.pendingEntry
+        : resolution.entry;
+    const pendingRaw = entriesMap.get(targetPending.key)?.raw;
+
+    // 1. Eliminar solo la credencial antigua de Firebase Auth (la ficha RTDB de la empresa anterior queda intacta y bloqueada)
+    await deleteUser(oldFbUser);
+
+    // 2. Crear nueva cuenta en Firebase Auth con el mismo correo y la nueva contraseña
+    const newCred = await createUserWithEmailAndPassword(auth, cleanEmail, params.newPassword);
+    await updateProfile(newCred.user, {
+      displayName: pendingRaw?.nombre || targetPending.profile.name || cleanEmail,
+    }).catch(() => {});
+
+    // 3. Reclamar la ficha autorizada de la nueva empresa bajo el nuevo UID
+    return await claimPendingProfileForAuthUser(
+      newCred.user,
+      targetPending.key,
+      pendingRaw,
+      cleanEmail
+    );
+  } catch (err: any) {
+    if (err instanceof FirebaseAuthActionError) {
+      throw err;
+    }
+    throw mapFirebaseAuthError(err);
+  } finally {
+    isAccountRecreationInProgress = false;
   }
 }
 
@@ -646,6 +922,9 @@ export function subscribeToFirebaseAuth(
   callback: (user: UserProfile | null, authError?: string | null) => void
 ): () => void {
   return onAuthStateChanged(auth, async (fbUser) => {
+    if (isAccountRecreationInProgress) {
+      return;
+    }
     if (!fbUser) {
       callback(null, null);
       return;
@@ -820,6 +1099,7 @@ export function mapRTDBContractToRental(key: string, data: any): DeviceRental {
 }
 
 export interface RTDBSubscriptionScope {
+  uid?: string;
   role?: UserRole;
   organizationId?: string;
   deviceIds?: string[];
@@ -843,33 +1123,71 @@ export function subscribeToRTDBDevicesRaw(
   callback: (rawDevices: Record<string, any>) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  if (scope?.role && scope.role !== 'superadmin' && scope.deviceIds && scope.deviceIds.length > 0) {
-    const aggregated: Record<string, any> = {};
-    const uniqueIds = Array.from(new Set(scope.deviceIds.filter(Boolean)));
-    const unsubs = uniqueIds.map((devId) =>
+  if (scope?.role && scope.role !== 'superadmin') {
+    const targetOrgId =
+      scope.organizationId && scope.organizationId !== 'all'
+        ? scope.organizationId
+        : DEFAULT_ORGANIZATION_ID;
+
+    let queryDevices: Record<string, any> = {};
+    const explicitDevices: Record<string, any> = {};
+    const emitScoped = () => {
+      const merged: Record<string, any> = {};
+      const assignIfMatches = (devId: string, val: any) => {
+        if (!val || typeof val !== 'object') return;
+        const devOrg = val.organizationId || DEFAULT_ORGANIZATION_ID;
+        if (devOrg !== targetOrgId) return;
+        merged[devId] = val;
+        recordDevicePacketArrival(devId, val);
+      };
+      Object.entries(queryDevices).forEach(([k, v]) => assignIfMatches(k, v));
+      Object.entries(explicitDevices).forEach(([k, v]) => assignIfMatches(k, v));
+      callback(merged);
+    };
+
+    const unsubs: Array<() => void> = [];
+    const scopedRef = buildOrgScopedQuery('dispositivos', scope);
+    unsubs.push(
       onValue(
-        ref(rtdb, `dispositivos/${devId}`),
+        scopedRef,
         (snapshot) => {
-          if (snapshot.exists()) {
-            const val = snapshot.val();
-            aggregated[devId] = val;
-            recordDevicePacketArrival(devId, val);
-          } else {
-            delete aggregated[devId];
-          }
-          callback({ ...aggregated });
+          queryDevices = snapshot.exists() ? snapshot.val() || {} : {};
+          emitScoped();
         },
         (err) => {
-          console.warn(`Error subscribing to RTDB /dispositivos/${devId}:`, err?.message || err);
+          console.warn(`Error subscribing to scoped RTDB /dispositivos (${targetOrgId}):`, err?.message || err);
+          queryDevices = {};
+          emitScoped();
         }
       )
     );
+
+    const uniqueIds = Array.from(new Set((scope.deviceIds || []).filter(Boolean)));
+    uniqueIds.forEach((devId) => {
+      unsubs.push(
+        onValue(
+          ref(rtdb, `dispositivos/${devId}`),
+          (snapshot) => {
+            if (snapshot.exists()) {
+              explicitDevices[devId] = snapshot.val();
+            } else {
+              delete explicitDevices[devId];
+            }
+            emitScoped();
+          },
+          (err) => {
+            console.warn(`Error subscribing to RTDB /dispositivos/${devId}:`, err?.message || err);
+          }
+        )
+      );
+    });
+
     return () => {
       unsubs.forEach((fn) => fn());
     };
   }
 
-  const devicesRef = buildOrgScopedQuery('dispositivos', scope?.role === 'superadmin' ? scope : undefined);
+  const devicesRef = buildOrgScopedQuery('dispositivos', scope);
   const unsub = onValue(devicesRef, (snapshot) => {
     if (snapshot.exists()) {
       const incoming = snapshot.val() || {};
@@ -903,18 +1221,40 @@ export async function forceRefreshDevicesFromRTDB(
   timeoutSeconds: number = 20,
   scope?: RTDBSubscriptionScope
 ): Promise<{ raw: Record<string, any>; devices: SensorDevice[] }> {
-  if (scope?.role && scope.role !== 'superadmin' && scope.deviceIds && scope.deviceIds.length > 0) {
+  if (scope?.role && scope.role !== 'superadmin') {
+    const targetOrgId =
+      scope.organizationId && scope.organizationId !== 'all'
+        ? scope.organizationId
+        : DEFAULT_ORGANIZATION_ID;
     const raw: Record<string, any> = {};
-    const devices: SensorDevice[] = [];
-    for (const id of Array.from(new Set(scope.deviceIds))) {
+
+    const scopedSnap = await get(buildOrgScopedQuery('dispositivos', scope)).catch(() => null);
+    if (scopedSnap && scopedSnap.exists()) {
+      const val = scopedSnap.val() || {};
+      Object.keys(val).forEach((id) => {
+        const devOrg = val[id]?.organizationId || DEFAULT_ORGANIZATION_ID;
+        if (devOrg === targetOrgId) {
+          raw[id] = val[id];
+        }
+      });
+    }
+
+    for (const id of Array.from(new Set((scope.deviceIds || []).filter(Boolean)))) {
+      if (raw[id]) continue;
       const snap = await get(ref(rtdb, `dispositivos/${id}`)).catch(() => null);
       if (snap && snap.exists()) {
         const val = snap.val();
-        raw[id] = val;
-        recordDevicePacketArrival(id, val);
-        devices.push(mapRTDBDeviceToSensorDevice(id, val, timeoutSeconds));
+        const devOrg = val?.organizationId || DEFAULT_ORGANIZATION_ID;
+        if (devOrg === targetOrgId) {
+          raw[id] = val;
+        }
       }
     }
+
+    const devices = Object.keys(raw).map((id) => {
+      recordDevicePacketArrival(id, raw[id]);
+      return mapRTDBDeviceToSensorDevice(id, raw[id], timeoutSeconds);
+    });
     return { raw, devices };
   }
 
@@ -1014,30 +1354,21 @@ export function buildAuditRecordsFromAlerts(alerts: SafetyAlert[]): AlarmAuditRe
     });
 }
 
-export function subscribeToRTDBAlarmRecords(callback: (records: AlarmAuditRecord[]) => void): () => void {
-  const devicesRef = ref(rtdb, 'dispositivos');
-  const unsub = onValue(devicesRef, (snapshot) => {
-    if (snapshot.exists()) {
-      const data = snapshot.val() || {};
-      const devList: SensorDevice[] = Object.keys(data).map((k) => {
-        recordDevicePacketArrival(k, data[k]);
-        return mapRTDBDeviceToSensorDevice(k, data[k]);
-      });
-      const records = extractAlarmAuditRecords(devList);
-      callback(records);
-    } else {
-      callback([]);
-    }
-  });
-  return unsub;
+export function subscribeToRTDBAlarmRecords(
+  callback: (records: AlarmAuditRecord[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
+  return subscribeToRTDBDevices((devList) => {
+    callback(extractAlarmAuditRecords(devList));
+  }, 20, scope);
 }
 
 export function subscribeToRTDBUsers(
   callback: (users: UserProfile[]) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  // Operadores no tienen permiso de lectura sobre la colección completa /usuarios
-  if (scope?.role === 'operador') {
+  // Operadores y Monotoriadores no tienen permiso de lectura sobre la colección completa /usuarios
+  if (scope?.role === 'operador' || scope?.role === 'monotoriador') {
     callback([]);
     return () => {};
   }
@@ -1050,21 +1381,22 @@ export function subscribeToRTDBUsers(
 
   const emitCombined = () => {
     const list: UserProfile[] = [];
-    const seenEmails = new Set<string>();
+    const seenOrgEmails = new Set<string>();
 
-    // 1. Process direct usuarios (priorizar UIDs reales de Firebase Auth / manual_temp_uid_01 frente a llaves temporales usr-*)
+    // 1. Process direct usuarios (priorizar UIDs reales de Firebase Auth / manual_temp_uid_01 frente a llaves temporales usr-* / pend_*)
     const sortedDirectKeys = Object.keys(directUsers).sort((a, b) => {
-      const aTemp = a.startsWith('usr-') || a.startsWith('usr0') ? 1 : 0;
-      const bTemp = b.startsWith('usr-') || b.startsWith('usr0') ? 1 : 0;
+      const aTemp = a.startsWith('usr-') || a.startsWith('usr0') || a.startsWith('pend_') ? 1 : 0;
+      const bTemp = b.startsWith('usr-') || b.startsWith('usr0') || b.startsWith('pend_') ? 1 : 0;
       return aTemp - bTemp;
     });
     sortedDirectKeys.forEach((key) => {
       const u = mapRTDBUserToUserProfile(key, directUsers[key]);
       const emailLower = (u.email || '').trim().toLowerCase();
-      if (emailLower && seenEmails.has(emailLower)) {
+      const orgKey = `${u.organizationId || DEFAULT_ORGANIZATION.id}::${emailLower}`;
+      if (emailLower && seenOrgEmails.has(orgKey)) {
         return;
       }
-      if (emailLower) seenEmails.add(emailLower);
+      if (emailLower) seenOrgEmails.add(orgKey);
       list.push(u);
     });
 
@@ -1073,8 +1405,9 @@ export function subscribeToRTDBUsers(
       Object.keys(precargaUsers).forEach((key) => {
         const pu = precargaUsers[key];
         const email = (pu?.email || '').trim().toLowerCase();
-        if (!seenEmails.has(email)) {
-          if (email) seenEmails.add(email);
+        const orgKey = `${pu?.organizationId || DEFAULT_ORGANIZATION.id}::${email}`;
+        if (!seenOrgEmails.has(orgKey)) {
+          if (email) seenOrgEmails.add(orgKey);
           list.push(mapRTDBUserToUserProfile(key, pu));
         }
       });
@@ -1120,11 +1453,15 @@ export function subscribeToRTDBUsers(
       return u;
     });
 
+    const roleOrder: Record<UserRole, number> = {
+      superadmin: 0,
+      admin: 1,
+      monotoriador: 2,
+      operador: 3,
+    };
     normalizedList.sort((a, b) => {
-      if (a.role === 'superadmin') return -1;
-      if (b.role === 'superadmin') return 1;
-      if (a.role === 'admin' && b.role !== 'admin') return -1;
-      if (b.role === 'admin' && a.role !== 'admin') return 1;
+      const diff = (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9);
+      if (diff !== 0) return diff;
       return a.name.localeCompare(b.name);
     });
 
@@ -1268,9 +1605,28 @@ export async function updateDeviceInRTDB(
   }
 }
 
+async function resolveAuthorizedOrganizationsForActor(
+  actingUser?: UserProfile | null,
+  targetOrgId?: string,
+  providedOrgs?: Organization[]
+): Promise<Organization[] | undefined> {
+  if (!actingUser || actingUser.role !== 'admin') return providedOrgs;
+  if (providedOrgs && providedOrgs.length > 0) return providedOrgs;
+  const normalized = targetOrgId || DEFAULT_ORGANIZATION_ID;
+  if (normalized === (actingUser.organizationId || DEFAULT_ORGANIZATION_ID)) {
+    return providedOrgs;
+  }
+  const snap = await get(ref(rtdb, `organizaciones/${normalized}`)).catch(() => null);
+  if (snap?.exists()) {
+    return [{ id: normalized, ...(snap.val() || {}) } as Organization];
+  }
+  return undefined;
+}
+
 export async function addUserToRTDB(
   user: UserProfile,
-  actingUser?: UserProfile | null
+  actingUser?: UserProfile | null,
+  organizations?: Organization[]
 ): Promise<void> {
   try {
     // Regla de plataforma: Solo existe un único SuperAdmin; nuevos usuarios nunca pueden crearse como superadmin
@@ -1279,27 +1635,34 @@ export async function addUserToRTDB(
     const safeRole: UserRole =
       user.role === 'superadmin' && !isCanonicalSuper ? 'admin' : user.role;
 
+    const requestedOrgId = user.organizationId || actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
+    const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(actingUser, requestedOrgId, organizations);
+
     const targetOrgId =
       actingUser?.role === 'admin'
-        ? actingUser.organizationId || DEFAULT_ORGANIZATION_ID
-        : user.organizationId || DEFAULT_ORGANIZATION.id;
+        ? (isOrgAuthorizedForUser(actingUser, requestedOrgId, resolvedOrgs)
+            ? requestedOrgId
+            : actingUser.organizationId || DEFAULT_ORGANIZATION_ID)
+        : requestedOrgId;
 
     if (actingUser) {
-      const check = canProvisionUserInOrganization(actingUser, targetOrgId, safeRole);
+      const check = canProvisionUserInOrganization(actingUser, targetOrgId, safeRole, resolvedOrgs);
       if (!check.allowed) {
         throw new Error(check.reason || 'Permisos insuficientes para crear el usuario.');
       }
     }
 
+    const cleanEmail = user.email.trim().toLowerCase();
     const userRef = ref(rtdb, `usuarios/${user.id}`);
     await set(userRef, {
       nombre: user.name,
-      email: user.email,
+      email: cleanEmail,
       organizationId: targetOrgId,
       isAdmin: safeRole === 'superadmin' || safeRole === 'admin',
       isSuperUser: safeRole === 'superadmin',
       tipoUsuario: safeRole,
       isActive: user.status === 'activo',
+      pendingActivation: Boolean(user.pendingActivation),
       telefono: user.rut,
       cargo: user.shift || 'Turno Continuo A',
       geoMina: user.assignedSector || 'Mina Chuquicamata',
@@ -1315,7 +1678,8 @@ export async function addUserToRTDB(
 export async function updateUserInRTDB(
   userId: string,
   updates: Partial<UserProfile>,
-  actingUser?: UserProfile | null
+  actingUser?: UserProfile | null,
+  organizations?: Organization[]
 ): Promise<void> {
   if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
     throw new Error('Permisos insuficientes para modificar usuarios.');
@@ -1326,6 +1690,7 @@ export async function updateUserInRTDB(
   const existingData = existingSnap?.exists() ? existingSnap.val() : null;
 
   const existingEmail = (existingData?.email || updates.email || '').trim().toLowerCase();
+  const targetOrg = existingData?.organizationId || updates.organizationId || DEFAULT_ORGANIZATION_ID;
   const isTargetSuperAdmin =
     userId === PRIMARY_SUPERADMIN_UID ||
     existingEmail === PRIMARY_SUPERADMIN_EMAIL ||
@@ -1344,15 +1709,21 @@ export async function updateUserInRTDB(
     throw new Error('Acción denegada: Solo puede existir un único SuperAdministrador en toda la plataforma.');
   }
 
-  // Aislamiento de organización: un Administrador no puede modificar usuarios de otra organización
+  // Aislamiento de organización: un Administrador no puede modificar usuarios de organizaciones no autorizadas
   if (actingUser && actingUser.role === 'admin') {
-    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
-    const targetOrg = existingData?.organizationId || DEFAULT_ORGANIZATION_ID;
-    if (actorOrg !== targetOrg) {
+    const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(actingUser, targetOrg, organizations);
+    if (!isOrgAuthorizedForUser(actingUser, targetOrg, resolvedOrgs)) {
       throw new Error('Acción denegada: No puedes modificar usuarios de otra organización.');
     }
-    if (updates.organizationId && updates.organizationId !== actorOrg) {
-      throw new Error('Acción denegada: Un Administrador no puede reasignar usuarios a otra organización.');
+    if (updates.organizationId) {
+      const nextResolvedOrgs = await resolveAuthorizedOrganizationsForActor(
+        actingUser,
+        updates.organizationId,
+        resolvedOrgs
+      );
+      if (!isOrgAuthorizedForUser(actingUser, updates.organizationId, nextResolvedOrgs)) {
+        throw new Error('Acción denegada: Un Administrador no puede reasignar usuarios a una organización no autorizada.');
+      }
     }
   }
 
@@ -1360,8 +1731,8 @@ export async function updateUserInRTDB(
     updatedAt: new Date().toISOString(),
   };
   if (updates.name) rtdbUpdates.nombre = updates.name;
-  if (updates.email) rtdbUpdates.email = updates.email;
-  if (updates.organizationId && actingUser?.role === 'superadmin') {
+  if (updates.email) rtdbUpdates.email = updates.email.trim().toLowerCase();
+  if (updates.organizationId && (actingUser?.role === 'superadmin' || actingUser?.role === 'admin')) {
     rtdbUpdates.organizationId = updates.organizationId;
   }
   if (updates.rut) rtdbUpdates.codigoId = updates.rut;
@@ -1370,20 +1741,36 @@ export async function updateUserInRTDB(
     rtdbUpdates.isAdmin = updates.role === 'admin' || updates.role === 'superadmin';
     rtdbUpdates.isSuperUser = updates.role === 'superadmin';
   }
-  if (updates.status) rtdbUpdates.isActive = updates.status === 'activo';
+  if (updates.status) {
+    rtdbUpdates.isActive = updates.status === 'activo';
+    if (updates.status === 'inactivo') {
+      rtdbUpdates.blockedReason = updates.blockedReason || 'Bloqueado por desvinculación empresarial';
+      rtdbUpdates.blockedAt = updates.blockedAt || Date.now();
+      rtdbUpdates.blockedBy = updates.blockedBy || actingUser?.name || actingUser?.email || 'Administración';
+    } else {
+      rtdbUpdates.blockedReason = null;
+      rtdbUpdates.blockedAt = null;
+      rtdbUpdates.blockedBy = null;
+    }
+  }
   if (updates.assignedSector) rtdbUpdates.geoMina = updates.assignedSector;
   if (updates.assignedDeviceCode !== undefined) rtdbUpdates.deviceId = updates.assignedDeviceCode;
 
   try {
     await update(userRef, rtdbUpdates);
 
-    // Sincronizar también cualquier otro nodo duplicado con el mismo correo en /usuarios
+    // Sincronizar únicamente nodos duplicados del mismo correo dentro de la MISMA organización
     if (existingEmail) {
-      const allSnap = await get(ref(rtdb, 'usuarios')).catch(() => null);
-      if (allSnap?.exists()) {
-        const allUsers = allSnap.val() || {};
-        const siblingKeys = Object.keys(allUsers).filter(
-          (k) => k !== userId && (allUsers[k]?.email || '').trim().toLowerCase() === existingEmail
+      const orgUsersSnap = await get(
+        query(ref(rtdb, 'usuarios'), orderByChild('organizationId'), equalTo(targetOrg))
+      ).catch(() => null);
+      if (orgUsersSnap?.exists()) {
+        const orgUsers = orgUsersSnap.val() || {};
+        const siblingKeys = Object.keys(orgUsers).filter(
+          (k) =>
+            k !== userId &&
+            (orgUsers[k]?.email || '').trim().toLowerCase() === existingEmail &&
+            (orgUsers[k]?.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg
         );
         for (const sibKey of siblingKeys) {
           await update(ref(rtdb, `usuarios/${sibKey}`), rtdbUpdates).catch(() => {});
@@ -1494,7 +1881,8 @@ export function validateRentalDatesAndCost(params: {
 export async function addRentalContractToRTDB(
   rental: DeviceRental,
   actingUser?: UserProfile | null,
-  registeredDevices?: RegisteredDeviceConfig[]
+  registeredDevices?: RegisteredDeviceConfig[],
+  organizations?: Organization[]
 ): Promise<void> {
   if (actingUser) {
     if (actingUser.status !== 'activo') {
@@ -1508,10 +1896,22 @@ export async function addRentalContractToRTDB(
   if (!cleanKey) {
     throw new Error('El número de contrato es obligatorio.');
   }
+  const requestedOrg = rental.organizationId || actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
+  const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(actingUser, requestedOrg, organizations);
+
+  if (actingUser) {
+    const access = canManageContractsAndPayments(actingUser, requestedOrg, resolvedOrgs);
+    if (!access.allowed) {
+      throw new Error(access.reason || 'Permisos insuficientes para registrar contratos en esta organización.');
+    }
+  }
+
   const targetOrgId =
     actingUser?.role === 'admin'
-      ? actingUser.organizationId || DEFAULT_ORGANIZATION_ID
-      : rental.organizationId || DEFAULT_ORGANIZATION.id;
+      ? (isOrgAuthorizedForUser(actingUser, requestedOrg, resolvedOrgs)
+          ? requestedOrg
+          : actingUser.organizationId || DEFAULT_ORGANIZATION_ID)
+      : requestedOrg;
 
   validateRentalDatesAndCost({
     startDate: rental.startDate,
@@ -1541,7 +1941,8 @@ export async function updateRentalContractInRTDB(
   contractId: string,
   updates: Partial<DeviceRental>,
   actingUser?: UserProfile | null,
-  registeredDevices?: RegisteredDeviceConfig[]
+  registeredDevices?: RegisteredDeviceConfig[],
+  organizations?: Organization[]
 ): Promise<DeviceRental> {
   if (actingUser) {
     if (actingUser.status !== 'activo') {
@@ -1565,8 +1966,12 @@ export async function updateRentalContractInRTDB(
 
   const currentMapped = mapRTDBContractToRental(cleanKey, snap.val());
   if (actingUser?.role === 'admin') {
-    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
-    if (currentMapped.organizationId !== actorOrg) {
+    const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(
+      actingUser,
+      currentMapped.organizationId,
+      organizations
+    );
+    if (!isOrgAuthorizedForUser(actingUser, currentMapped.organizationId, resolvedOrgs)) {
       throw new Error('Acción denegada: No puedes editar contratos de otra organización.');
     }
   }
@@ -1627,7 +2032,7 @@ export function buildAtomicPaymentUpdates(params: {
 export async function recordPaymentInRTDB(
   contractId: string,
   amount: number,
-  options?: { organizationId?: string; actingUser?: UserProfile | null }
+  options?: { organizationId?: string; actingUser?: UserProfile | null; organizations?: Organization[] }
 ): Promise<{ pagoId: string; fechaPago: string; amount: number }> {
   const actingUser = options?.actingUser;
   if (actingUser) {
@@ -1653,8 +2058,12 @@ export async function recordPaymentInRTDB(
   const targetOrgId = existingContract?.organizationId || DEFAULT_ORGANIZATION.id;
 
   if (actingUser?.role === 'admin') {
-    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
-    if (targetOrgId !== actorOrg) {
+    const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(
+      actingUser,
+      targetOrgId,
+      options?.organizations
+    );
+    if (!isOrgAuthorizedForUser(actingUser, targetOrgId, resolvedOrgs)) {
       throw new Error('Acción denegada: El contrato pertenece a otra organización.');
     }
   } else if (options?.organizationId && options.organizationId !== 'all' && options.organizationId !== targetOrgId) {
@@ -1699,7 +2108,14 @@ export async function recordPaymentInRTDB(
   return { pagoId, fechaPago, amount: safeAmount };
 }
 
-export async function sendESP32Command(deviceId: string, command: 'pause' | 'resume' | 'ping'): Promise<void> {
+export async function sendESP32Command(
+  deviceId: string,
+  command: 'pause' | 'resume' | 'ping',
+  actingUser?: UserProfile | null
+): Promise<void> {
+  if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede enviar comandos al hardware ESP32.');
+  }
   try {
     const devRef = ref(rtdb, `dispositivos/${deviceId}`);
     const updates: any = {
@@ -1767,10 +2183,11 @@ export async function resetGatewayDataInRTDB(
     simulacro_activo: false,
   };
 
+  const orgScopeId = actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
   const targetId = deviceId || 'device_38A839E81F84';
   await update(ref(rtdb, `dispositivos/${targetId}`), resetPayload);
 
-  if (targetId !== 'device_38A839E81F84') {
+  if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
     await ensureValidDevicePayload('device_38A839E81F84', {
       comando_web: 'APAGAR',
       silencio_remoto: true,
@@ -1783,8 +2200,17 @@ export async function resetGatewayDataInRTDB(
     }).catch(() => {});
   }
 
-  await update(ref(rtdb, 'simulacro'), { activo: false, finalizado: true, timestamp: now }).catch(() => {});
-  await update(ref(rtdb, 'emergencia'), { activa: false, timestamp: now }).catch(() => {});
+  await update(ref(rtdb, `simulacro/${orgScopeId}`), {
+    activo: false,
+    finalizado: true,
+    organizationId: orgScopeId,
+    timestamp: now,
+  }).catch(() => {});
+  await update(ref(rtdb, `emergencia/${orgScopeId}`), {
+    activa: false,
+    organizationId: orgScopeId,
+    timestamp: now,
+  }).catch(() => {});
 }
 
 export async function toggleGatewayAlarmInRTDB(
@@ -1797,6 +2223,8 @@ export async function toggleGatewayAlarmInRTDB(
     if (!isSuper) {
       throw new Error('Acceso denegado: Solo un SuperAdministrador autenticado en Firebase Auth puede apagar la alarma.');
     }
+  } else if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede activar manualmente la alarma del nodo.');
   }
 
   const now = Date.now();
@@ -1813,7 +2241,8 @@ export async function toggleGatewayAlarmInRTDB(
   const targetId = deviceId || 'device_38A839E81F84';
   await ensureValidDevicePayload(targetId, payload);
 
-  if (targetId !== 'device_38A839E81F84') {
+  const orgScopeId = actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
+  if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
     await ensureValidDevicePayload('device_38A839E81F84', payload).catch(() => {});
   }
 }
@@ -1821,7 +2250,7 @@ export async function toggleGatewayAlarmInRTDB(
 export async function shutdownAlarmCompletelyInRTDB(
   deviceId: string,
   actingUser: UserProfile | null,
-  options?: { resetSensorBaselines?: boolean }
+  options?: { resetSensorBaselines?: boolean; organizationId?: string }
 ): Promise<void> {
   const isSuper = await verifySuperAdminPrivileges(actingUser);
   if (!isSuper) {
@@ -1829,6 +2258,10 @@ export async function shutdownAlarmCompletelyInRTDB(
   }
 
   const now = Date.now();
+  const orgScopeId =
+    (options?.organizationId && options.organizationId !== 'all' ? options.organizationId : null) ||
+    actingUser?.organizationId ||
+    DEFAULT_ORGANIZATION.id;
   const targetId = deviceId || 'device_38A839E81F84';
   const devPayload: Record<string, any> = {
     comando_web: 'APAGAR',
@@ -1852,11 +2285,10 @@ export async function shutdownAlarmCompletelyInRTDB(
 
   await ensureValidDevicePayload(targetId, devPayload);
 
-  if (targetId !== 'device_38A839E81F84') {
+  if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
     await ensureValidDevicePayload('device_38A839E81F84', devPayload).catch(() => {});
   }
 
-  const orgScopeId = actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
   await update(ref(rtdb, `simulacro/${orgScopeId}`), {
     activo: false,
     finalizado: true,
@@ -1873,7 +2305,14 @@ export async function shutdownAlarmCompletelyInRTDB(
   }).catch(() => {});
 }
 
-export async function toggleGatewayLightInRTDB(deviceId: string, active: boolean): Promise<void> {
+export async function toggleGatewayLightInRTDB(
+  deviceId: string,
+  active: boolean,
+  actingUser?: UserProfile | null
+): Promise<void> {
+  if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la baliza LED del nodo.');
+  }
   const now = Date.now();
   const payload = {
     luz: active,
@@ -2508,9 +2947,62 @@ export function subscribeToAlertThresholds(
 /**
  * Escucha todas las configuraciones de umbrales existentes en la base de datos
  */
+function normalizeThresholdConfigSnapshot(
+  key: string,
+  item: any
+): DeviceThresholdsConfig {
+  return {
+    dispositivo_id: key,
+    dispositivo_nombre: item?.dispositivo_nombre || key,
+    pm25: { ...DEFAULT_GLOBAL_THRESHOLDS.pm25, ...(item?.pm25 || {}) },
+    mq2: { ...DEFAULT_GLOBAL_THRESHOLDS.mq2, ...(item?.mq2 || {}) },
+    temperatura: { ...DEFAULT_GLOBAL_THRESHOLDS.temperatura, ...(item?.temperatura || {}) },
+    humedad: { ...DEFAULT_GLOBAL_THRESHOLDS.humedad, ...(item?.humedad || {}) },
+    actualizado_en: item?.actualizado_en || Date.now(),
+    actualizado_por: item?.actualizado_por || 'Desconocido',
+    notas: item?.notas || ''
+  };
+}
+
+/**
+ * Escucha las configuraciones de umbrales permitidas según rol y dispositivos de la organización
+ */
 export function subscribeToAllThresholdConfigs(
-  callback: (configs: Record<string, DeviceThresholdsConfig>) => void
+  callback: (configs: Record<string, DeviceThresholdsConfig>) => void,
+  scope?: RTDBSubscriptionScope
 ): () => void {
+  if (scope?.role && scope.role !== 'superadmin') {
+    const watchedIds = Array.from(
+      new Set(['global', ...(scope.deviceIds || []).filter(Boolean)])
+    );
+    const result: Record<string, DeviceThresholdsConfig> = {
+      global: { ...DEFAULT_GLOBAL_THRESHOLDS },
+    };
+
+    const unsubs = watchedIds.map((targetId) =>
+      onValue(
+        ref(rtdb, `configuracion_alertas/${targetId}`),
+        (snapshot) => {
+          if (snapshot.exists()) {
+            result[targetId] = normalizeThresholdConfigSnapshot(targetId, snapshot.val());
+          } else if (targetId === 'global') {
+            result.global = { ...DEFAULT_GLOBAL_THRESHOLDS };
+          } else {
+            delete result[targetId];
+          }
+          callback({ ...result });
+        },
+        (err) => {
+          console.warn(`Error subscribing to threshold config /configuracion_alertas/${targetId}:`, err?.message || err);
+        }
+      )
+    );
+
+    return () => {
+      unsubs.forEach((fn) => fn());
+    };
+  }
+
   const configsRef = ref(rtdb, 'configuracion_alertas');
 
   return onValue(configsRef, (snapshot) => {
@@ -2518,18 +3010,7 @@ export function subscribeToAllThresholdConfigs(
     if (snapshot.exists()) {
       const data = snapshot.val();
       Object.keys(data).forEach((key) => {
-        const item = data[key];
-        result[key] = {
-          dispositivo_id: key,
-          dispositivo_nombre: item.dispositivo_nombre || key,
-          pm25: { ...DEFAULT_GLOBAL_THRESHOLDS.pm25, ...(item.pm25 || {}) },
-          mq2: { ...DEFAULT_GLOBAL_THRESHOLDS.mq2, ...(item.mq2 || {}) },
-          temperatura: { ...DEFAULT_GLOBAL_THRESHOLDS.temperatura, ...(item.temperatura || {}) },
-          humedad: { ...DEFAULT_GLOBAL_THRESHOLDS.humedad, ...(item.humedad || {}) },
-          actualizado_en: item.actualizado_en || Date.now(),
-          actualizado_por: item.actualizado_por || 'Desconocido',
-          notas: item.notas || ''
-        };
+        result[key] = normalizeThresholdConfigSnapshot(key, data[key]);
       });
     }
     if (!result['global']) {
@@ -2549,10 +3030,14 @@ export function subscribeToAllThresholdConfigs(
 export async function saveThresholdConfig(
   targetId: string, 
   config: DeviceThresholdsConfig, 
-  user: UserProfile
+  user: UserProfile,
+  organizationIdOverride?: string
 ): Promise<void> {
   if (user.role !== 'admin' && user.role !== 'superadmin') {
     throw new Error('Permisos insuficientes: Solo los usuarios con rol Administrador o SuperAdmin pueden modificar los umbrales de seguridad operacional.');
+  }
+  if (targetId === 'global' && user.role !== 'superadmin') {
+    throw new Error('Permisos insuficientes: Solo el SuperAdministrador puede modificar la configuración global de umbrales. Seleccione un dispositivo de su empresa.');
   }
 
   // Validación de consistencia matemática: preventivo < advertencia < critico
@@ -2581,7 +3066,10 @@ export async function saveThresholdConfig(
 
   // Registro de auditoría inmutable con organizationId en la bitácora de configuraciones
   const auditKey = `${targetId}_${Date.now()}`;
-  const auditOrgId = user.organizationId || DEFAULT_ORGANIZATION.id;
+  const auditOrgId =
+    (organizationIdOverride && organizationIdOverride !== 'all' ? organizationIdOverride : null) ||
+    user.organizationId ||
+    DEFAULT_ORGANIZATION.id;
   const auditRef = ref(rtdb, `bitacora_configuracion_umbrales/${auditKey}`);
   await set(auditRef, {
     targetId,
@@ -2620,6 +3108,9 @@ export async function resetThresholdConfigToDefault(
 ): Promise<DeviceThresholdsConfig> {
   if (user.role !== 'admin' && user.role !== 'superadmin') {
     throw new Error('Permisos insuficientes: Solo los administradores pueden restaurar valores de seguridad.');
+  }
+  if (targetId === 'global' && user.role !== 'superadmin') {
+    throw new Error('Permisos insuficientes: Solo el SuperAdministrador puede restaurar los valores globales.');
   }
 
   const restoredConfig: DeviceThresholdsConfig = {
@@ -2739,10 +3230,24 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         reportes: true,
         faenas: true,
         usuarios: true,
+        empresas: true,
         visor_3d: true,
         gateway_3d: true,
       },
       operador: {
+        dashboard: false,
+        monitoreo: false,
+        alertas: true,
+        configuracion_alertas: false,
+        equipos: false,
+        reportes: false,
+        faenas: false,
+        usuarios: false,
+        empresas: false,
+        visor_3d: false,
+        gateway_3d: false,
+      },
+      monotoriador: {
         dashboard: true,
         monitoreo: true,
         alertas: true,
@@ -2751,6 +3256,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         reportes: true,
         faenas: true,
         usuarios: false,
+        empresas: false,
         visor_3d: false,
         gateway_3d: false,
       },
@@ -2765,6 +3271,12 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         inventario: true,
       },
       operador: {
+        asignaciones: false,
+        arriendos: false,
+        pagos: false,
+        inventario: false,
+      },
+      monotoriador: {
         asignaciones: true,
         arriendos: true,
         pagos: true,
@@ -2853,8 +3365,14 @@ export function isTabVisibleForUser(
   if (tab === 'superadmin_panel' || tab === 'superadmin_docs') {
     return user.role === 'superadmin';
   }
+  if (tab === 'empresas' || tab === 'usuarios') {
+    return user.role === 'superadmin' || user.role === 'admin';
+  }
   if (user.role === 'superadmin') {
     return true;
+  }
+  if (user.role === 'operador') {
+    return tab === 'alertas';
   }
 
   const controllableTab = tab as ControllableTab;
@@ -2872,7 +3390,12 @@ export function isTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey = user.role === 'admin' ? 'admin' : 'operador';
+  const roleKey: 'admin' | 'operador' | 'monotoriador' =
+    user.role === 'admin'
+      ? 'admin'
+      : user.role === 'monotoriador'
+      ? 'monotoriador'
+      : 'operador';
   const configuredRoleVal = config?.visibility?.rolePermissions?.[roleKey]?.[controllableTab];
   if (typeof configuredRoleVal === 'boolean') {
     return configuredRoleVal;
@@ -2890,6 +3413,9 @@ export function isEquiposSubTabVisibleForUser(
   if (user.role === 'superadmin') {
     return true;
   }
+  if (user.role === 'operador') {
+    return false;
+  }
 
   const emailKey = normalizeEmailOverrideKey(user.email);
   const byIdOverride: WindowOverrideValue | undefined =
@@ -2905,7 +3431,12 @@ export function isEquiposSubTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey = user.role === 'admin' ? 'admin' : 'operador';
+  const roleKey: 'admin' | 'operador' | 'monotoriador' =
+    user.role === 'admin'
+      ? 'admin'
+      : user.role === 'monotoriador'
+      ? 'monotoriador'
+      : 'operador';
   const configuredRoleVal = config?.visibility?.equiposSubTabRolePermissions?.[roleKey]?.[subTab];
   if (typeof configuredRoleVal === 'boolean') {
     return configuredRoleVal;
@@ -2924,7 +3455,10 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         },
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
-          ...(raw?.visibility?.rolePermissions?.operador || {}),
+        },
+        monotoriador: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+          ...(raw?.visibility?.rolePermissions?.monotoriador || {}),
         },
       },
       userOverrides: raw?.visibility?.userOverrides || {},
@@ -2936,7 +3470,10 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         },
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.operador,
-          ...(raw?.visibility?.equiposSubTabRolePermissions?.operador || {}),
+        },
+        monotoriador: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.monotoriador,
+          ...(raw?.visibility?.equiposSubTabRolePermissions?.monotoriador || {}),
         },
       },
       equiposSubTabUserOverrides: raw?.visibility?.equiposSubTabUserOverrides || {},
@@ -3253,38 +3790,134 @@ export function subscribeToRTDBSites(
  * ORGANIZACIONES MULTI-EMPRESA (/organizaciones)
  * ============================================================================
  */
+function mapRTDBOrganization(id: string, val: any): Organization {
+  return {
+    id,
+    name: val?.name || id,
+    rut: val?.rut || '',
+    industry: val?.industry || 'Minería',
+    status: val?.status === 'suspendida' ? 'suspendida' : 'activa',
+    createdAt: typeof val?.createdAt === 'number' ? val.createdAt : Date.now(),
+    updatedAt: val?.updatedAt,
+    createdBy: val?.createdBy,
+    ownerId: val?.ownerId || val?.ownerUid,
+    ownerUid: val?.ownerUid || val?.ownerId,
+    ownerEmail: val?.ownerEmail,
+  };
+}
+
 export function subscribeToRTDBOrganizations(
   callback: (orgs: Organization[]) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
+  if (scope?.role === 'admin') {
+    const primaryOrgId =
+      scope.organizationId && scope.organizationId !== 'all'
+        ? scope.organizationId
+        : DEFAULT_ORGANIZATION_ID;
+
+    let primaryOrg: Organization | null = null;
+    let ownedOrgs: Record<string, Organization> = {};
+
+    const emitAdminOrgs = () => {
+      const mergedMap = new Map<string, Organization>();
+      if (primaryOrg) {
+        mergedMap.set(primaryOrg.id, primaryOrg);
+      } else if (primaryOrgId === DEFAULT_ORGANIZATION.id) {
+        mergedMap.set(DEFAULT_ORGANIZATION.id, DEFAULT_ORGANIZATION);
+      }
+      Object.values(ownedOrgs).forEach((o) => {
+        mergedMap.set(o.id, o);
+      });
+      const result = Array.from(mergedMap.values());
+      result.sort((a, b) => {
+        if (a.id === primaryOrgId) return -1;
+        if (b.id === primaryOrgId) return 1;
+        return a.name.localeCompare(b.name);
+      });
+      const fallbackPrimary: Organization =
+        primaryOrgId === DEFAULT_ORGANIZATION.id
+          ? DEFAULT_ORGANIZATION
+          : {
+              id: primaryOrgId,
+              name: primaryOrgId,
+              rut: '',
+              industry: 'Minería',
+              status: 'activa',
+              createdAt: 0,
+            };
+      callback(result.length > 0 ? result : [fallbackPrimary]);
+    };
+
+    const unsubPrimary = onValue(
+      ref(rtdb, `organizaciones/${primaryOrgId}`),
+      (snapshot) => {
+        if (snapshot.exists()) {
+          primaryOrg = mapRTDBOrganization(primaryOrgId, snapshot.val());
+        } else {
+          primaryOrg = primaryOrgId === DEFAULT_ORGANIZATION.id ? DEFAULT_ORGANIZATION : null;
+        }
+        emitAdminOrgs();
+      },
+      () => {
+        emitAdminOrgs();
+      }
+    );
+
+    const ownerUid = scope.uid || auth.currentUser?.uid;
+    const unsubOwned = ownerUid
+      ? onValue(
+          query(ref(rtdb, 'organizaciones'), orderByChild('ownerUid'), equalTo(ownerUid)),
+          (snapshot) => {
+            const nextOwned: Record<string, Organization> = {};
+            if (snapshot.exists()) {
+              const val = snapshot.val() || {};
+              Object.keys(val).forEach((k) => {
+                nextOwned[k] = mapRTDBOrganization(k, val[k]);
+              });
+            }
+            ownedOrgs = nextOwned;
+            emitAdminOrgs();
+          },
+          () => {
+            emitAdminOrgs();
+          }
+        )
+      : () => {};
+
+    return () => {
+      unsubPrimary();
+      unsubOwned();
+    };
+  }
+
   if (scope?.role && scope.role !== 'superadmin') {
     const orgId =
       scope.organizationId && scope.organizationId !== 'all'
         ? scope.organizationId
         : DEFAULT_ORGANIZATION_ID;
+    const fallbackOrg: Organization =
+      orgId === DEFAULT_ORGANIZATION.id
+        ? DEFAULT_ORGANIZATION
+        : {
+            id: orgId,
+            name: orgId,
+            rut: '',
+            industry: 'Minería',
+            status: 'activa',
+            createdAt: 0,
+          };
     return onValue(
       ref(rtdb, `organizaciones/${orgId}`),
       (snapshot) => {
         if (snapshot.exists()) {
-          const val = snapshot.val() || {};
-          callback([
-            {
-              id: orgId,
-              name: val?.name || orgId,
-              rut: val?.rut || '',
-              industry: val?.industry || 'Minería',
-              status: val?.status === 'suspendida' ? 'suspendida' : 'activa',
-              createdAt: typeof val?.createdAt === 'number' ? val.createdAt : Date.now(),
-              updatedAt: val?.updatedAt,
-              createdBy: val?.createdBy,
-            },
-          ]);
+          callback([mapRTDBOrganization(orgId, snapshot.val() || {})]);
         } else {
-          callback([DEFAULT_ORGANIZATION]);
+          callback([fallbackOrg]);
         }
       },
       () => {
-        callback([DEFAULT_ORGANIZATION]);
+        callback([fallbackOrg]);
       }
     );
   }
@@ -3295,16 +3928,7 @@ export function subscribeToRTDBOrganizations(
     (snapshot) => {
       if (snapshot.exists()) {
         const val = snapshot.val() || {};
-        const list: Organization[] = Object.keys(val).map((k) => ({
-          id: k,
-          name: val[k]?.name || k,
-          rut: val[k]?.rut || '',
-          industry: val[k]?.industry || 'Minería',
-          status: val[k]?.status === 'suspendida' ? 'suspendida' : 'activa',
-          createdAt: typeof val[k]?.createdAt === 'number' ? val[k].createdAt : Date.now(),
-          updatedAt: val[k]?.updatedAt,
-          createdBy: val[k]?.createdBy,
-        }));
+        const list: Organization[] = Object.keys(val).map((k) => mapRTDBOrganization(k, val[k]));
         if (!list.some((o) => o.id === DEFAULT_ORGANIZATION.id)) {
           list.unshift(DEFAULT_ORGANIZATION);
         }
@@ -3322,34 +3946,74 @@ export function subscribeToRTDBOrganizations(
 export async function saveOrganizationToRTDB(
   org: Organization,
   actingUser: UserProfile
-): Promise<void> {
-  if (actingUser.role !== 'superadmin') {
-    throw new Error('Solo el SuperAdministrador puede crear o editar organizaciones.');
-  }
+): Promise<Organization> {
+  assertActiveSession(actingUser);
   const cleanId = org.id.trim().replace(/[^a-zA-Z0-9_-]/g, '_');
-  await set(ref(rtdb, `organizaciones/${cleanId}`), {
+  if (!cleanId) {
+    throw new Error('El identificador de la organización es inválido.');
+  }
+  const cleanName = org.name.trim();
+  if (cleanName.length < 2 || cleanName.length > 160) {
+    throw new Error('El nombre comercial de la empresa debe tener entre 2 y 160 caracteres.');
+  }
+
+  const orgRef = ref(rtdb, `organizaciones/${cleanId}`);
+  const existingSnap = await get(orgRef).catch(() => null);
+  const existingOrg = existingSnap?.exists()
+    ? mapRTDBOrganization(cleanId, existingSnap.val())
+    : null;
+
+  const permCheck = canCreateOrEditOrganization(actingUser, existingOrg);
+  if (!permCheck.allowed) {
+    throw new Error(permCheck.reason || 'Permisos insuficientes para guardar la organización.');
+  }
+
+  const ownerUid =
+    existingOrg?.ownerUid || org.ownerUid || actingUser.id || auth.currentUser?.uid || '';
+  const ownerEmail =
+    existingOrg?.ownerEmail || org.ownerEmail || actingUser.email || '';
+
+  const payload: Organization & { ownerUid: string } = {
     id: cleanId,
-    name: org.name.trim(),
+    name: cleanName,
     rut: org.rut?.trim() || '',
     industry: org.industry?.trim() || 'Minería',
     status: org.status || 'activa',
-    createdAt: org.createdAt || Date.now(),
+    createdAt: existingOrg?.createdAt || org.createdAt || Date.now(),
     updatedAt: Date.now(),
-    createdBy: actingUser.email || actingUser.name,
-  });
+    createdBy: existingOrg?.createdBy || actingUser.email || actingUser.name,
+    ownerId: ownerUid,
+    ownerUid,
+    ownerEmail,
+  };
+
+  await set(orgRef, payload);
+  return payload;
 }
 
 export async function deleteOrganizationFromRTDB(
   orgId: string,
   actingUser: UserProfile
 ): Promise<void> {
-  if (actingUser.role !== 'superadmin') {
-    throw new Error('Solo el SuperAdministrador puede eliminar organizaciones.');
-  }
+  assertActiveSession(actingUser);
   if (orgId === DEFAULT_ORGANIZATION.id) {
     throw new Error('No se puede eliminar la organización principal por defecto.');
   }
-  await remove(ref(rtdb, `organizaciones/${orgId}`));
+  const orgRef = ref(rtdb, `organizaciones/${orgId}`);
+  const existingSnap = await get(orgRef).catch(() => null);
+  const existingOrg: Organization | null = existingSnap?.exists()
+    ? mapRTDBOrganization(orgId, existingSnap.val())
+    : {
+        id: orgId,
+        name: orgId,
+        status: 'activa',
+        createdAt: 0,
+      };
+  const check = canDeleteOrganization(actingUser, existingOrg);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Permisos insuficientes para eliminar esta organización.');
+  }
+  await remove(orgRef);
 }
 
 /**
@@ -3725,6 +4389,217 @@ export async function deleteAlertAttachment(attachment: AlertAttachment): Promis
   }
   await remove(ref(rtdb, `adjuntos/${attachment.id}`));
 }
+
+/**
+ * ============================================================================
+ * CARGA MASIVA DE DATOS POR EMPRESA (ADMIN Y SUPERADMIN)
+ * ============================================================================
+ */
+export interface BulkImportExecutionResult {
+  total: number;
+  succeeded: number;
+  failed: number;
+  createdOrganization?: Organization;
+  createdUsers: UserProfile[];
+  createdSites: MiningSite[];
+  createdRentals: DeviceRental[];
+  createdAssignments: WorkerAssignment[];
+  errors: Array<{ section: string; label: string; reason: string }>;
+}
+
+export async function executeBulkCompanyImport(params: {
+  actingUser: UserProfile;
+  targetOrgId: string;
+  organizations?: Organization[];
+  registeredDevices?: RegisteredDeviceConfig[];
+  organizationToCreate?: Omit<Organization, 'createdAt'>;
+  users?: BulkUserImportItem[];
+  sites?: BulkSiteImportItem[];
+  rentals?: BulkRentalImportItem[];
+  assignments?: BulkAssignmentImportItem[];
+  createAuthAccounts?: boolean;
+  defaultAuthPassword?: string;
+  sendResetEmail?: boolean;
+  onProgress?: (completed: number, total: number, currentLabel: string) => void;
+}): Promise<BulkImportExecutionResult> {
+  assertActiveSession(params.actingUser);
+  if (params.actingUser.role !== 'superadmin' && params.actingUser.role !== 'admin') {
+    throw new Error('Solo Administradores o SuperAdministrador pueden ejecutar cargas masivas.');
+  }
+
+  let effectiveOrgs = [...(params.organizations || [])];
+  let resolvedOrgId = params.targetOrgId;
+  let createdOrganization: Organization | undefined;
+
+  const users = params.users || [];
+  const sites = params.sites || [];
+  const rentals = params.rentals || [];
+  const assignments = params.assignments || [];
+  const total =
+    (params.organizationToCreate ? 1 : 0) +
+    users.length +
+    sites.length +
+    rentals.length +
+    assignments.length;
+
+  let completed = 0;
+  const errors: BulkImportExecutionResult['errors'] = [];
+  const createdUsers: UserProfile[] = [];
+  const createdSites: MiningSite[] = [];
+  const createdRentals: DeviceRental[] = [];
+  const createdAssignments: WorkerAssignment[] = [];
+
+  if (params.organizationToCreate) {
+    params.onProgress?.(completed, total, `Empresa: ${params.organizationToCreate.name}`);
+    createdOrganization = await saveOrganizationToRTDB(
+      {
+        ...params.organizationToCreate,
+        createdAt: Date.now(),
+      },
+      params.actingUser
+    );
+    resolvedOrgId = createdOrganization.id;
+    effectiveOrgs = [createdOrganization, ...effectiveOrgs.filter((o) => o.id !== createdOrganization!.id)];
+    completed += 1;
+  } else {
+    const authOrgs = await resolveAuthorizedOrganizationsForActor(
+      params.actingUser,
+      resolvedOrgId,
+      effectiveOrgs
+    );
+    if (!isOrgAuthorizedForUser(params.actingUser, resolvedOrgId, authOrgs)) {
+      throw new Error(
+        `Acción denegada: no tienes permisos para cargar datos masivos en la organización "${resolvedOrgId}".`
+      );
+    }
+    if (authOrgs) effectiveOrgs = authOrgs;
+  }
+
+  for (let i = 0; i < users.length; i++) {
+    const item = users[i];
+    const label = `${item.name} (${item.email})`;
+    params.onProgress?.(completed, total, `Usuario: ${label}`);
+    try {
+      const authPassword = item.password || params.defaultAuthPassword || '';
+      if (params.createAuthAccounts && authPassword.length >= 6) {
+        const created = await createUserAccountByAdmin({
+          name: item.name,
+          email: item.email,
+          password: authPassword,
+          role: item.role,
+          rut: item.rut,
+          shift: item.shift,
+          assignedSector: item.assignedSector,
+          assignedDeviceCode: item.assignedDeviceCode,
+          organizationId: resolvedOrgId,
+          organizations: effectiveOrgs,
+          sendResetEmail: Boolean(params.sendResetEmail),
+          actingUser: params.actingUser,
+        });
+        createdUsers.push(created);
+      } else {
+        const profile = buildCompanyUserProfile(item, resolvedOrgId, i);
+        await addUserToRTDB(profile, params.actingUser, effectiveOrgs);
+        createdUsers.push(profile);
+      }
+    } catch (err: any) {
+      errors.push({
+        section: 'Usuarios',
+        label,
+        reason: err?.message || 'Error al registrar usuario en Firebase.',
+      });
+    }
+    completed += 1;
+  }
+
+  for (let i = 0; i < sites.length; i++) {
+    const item = sites[i];
+    const scopedSite: MiningSite = {
+      ...item.site,
+      organizationId: resolvedOrgId,
+    };
+    params.onProgress?.(completed, total, `Faena: ${scopedSite.name}`);
+    const res = await saveSiteToRTDB(scopedSite);
+    if (res.savedToRTDB) {
+      createdSites.push(scopedSite);
+    } else {
+      errors.push({
+        section: 'Faenas',
+        label: scopedSite.name,
+        reason: res.error || 'No se pudo persistir la faena en Firebase RTDB.',
+      });
+    }
+    completed += 1;
+  }
+
+  for (let i = 0; i < rentals.length; i++) {
+    const item = rentals[i];
+    const rentalPayload: DeviceRental = {
+      ...item.rental,
+      id: item.rental.contractNumber,
+      organizationId: resolvedOrgId,
+    };
+    params.onProgress?.(completed, total, `Contrato: ${rentalPayload.contractNumber}`);
+    try {
+      await addRentalContractToRTDB(
+        rentalPayload,
+        params.actingUser,
+        params.registeredDevices,
+        effectiveOrgs
+      );
+      createdRentals.push(rentalPayload);
+    } catch (err: any) {
+      errors.push({
+        section: 'Contratos',
+        label: rentalPayload.contractNumber,
+        reason: err?.message || 'Error al guardar contrato en RTDB.',
+      });
+    }
+    completed += 1;
+  }
+
+  for (let i = 0; i < assignments.length; i++) {
+    const item = assignments[i];
+    const assignmentPayload: WorkerAssignment = {
+      ...item.assignment,
+      id: `asg-${Date.now()}-${i}-${Math.random().toString(36).slice(2, 6)}`,
+      organizationId: resolvedOrgId,
+    };
+    params.onProgress?.(completed, total, `Asignación: ${assignmentPayload.workerName}`);
+    try {
+      await saveAssignmentToRTDB(assignmentPayload);
+      createdAssignments.push(assignmentPayload);
+    } catch (err: any) {
+      errors.push({
+        section: 'Asignaciones',
+        label: assignmentPayload.workerName,
+        reason: err?.message || 'Error al guardar asignación en RTDB.',
+      });
+    }
+    completed += 1;
+  }
+
+  params.onProgress?.(total, total, 'Finalizado');
+  const succeeded =
+    (createdOrganization ? 1 : 0) +
+    createdUsers.length +
+    createdSites.length +
+    createdRentals.length +
+    createdAssignments.length;
+
+  return {
+    total,
+    succeeded,
+    failed: errors.length,
+    createdOrganization,
+    createdUsers,
+    createdSites,
+    createdRentals,
+    createdAssignments,
+    errors,
+  };
+}
+
 
 
 

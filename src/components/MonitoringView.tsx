@@ -20,12 +20,13 @@ import {
   Sliders,
   X
 } from 'lucide-react';
-import { SensorDevice, MiningSite, AlertSeverity } from '../types';
+import { SensorDevice, MiningSite, AlertSeverity, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
 
 interface MonitoringViewProps {
   devices: SensorDevice[];
   currentSite: MiningSite;
+  currentUser?: UserProfile | null;
   selectedSensorId: string | null;
   onSelectSensor: (sensorId: string | null) => void;
   onSimulateGasSpike: (sensorId: string) => void;
@@ -35,11 +36,14 @@ interface MonitoringViewProps {
 export const MonitoringView: React.FC<MonitoringViewProps> = ({
   devices,
   currentSite,
+  currentUser,
   selectedSensorId,
   onSelectSensor,
   onSimulateGasSpike,
   onResetSensor,
 }) => {
+  const canSimulateEvents =
+    currentUser?.role === 'superadmin' || currentUser?.role === 'admin';
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSector, setSelectedSector] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
@@ -273,7 +277,9 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
 
       {filteredDevices.length === 0 && (
         <div className="p-12 text-center bg-slate-900/40 rounded-xl border border-slate-800 text-slate-400 text-sm">
-          No se encontraron dispositivos que coincidan con los filtros aplicados.
+          {devices.length === 0
+            ? 'Esta empresa aún no tiene dispositivos IoT asignados o activos.'
+            : 'No se encontraron dispositivos que coincidan con los filtros aplicados.'}
         </div>
       )}
 
@@ -358,32 +364,34 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               </div>
             </div>
 
-            {/* Test Simulation Controls */}
-            <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
-              <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
-                <Sliders className="w-4 h-4 text-cyan-400" />
-                Simulador de Eventos de Seguridad (Testing de Telemetría)
-              </h4>
-              <p className="text-xs text-slate-400">
-                Permite forzar condiciones ambientales anómalas en este dispositivo para validar la respuesta inmediata del sistema de alertas.
-              </p>
-              <div className="flex flex-wrap items-center gap-2 pt-2">
-                <button
-                  onClick={() => onSimulateGasSpike(selectedDevice.id)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition-colors"
-                >
-                  <Flame className="w-3.5 h-3.5" />
-                  Simular Alza de Monóxido (CO 52 ppm)
-                </button>
-                <button
-                  onClick={() => onResetSensor(selectedDevice.id)}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
-                >
-                  <RotateCcw className="w-3.5 h-3.5" />
-                  Restablecer a Valores Nominales
-                </button>
+            {/* Test Simulation Controls (Solo SuperAdmin / Admin) */}
+            {canSimulateEvents && (
+              <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
+                  <Sliders className="w-4 h-4 text-cyan-400" />
+                  Simulador de Eventos de Seguridad (Testing de Telemetría)
+                </h4>
+                <p className="text-xs text-slate-400">
+                  Permite forzar condiciones ambientales anómalas en este dispositivo para validar la respuesta inmediata del sistema de alertas.
+                </p>
+                <div className="flex flex-wrap items-center gap-2 pt-2">
+                  <button
+                    onClick={() => onSimulateGasSpike(selectedDevice.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition-colors"
+                  >
+                    <Flame className="w-3.5 h-3.5" />
+                    Simular Alza de Monóxido (CO 52 ppm)
+                  </button>
+                  <button
+                    onClick={() => onResetSensor(selectedDevice.id)}
+                    className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
+                  >
+                    <RotateCcw className="w-3.5 h-3.5" />
+                    Restablecer a Valores Nominales
+                  </button>
+                </div>
               </div>
-            </div>
+            )}
 
             {/* Modal Actions */}
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">

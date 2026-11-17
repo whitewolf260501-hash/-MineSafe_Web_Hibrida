@@ -31,11 +31,13 @@ import {
   Building2,
   Box,
   Router,
-  BookOpen
+  BookOpen,
+  Eye
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import { isTabVisibleForUser } from '../services/firebase';
+import { DEFAULT_ORGANIZATION_ID } from '../utils/accessControl';
 
 interface NavbarProps {
   currentTab: NavigationTab;
@@ -61,6 +63,7 @@ interface NavbarProps {
   organizations?: Organization[];
   activeOrganizationId?: string;
   onSelectOrganization?: (orgId: string) => void;
+  siteBadgeName?: string;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({
@@ -87,6 +90,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   organizations = [],
   activeOrganizationId = 'all',
   onSelectOrganization,
+  siteBadgeName,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(soundAlert.getMutedState());
@@ -101,11 +105,15 @@ export const Navbar: React.FC<NavbarProps> = ({
     setIsMuted(muted);
     if (!muted) soundAlert.playFeedbackBeep();
   };
+  const isOperador = currentUser.role === 'operador';
   const isSuperOrAdmin = currentUser.role === 'superadmin' || currentUser.role === 'admin';
   const showHardwareControls =
-    isSuperAdmin || (platformConfig?.appearance?.allowHardwareControlsForNonSuperAdmin ?? true);
+    isSuperAdmin ||
+    (currentUser.role === 'admin' &&
+      (platformConfig?.appearance?.allowHardwareControlsForNonSuperAdmin ?? true));
   const showEmergencyButton =
-    isSuperOrAdmin || (platformConfig?.appearance?.allowEmergencyButtonForOperador ?? true);
+    !isOperador &&
+    (isSuperOrAdmin || (platformConfig?.appearance?.allowEmergencyButtonForOperador ?? true));
 
   const allStandardLinks: { id: NavigationTab; label: string; shortLabel: string; icon: React.ReactNode; badge?: number }[] = [
     { id: 'dashboard', label: 'Dashboard', shortLabel: 'Dashboard', icon: <Activity className="w-4 h-4 shrink-0" /> },
@@ -132,6 +140,7 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'reportes', label: 'Historial y Reportes', shortLabel: 'Reportes', icon: <FileText className="w-4 h-4 shrink-0" /> },
     { id: 'faenas', label: 'Faenas y Sectores', shortLabel: 'Sectores', icon: <MapPin className="w-4 h-4 shrink-0" /> },
     { id: 'usuarios', label: 'Usuarios y Roles', shortLabel: 'Usuarios', icon: <Users className="w-4 h-4 shrink-0" /> },
+    { id: 'empresas', label: 'Empresas y Carga', shortLabel: 'Empresas', icon: <Building2 className="w-4 h-4 shrink-0 text-cyan-400" /> },
     {
       id: 'visor_3d',
       label: 'Inspector 3D',
@@ -182,6 +191,13 @@ export const Navbar: React.FC<NavbarProps> = ({
           badgeText: 'Admin',
           icon: <Shield className="w-3 h-3 text-cyan-400" />
         };
+      case 'monotoriador':
+        return {
+          bg: 'bg-emerald-950/80 border-emerald-800 text-emerald-200',
+          avatarBg: 'bg-emerald-900 text-emerald-200 border-emerald-700',
+          badgeText: 'Monotoriador',
+          icon: <Eye className="w-3 h-3 text-emerald-400" />
+        };
       default:
         return {
           bg: 'bg-amber-950/80 border-amber-800 text-amber-200',
@@ -204,7 +220,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           {/* ZONE 1: BRAND WORDMARK & RTDB STATUS */}
           <div className="flex items-center gap-3 shrink-0">
             <button 
-              onClick={() => onSelectTab('dashboard')} 
+              onClick={() => onSelectTab(isOperador ? 'alertas' : 'dashboard')} 
               className="flex items-center gap-2 text-left group focus:outline-none focus-visible:ring-2 focus-visible:ring-cyan-500 rounded-md"
             >
               <div className="w-8 h-8 rounded-lg bg-gradient-to-br from-cyan-500 to-blue-700 flex items-center justify-center text-white shadow-md shadow-cyan-500/20 group-hover:scale-105 transition-transform duration-150 shrink-0">
@@ -231,19 +247,21 @@ export const Navbar: React.FC<NavbarProps> = ({
             
             {/* Quick Hardware & Simulation Control Group */}
             <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800 shrink-0">
-              {/* Simulation stream toggle */}
-              <button
-                onClick={onToggleSimulation}
-                title={isSimulating ? 'Pausar simulación IoT' : 'Activar simulación IoT'}
-                className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded-md border transition-colors shrink-0 ${
-                  isSimulating 
-                    ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60 hover:bg-emerald-900/50' 
-                    : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
-                }`}
-              >
-                <span className={`w-2 h-2 rounded-full shrink-0 ${isSimulating ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                <span className="text-[11px] font-medium">{isSimulating ? 'En Vivo' : 'Pausado'}</span>
-              </button>
+              {/* Simulation stream toggle (solo SuperAdmin / Admin) */}
+              {isSuperOrAdmin && (
+                <button
+                  onClick={onToggleSimulation}
+                  title={isSimulating ? 'Pausar simulación IoT' : 'Activar simulación IoT'}
+                  className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded-md border transition-colors shrink-0 ${
+                    isSimulating 
+                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60 hover:bg-emerald-900/50' 
+                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
+                  }`}
+                >
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${isSimulating ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
+                  <span className="text-[11px] font-medium">{isSimulating ? 'En Vivo' : 'Pausado'}</span>
+                </button>
+              )}
 
               {/* Manual refresh button */}
               <button
@@ -354,25 +372,29 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {/* Organization Switcher for SuperAdmin */}
-            {isSuperAdmin && organizations.length > 0 && onSelectOrganization && (
-              <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-800 bg-slate-900/90 text-xs shrink-0">
-                <Building2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                <select
-                  value={activeOrganizationId}
-                  onChange={(e) => onSelectOrganization(e.target.value)}
-                  aria-label="Seleccionar Organización"
-                  className="bg-transparent text-slate-200 text-[11px] font-semibold focus:outline-none max-w-[140px]"
-                >
-                  <option value="all" className="bg-slate-950 text-white">Todas las Org.</option>
-                  {organizations.map((org) => (
-                    <option key={org.id} value={org.id} className="bg-slate-950 text-white">
-                      {org.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+            {/* Organization Switcher for SuperAdmin or Multi-Org Admin */}
+            {(isSuperAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+              organizations.length > 0 &&
+              onSelectOrganization && (
+                <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-800 bg-slate-900/90 text-xs shrink-0">
+                  <Building2 className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <select
+                    value={activeOrganizationId}
+                    onChange={(e) => onSelectOrganization(e.target.value)}
+                    aria-label="Seleccionar Organización"
+                    className="bg-transparent text-slate-200 text-[11px] font-semibold focus:outline-none max-w-[140px]"
+                  >
+                    {isSuperAdmin && (
+                      <option value="all" className="bg-slate-950 text-white">Todas las Org.</option>
+                    )}
+                    {organizations.map((org) => (
+                      <option key={org.id} value={org.id} className="bg-slate-950 text-white">
+                        {org.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
 
             {/* Divider */}
             <div className="h-5 w-px bg-slate-800" />
@@ -500,7 +522,17 @@ export const Navbar: React.FC<NavbarProps> = ({
           <div className="hidden lg:flex items-center gap-3 shrink-0 pl-2">
             <div className="flex items-center gap-2 text-[11px] text-slate-400 font-mono">
               <span className="w-1.5 h-1.5 rounded-full bg-cyan-400" />
-              <span>{platformConfig?.appearance?.siteBadgeText || 'Faena El Teniente · Nivel -510m'}</span>
+              <span>
+                {activeOrganizationId &&
+                activeOrganizationId !== 'all' &&
+                activeOrganizationId !== DEFAULT_ORGANIZATION_ID
+                  ? siteBadgeName ||
+                    organizations.find((o) => o.id === activeOrganizationId)?.name ||
+                    activeOrganizationId
+                  : platformConfig?.appearance?.siteBadgeText ||
+                    siteBadgeName ||
+                    'Faena El Teniente · Nivel -510m'}
+              </span>
             </div>
           </div>
         </div>
@@ -540,24 +572,28 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <div className="pt-3 border-t border-slate-800 flex flex-col gap-2">
-            {isSuperAdmin && organizations.length > 0 && onSelectOrganization && (
-              <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
-                <Building2 className="w-4 h-4 text-cyan-400 shrink-0" />
-                <select
-                  value={activeOrganizationId}
-                  onChange={(e) => onSelectOrganization(e.target.value)}
-                  aria-label="Organización activa"
-                  className="w-full bg-transparent text-slate-200 font-semibold focus:outline-none"
-                >
-                  <option value="all" className="bg-slate-950 text-white">Todas las Organizaciones</option>
-                  {organizations.map((org) => (
-                    <option key={org.id} value={org.id} className="bg-slate-950 text-white">
-                      {org.name}
-                    </option>
-                  ))}
-                </select>
-              </div>
-            )}
+            {(isSuperAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+              organizations.length > 0 &&
+              onSelectOrganization && (
+                <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
+                  <Building2 className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <select
+                    value={activeOrganizationId}
+                    onChange={(e) => onSelectOrganization(e.target.value)}
+                    aria-label="Organización activa"
+                    className="w-full bg-transparent text-slate-200 font-semibold focus:outline-none"
+                  >
+                    {isSuperAdmin && (
+                      <option value="all" className="bg-slate-950 text-white">Todas las Organizaciones</option>
+                    )}
+                    {organizations.map((org) => (
+                      <option key={org.id} value={org.id} className="bg-slate-950 text-white">
+                        {org.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
             <div className="flex items-center justify-between">
               <button
                 onClick={() => {

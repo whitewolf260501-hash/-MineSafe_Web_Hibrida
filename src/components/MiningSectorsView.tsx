@@ -16,11 +16,13 @@ import {
   X,
   HardHat,
   Sparkles,
+  Lock,
 } from 'lucide-react';
 import {
   MiningSite,
   MiningSector,
   NavigationTab,
+  UserProfile,
   WorkerAssignment,
 } from '../types';
 import { EXTERNAL_WEATHER } from '../data/mockData';
@@ -36,6 +38,7 @@ interface MiningSectorsViewProps {
   currentSite: MiningSite;
   allSites: MiningSite[];
   assignments?: WorkerAssignment[];
+  currentUser?: UserProfile | null;
   activeOrganizationId?: string;
   onSelectSite: (siteId: string) => void;
   onAddSite: (newSite: MiningSite) => void;
@@ -83,12 +86,15 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
   currentSite,
   allSites,
   assignments = [],
+  currentUser,
   activeOrganizationId,
   onSelectSite,
   onAddSite,
   onUpdateSite,
   onNavigateTab,
 }) => {
+  const canManageSites =
+    currentUser?.role === 'superadmin' || currentUser?.role === 'admin';
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
@@ -549,61 +555,98 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5">
-            {/* Faena Selector (Ingresadas + Precargadas de Chile) */}
-            <select
-              value={currentSite.id}
-              onChange={(e) => handleHeaderSiteSelect(e.target.value)}
-              className="px-3 py-1.5 text-xs font-semibold bg-slate-950 border border-cyan-800/80 rounded-lg text-cyan-300 focus:outline-none max-w-xs sm:max-w-sm"
-            >
-              <optgroup label={`Faenas Ingresadas y Activas (${allSites.length})`}>
-                {allSites.map((site) => (
-                  <option key={site.id} value={site.id}>
-                    {site.isPreloaded ? '★ ' : ''}
-                    {site.name} · {site.activeSectors.length} sectores
-                  </option>
-                ))}
-              </optgroup>
-              {availablePresetsToQuickLoad.length > 0 && (
-                <optgroup label="Cargar Faena Precargada de Chile (+)">
-                  {availablePresetsToQuickLoad.map((preset) => (
-                    <option key={preset.id} value={`__preset__::${preset.id}`}>
-                      + Precargar: {preset.name} ({preset.comuna}, {preset.region})
+            {/* Faena Selector (Solo faenas de la empresa; precargas solo para Admin/SuperAdmin) */}
+            {allSites.length > 0 && (
+              <select
+                value={currentSite.id}
+                onChange={(e) => handleHeaderSiteSelect(e.target.value)}
+                className="px-3 py-1.5 text-xs font-semibold bg-slate-950 border border-cyan-800/80 rounded-lg text-cyan-300 focus:outline-none max-w-xs sm:max-w-sm"
+              >
+                <optgroup label={`Faenas de la Empresa (${allSites.length})`}>
+                  {allSites.map((site) => (
+                    <option key={site.id} value={site.id}>
+                      {site.isPreloaded ? '★ ' : ''}
+                      {site.name} · {site.activeSectors.length} sectores
                     </option>
                   ))}
                 </optgroup>
-              )}
-            </select>
+                {canManageSites && availablePresetsToQuickLoad.length > 0 && (
+                  <optgroup label="Cargar Faena Precargada de Chile (+)">
+                    {availablePresetsToQuickLoad.map((preset) => (
+                      <option key={preset.id} value={`__preset__::${preset.id}`}>
+                        + Precargar: {preset.name} ({preset.comuna}, {preset.region})
+                      </option>
+                    ))}
+                  </optgroup>
+                )}
+              </select>
+            )}
 
-            <button
-              type="button"
-              onClick={openAddSectorModal}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800/70 rounded-lg transition-colors whitespace-nowrap"
-            >
-              <Layers className="w-3.5 h-3.5" />
-              + Crear Sector
-            </button>
+            {canManageSites ? (
+              <>
+                {allSites.length > 0 && (
+                  <>
+                    <button
+                      type="button"
+                      onClick={openAddSectorModal}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-cyan-800/70 rounded-lg transition-colors whitespace-nowrap"
+                    >
+                      <Layers className="w-3.5 h-3.5" />
+                      + Crear Sector
+                    </button>
 
-            <button
-              type="button"
-              onClick={() => openAssignCrewModal()}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors whitespace-nowrap"
-            >
-              <Users className="w-3.5 h-3.5" />
-              Asignar Cuadrilla
-            </button>
+                    <button
+                      type="button"
+                      onClick={() => openAssignCrewModal()}
+                      className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors whitespace-nowrap"
+                    >
+                      <Users className="w-3.5 h-3.5" />
+                      Asignar Cuadrilla
+                    </button>
+                  </>
+                )}
 
-            <button
-              type="button"
-              onClick={() => setShowAddSiteModal(true)}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors whitespace-nowrap"
-            >
-              <Plus className="w-4 h-4" />
-              Nueva Faena
-            </button>
+                <button
+                  type="button"
+                  onClick={() => setShowAddSiteModal(true)}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors whitespace-nowrap"
+                >
+                  <Plus className="w-4 h-4" />
+                  Nueva Faena
+                </button>
+              </>
+            ) : (
+              <span className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-slate-950 border border-slate-800 rounded-lg text-slate-400">
+                <Lock className="w-3.5 h-3.5 text-amber-400" />
+                Solo lectura (Operación)
+              </span>
+            )}
           </div>
         </div>
 
-        {/* Site Details Card */}
+        {allSites.length === 0 ? (
+          <div className="p-8 bg-slate-950/70 rounded-xl border border-slate-800 text-center space-y-3">
+            <Building2 className="w-10 h-10 text-slate-600 mx-auto" />
+            <h2 className="text-sm font-bold text-white">
+              Sin faenas mineras registradas para esta empresa
+            </h2>
+            <p className="text-xs text-slate-400 max-w-md mx-auto">
+              {canManageSites
+                ? 'Esta empresa aún no tiene faenas ni sectores cargados. Registra la primera faena o realiza una carga masiva desde Empresas y Carga.'
+                : 'La administración de tu empresa aún no ha registrado faenas o sectores operativos.'}
+            </p>
+            {canManageSites && (
+              <button
+                type="button"
+                onClick={() => setShowAddSiteModal(true)}
+                className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
+              >
+                <Plus className="w-4 h-4" />
+                Registrar Primera Faena
+              </button>
+            )}
+          </div>
+        ) : (
         <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 p-3.5 bg-slate-950/70 rounded-lg border border-slate-800 text-xs">
           <div>
             <span className="text-slate-400 block text-[10px]">Empresa Minera Titular:</span>
@@ -634,6 +677,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
             </span>
           </div>
         </div>
+        )}
       </div>
 
       {/* Surface Weather vs Underground Atmospheric Influence */}
@@ -701,14 +745,16 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
               <span className="text-xs text-slate-400 font-mono">
                 {currentSite.activeSectors.length} Sectores Instrumentados
               </span>
-              <button
-                type="button"
-                onClick={openAddSectorModal}
-                className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 rounded-lg transition-colors"
-              >
-                <Plus className="w-3.5 h-3.5" />
-                Agregar Sectores
-              </button>
+              {canManageSites && allSites.length > 0 && (
+                <button
+                  type="button"
+                  onClick={openAddSectorModal}
+                  className="inline-flex items-center gap-1 px-2.5 py-1 text-[11px] font-semibold bg-cyan-950/80 hover:bg-cyan-900 text-cyan-300 border border-cyan-800 rounded-lg transition-colors"
+                >
+                  <Plus className="w-3.5 h-3.5" />
+                  Agregar Sectores
+                </button>
+              )}
             </div>
           </div>
 
@@ -840,14 +886,16 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
                       <span className="text-slate-400 text-[10px] uppercase font-bold">
                         Cuadrillas Asignadas a este Sector
                       </span>
-                      <button
-                        type="button"
-                        onClick={() => openAssignCrewModal([selectedSector.id])}
-                        className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
-                      >
-                        <Plus className="w-3 h-3" />
-                        Asignar
-                      </button>
+                      {canManageSites && (
+                        <button
+                          type="button"
+                          onClick={() => openAssignCrewModal([selectedSector.id])}
+                          className="text-[11px] font-semibold text-emerald-400 hover:text-emerald-300 flex items-center gap-1"
+                        >
+                          <Plus className="w-3 h-3" />
+                          Asignar
+                        </button>
+                      )}
                     </div>
 
                     {(selectedSector.assignedCrews || []).length > 0 ? (
@@ -861,14 +909,16 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
                               <HardHat className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
                               {crew}
                             </span>
-                            <button
-                              type="button"
-                              onClick={() => handleRemoveCrewFromSector(selectedSector.id, crew)}
-                              title="Quitar cuadrilla de este sector"
-                              className="text-slate-400 hover:text-red-400 transition-colors"
-                            >
-                              <X className="w-3.5 h-3.5" />
-                            </button>
+                            {canManageSites && (
+                              <button
+                                type="button"
+                                onClick={() => handleRemoveCrewFromSector(selectedSector.id, crew)}
+                                title="Quitar cuadrilla de este sector"
+                                className="text-slate-400 hover:text-red-400 transition-colors"
+                              >
+                                <X className="w-3.5 h-3.5" />
+                              </button>
+                            )}
                           </div>
                         ))}
                       </div>
@@ -882,14 +932,16 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
               </div>
 
               <div className="pt-4 border-t border-slate-800 space-y-2">
-                <button
-                  type="button"
-                  onClick={() => openAssignCrewModal([selectedSector.id])}
-                  className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white transition-colors flex items-center justify-center gap-1.5"
-                >
-                  <Users className="w-3.5 h-3.5" />
-                  Asignar Cuadrilla (1 o más sectores)
-                </button>
+                {canManageSites && (
+                  <button
+                    type="button"
+                    onClick={() => openAssignCrewModal([selectedSector.id])}
+                    className="w-full py-2 px-3 text-xs font-semibold rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white transition-colors flex items-center justify-center gap-1.5"
+                  >
+                    <Users className="w-3.5 h-3.5" />
+                    Asignar Cuadrilla (1 o más sectores)
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => onNavigateTab('monitoreo')}
@@ -910,7 +962,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
       {/* ===================================================================== */}
       {/* MODAL 1: REGISTRAR NUEVA FAENA MINERA (CON PRECARGA, REGIONES, COMUNAS Y MULTI-SECTOR) */}
       {/* ===================================================================== */}
-      {showAddSiteModal && (
+      {canManageSites && showAddSiteModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm">
           <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full max-h-[90vh] flex flex-col shadow-2xl">
             <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800">

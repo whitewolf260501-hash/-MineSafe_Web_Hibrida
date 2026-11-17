@@ -35,21 +35,35 @@ import {
   resetThresholdConfigToDefault, 
   subscribeToAllThresholdConfigs, 
   subscribeToAlertEvents,
-  DEFAULT_GLOBAL_THRESHOLDS
+  DEFAULT_GLOBAL_THRESHOLDS,
+  DEFAULT_ORGANIZATION,
+  RTDBSubscriptionScope
 } from '../services/firebase';
 import { alertEngine } from '../services/alertEngine';
 
 interface AlertConfigurationViewProps {
   devices: SensorDevice[];
   currentUser: UserProfile;
+  activeOrganizationId?: string;
 }
 
 export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
   devices,
-  currentUser
+  currentUser,
+  activeOrganizationId
 }) => {
-  // Dispositivo seleccionado ('global' o id de dispositivo)
-  const [selectedTargetId, setSelectedTargetId] = useState<string>('global');
+  const isSuperAdmin = currentUser.role === 'superadmin';
+  const effectiveOrgId =
+    activeOrganizationId && activeOrganizationId !== 'all'
+      ? activeOrganizationId
+      : isSuperAdmin
+      ? 'all'
+      : currentUser.organizationId || DEFAULT_ORGANIZATION.id;
+
+  // Dispositivo seleccionado ('global' solo para SuperAdmin; otros roles apuntan a dispositivos de su empresa)
+  const [selectedTargetId, setSelectedTargetId] = useState<string>(
+    isSuperAdmin ? 'global' : devices[0]?.id || ''
+  );
   
   // Mapa de todas las configuraciones cargadas de Firebase
   const [configsMap, setConfigsMap] = useState<Record<string, DeviceThresholdsConfig>>({
@@ -77,7 +91,32 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
   // Permisos: Solo SuperAdmin y Admin pueden guardar/restaurar
   const isAuthorized = currentUser.role === 'admin' || currentUser.role === 'superadmin';
 
-  // 1. Suscripción en tiempo real a las configuraciones de Firebase RTDB
+  useEffect(() => {
+    if (!isSuperAdmin) {
+      if (devices.length > 0 && (!selectedTargetId || selectedTargetId === 'global' || !devices.some(d => d.id === selectedTargetId))) {
+        setSelectedTargetId(devices[0].id);
+      } else if (devices.length === 0 && selectedTargetId !== '') {
+        setSelectedTargetId('');
+      }
+    }
+  }, [isSuperAdmin, devices, selectedTargetId]);
+
+  const deviceIdsKey = useMemo(
+    () => devices.map((d) => d.id).sort().join(','),
+    [devices]
+  );
+
+  const subscriptionScope = useMemo<RTDBSubscriptionScope>(
+    () => ({
+      role: currentUser.role,
+      uid: currentUser.id,
+      organizationId: effectiveOrgId,
+      deviceIds: deviceIdsKey ? deviceIdsKey.split(',').filter(Boolean) : [],
+    }),
+    [currentUser.role, currentUser.id, effectiveOrgId, deviceIdsKey]
+  );
+
+  // 1. Suscripción en tiempo real acotada a las configuraciones permitidas en Firebase RTDB
   useEffect(() => {
     const unsub = subscribeToAllThresholdConfigs((allConfigs) => {
       setConfigsMap(allConfigs);
@@ -90,18 +129,18 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
           alertEngine.setDeviceConfig(id, allConfigs[id]);
         }
       });
-    });
+    }, subscriptionScope);
 
     return () => unsub();
-  }, []);
+  }, [subscriptionScope]);
 
-  // 2. Suscripción a la bitácora de eventos de umbrales
+  // 2. Suscripción a la bitácora de eventos de umbrales acotada a la organización
   useEffect(() => {
     const unsub = subscribeToAlertEvents((events) => {
       setEventLogs(events);
-    });
+    }, subscriptionScope);
     return () => unsub();
-  }, []);
+  }, [subscriptionScope]);
 
   // 3. Cuando cambia el dispositivo seleccionado o el mapa de configuraciones, cargar los datos en el editor
   useEffect(() => {
@@ -175,12 +214,21 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
       return;
     }
 
+    if (!selectedTargetId) {
+      setErrorMessage('Esta empresa aún no tiene dispositivos registrados para configurar umbrales.');
+      return;
+    }
+
     setIsSaving(true);
     setErrorMessage(null);
     setSaveSuccessMessage(null);
 
     try {
-      await saveThresholdConfig(selectedTargetId, currentConfig, currentUser);
+      const targetDevice = devices.find((d) => d.id === selectedTargetId);
+      const targetOrgId =
+        targetDevice?.organizationId ||
+        (effectiveOrgId !== 'all' ? effectiveOrgId : currentUser.organizationId);
+      await saveThresholdConfig(selectedTargetId, currentConfig, currentUser, targetOrgId);
       
       // Actualizar en el motor local inmediatamente
       if (selectedTargetId === 'global') {
@@ -200,7 +248,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
 
   // Restaurar valores por defecto de fábrica
   const handleConfirmReset = async () => {
-    if (!isAuthorized) return;
+    if (!isAuthorized || !selectedTargetId) return;
     setIsResetting(true);
     setShowResetConfirmModal(false);
 
@@ -221,15 +269,18 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
     }
   };
 
-  // Filtrado de eventos de umbral
+  // Filtrado de eventos de umbral (acotado por organización activa)
   const filteredEvents = useMemo(() => {
     return eventLogs.filter((evt) => {
+      if (effectiveOrgId !== 'all' && (evt.organizationId || DEFAULT_ORGANIZATION.id) !== effectiveOrgId) {
+        return false;
+      }
       if (filterVariable !== 'all' && evt.variable !== filterVariable) return false;
       if (filterSeverity !== 'all' && evt.nivel !== filterSeverity) return false;
       if (filterStatus !== 'all' && evt.estado !== filterStatus) return false;
       return true;
     });
-  }, [eventLogs, filterVariable, filterSeverity, filterStatus]);
+  }, [eventLogs, effectiveOrgId, filterVariable, filterSeverity, filterStatus]);
 
   // Metadatos de cada variable para el renderizado
   const variablesMetadata: Array<{
@@ -357,13 +408,19 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
             onChange={(e) => setSelectedTargetId(e.target.value)}
             className="w-full md:w-80 bg-slate-950 border border-slate-700 rounded-lg px-3 py-2 text-sm text-slate-100 focus:outline-none focus:border-amber-500 font-medium cursor-pointer"
           >
-            <option value="global">🌐 Configuración Global (Todos los Nodos)</option>
+            {isSuperAdmin && (
+              <option value="global">🌐 Configuración Global (Todos los Nodos)</option>
+            )}
             <optgroup label="Dispositivos de Faena Individuales">
-              {devices.map((d) => (
-                <option key={d.id} value={d.id}>
-                  {d.name} ({d.id})
-                </option>
-              ))}
+              {devices.length === 0 ? (
+                <option value="">Sin dispositivos asignados en esta empresa</option>
+              ) : (
+                devices.map((d) => (
+                  <option key={d.id} value={d.id}>
+                    {d.name} ({d.id})
+                  </option>
+                ))
+              )}
             </optgroup>
           </select>
         </div>
@@ -372,7 +429,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
           {/* BOTÓN RESTAURAR VALORES DE FÁBRICA */}
           <button
             type="button"
-            disabled={!isAuthorized || isSaving || isResetting}
+            disabled={!isAuthorized || !selectedTargetId || isSaving || isResetting}
             onClick={() => setShowResetConfirmModal(true)}
             className="flex items-center gap-2 px-3 py-2 bg-slate-800 hover:bg-slate-700 disabled:opacity-40 disabled:cursor-not-allowed text-slate-300 text-xs font-medium rounded-lg border border-slate-700 transition"
             title="Restaurar a valores predeterminados de ejemplo"
@@ -384,7 +441,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
           {/* BOTÓN GUARDAR EN FIREBASE */}
           <button
             type="button"
-            disabled={!isAuthorized || isSaving || hasValidationErrors}
+            disabled={!isAuthorized || !selectedTargetId || isSaving || hasValidationErrors}
             onClick={handleSaveConfig}
             className="flex items-center gap-2 px-4 py-2 bg-amber-500 hover:bg-amber-400 active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed text-slate-950 font-bold text-xs rounded-lg shadow-md shadow-amber-500/20 transition"
           >

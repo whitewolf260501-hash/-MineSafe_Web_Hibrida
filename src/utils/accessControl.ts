@@ -1,14 +1,138 @@
-import { UserProfile, UserRole } from '../types';
+import { MiningSite, Organization, TelemetryVariable, UserProfile, UserRole } from '../types';
 
 export const DEFAULT_ORGANIZATION_ID = 'org-minesafe-principal';
 
+export function isOrganizationOwner(
+  actingUser: UserProfile | null | undefined,
+  org: Pick<Organization, 'id' | 'ownerId' | 'ownerUid' | 'ownerEmail'> | null | undefined
+): boolean {
+  if (!actingUser || actingUser.status !== 'activo' || !org) return false;
+  if (actingUser.role === 'superadmin') return true;
+  if (actingUser.role !== 'admin') return false;
+  if (org.ownerUid && org.ownerUid === actingUser.id) return true;
+  if (org.ownerId && org.ownerId === actingUser.id) return true;
+  if (
+    org.ownerEmail &&
+    actingUser.email &&
+    org.ownerEmail.trim().toLowerCase() === actingUser.email.trim().toLowerCase()
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function getAuthorizedOrganizationIds(
+  actingUser: UserProfile | null | undefined,
+  organizations?: Organization[]
+): string[] {
+  if (!actingUser || actingUser.status !== 'activo') return [];
+  const primaryOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+  if (actingUser.role === 'superadmin') {
+    const allIds = (organizations || []).map((o) => o.id).filter(Boolean);
+    return Array.from(new Set([primaryOrg, ...allIds]));
+  }
+  if (actingUser.role !== 'admin') {
+    return [primaryOrg];
+  }
+  const ownedIds = (organizations || [])
+    .filter((org) => isOrganizationOwner(actingUser, org))
+    .map((org) => org.id);
+  return Array.from(new Set([primaryOrg, ...ownedIds]));
+}
+
+export function isOrgAuthorizedForUser(
+  actingUser: UserProfile | null | undefined,
+  targetOrgId: string | undefined,
+  organizations?: Organization[]
+): boolean {
+  if (!actingUser || actingUser.status !== 'activo') return false;
+  if (actingUser.role === 'superadmin') return true;
+  const normalizedTarget = targetOrgId || DEFAULT_ORGANIZATION_ID;
+  const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+  if (normalizedTarget === actorOrg) return true;
+  if (actingUser.role === 'admin' && Array.isArray(organizations) && organizations.length > 0) {
+    return organizations.some(
+      (org) => org.id === normalizedTarget && isOrganizationOwner(actingUser, org)
+    );
+  }
+  return false;
+}
+
+export function canCreateOrEditOrganization(
+  actingUser: UserProfile | null | undefined,
+  existingOrg?: Organization | null
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa o autorizada.' };
+  }
+  if (actingUser.role === 'superadmin') {
+    return { allowed: true };
+  }
+  if (actingUser.role !== 'admin') {
+    return {
+      allowed: false,
+      reason: 'Solo Administradores o SuperAdministrador pueden crear o administrar empresas.',
+    };
+  }
+  if (!existingOrg) {
+    return { allowed: true };
+  }
+  if (existingOrg.id === DEFAULT_ORGANIZATION_ID) {
+    return {
+      allowed: false,
+      reason: 'Solo el SuperAdministrador puede modificar los datos de la organización principal.',
+    };
+  }
+  if (isOrganizationOwner(actingUser, existingOrg)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: 'Acción denegada: solo puedes editar empresas creadas por tu cuenta.',
+  };
+}
+
+export function canDeleteOrganization(
+  actingUser: UserProfile | null | undefined,
+  org: Organization | null | undefined
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'Sesión no autorizada.' };
+  }
+  if (!org) {
+    return { allowed: false, reason: 'Organización no encontrada.' };
+  }
+  if (org.id === DEFAULT_ORGANIZATION_ID) {
+    return { allowed: false, reason: 'No se puede eliminar la organización principal por defecto.' };
+  }
+  if (actingUser.role === 'superadmin') {
+    return { allowed: true };
+  }
+  if (actingUser.role === 'admin' && isOrganizationOwner(actingUser, org)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: 'Solo el SuperAdministrador o el Administrador propietario puede eliminar esta empresa.',
+  };
+}
+
 export function resolveEffectiveOrgId(
   actingUser: UserProfile | null,
-  selectedOrgId: string
+  selectedOrgId: string,
+  organizations?: Organization[]
 ): string {
   if (!actingUser) return DEFAULT_ORGANIZATION_ID;
   if (actingUser.role === 'superadmin') {
     return selectedOrgId || 'all';
+  }
+  if (
+    actingUser.role === 'admin' &&
+    selectedOrgId &&
+    selectedOrgId !== 'all' &&
+    isOrgAuthorizedForUser(actingUser, selectedOrgId, organizations)
+  ) {
+    return selectedOrgId;
   }
   return actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
 }
@@ -24,7 +148,8 @@ export function belongsToOrganization(
 export function canProvisionUserInOrganization(
   actingUser: UserProfile | null,
   targetOrgId: string,
-  requestedRole: UserRole
+  requestedRole: UserRole,
+  organizations?: Organization[]
 ): { allowed: boolean; reason?: string } {
   if (!actingUser || actingUser.status !== 'activo') {
     return { allowed: false, reason: 'La sesión actual no está activa o autorizada.' };
@@ -38,11 +163,10 @@ export function canProvisionUserInOrganization(
 
   const normalizedTargetOrg = targetOrgId || DEFAULT_ORGANIZATION_ID;
   if (actingUser.role === 'admin') {
-    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
-    if (normalizedTargetOrg !== actorOrg) {
+    if (!isOrgAuthorizedForUser(actingUser, normalizedTargetOrg, organizations)) {
       return {
         allowed: false,
-        reason: 'Un Administrador solo puede asociar usuarios a su propia organización.',
+        reason: 'Un Administrador solo puede asociar usuarios a su organización asignada o a empresas creadas por él.',
       };
     }
   }
@@ -53,7 +177,8 @@ export function canProvisionUserInOrganization(
 export function canModifyTargetUser(
   actingUser: UserProfile | null,
   targetUser: UserProfile,
-  nextRole?: UserRole
+  nextRole?: UserRole,
+  organizations?: Organization[]
 ): { allowed: boolean; reason?: string } {
   if (!actingUser || actingUser.status !== 'activo') {
     return { allowed: false, reason: 'Sesión no autorizada.' };
@@ -72,9 +197,8 @@ export function canModifyTargetUser(
   }
 
   if (actingUser.role === 'admin') {
-    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
     const targetOrg = targetUser.organizationId || DEFAULT_ORGANIZATION_ID;
-    if (actorOrg !== targetOrg) {
+    if (!isOrgAuthorizedForUser(actingUser, targetOrg, organizations)) {
       return {
         allowed: false,
         reason: 'Acción denegada: el usuario pertenece a otra organización.',
@@ -88,7 +212,8 @@ export function canModifyTargetUser(
 export function filterScopedUsers(
   usersList: UserProfile[],
   actingUser: UserProfile | null,
-  effectiveOrgId: string
+  effectiveOrgId: string,
+  organizations?: Organization[]
 ): UserProfile[] {
   if (!actingUser) return [];
   if (actingUser.role === 'superadmin') {
@@ -97,9 +222,9 @@ export function filterScopedUsers(
       (u) => u.role === 'superadmin' || belongsToOrganization(u.organizationId, effectiveOrgId)
     );
   }
-  const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+  const resolvedOrg = resolveEffectiveOrgId(actingUser, effectiveOrgId, organizations);
   return usersList.filter(
-    (u) => u.role !== 'superadmin' && belongsToOrganization(u.organizationId, actorOrg)
+    (u) => u.role !== 'superadmin' && belongsToOrganization(u.organizationId, resolvedOrg)
   );
 }
 
@@ -115,7 +240,8 @@ export function assertActiveSession(user: UserProfile | null | undefined): void 
 
 export function canManageContractsAndPayments(
   actingUser: UserProfile | null | undefined,
-  targetOrgId?: string
+  targetOrgId?: string,
+  organizations?: Organization[]
 ): { allowed: boolean; reason?: string } {
   if (!isUserSessionActive(actingUser)) {
     return { allowed: false, reason: 'La sesión actual está inactiva o cerrada.' };
@@ -127,8 +253,7 @@ export function canManageContractsAndPayments(
     };
   }
   if (actingUser!.role === 'admin' && targetOrgId) {
-    const actorOrg = actingUser!.organizationId || DEFAULT_ORGANIZATION_ID;
-    if ((targetOrgId || DEFAULT_ORGANIZATION_ID) !== actorOrg) {
+    if (!isOrgAuthorizedForUser(actingUser, targetOrgId, organizations)) {
       return {
         allowed: false,
         reason: 'Acción denegada: no puedes gestionar contratos o pagos de otra organización.',
@@ -141,13 +266,231 @@ export function canManageContractsAndPayments(
 export function filterScopedEntities<T extends { organizationId?: string }>(
   items: T[],
   actingUser: UserProfile | null,
-  effectiveOrgId: string
+  effectiveOrgId: string,
+  organizations?: Organization[]
 ): T[] {
   if (!actingUser) return [];
   const targetOrg =
     actingUser.role === 'superadmin'
       ? effectiveOrgId || 'all'
-      : actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+      : resolveEffectiveOrgId(actingUser, effectiveOrgId, organizations);
   return items.filter((item) => belongsToOrganization(item.organizationId, targetOrg));
 }
+
+export function createEmptyTelemetryVariables(): TelemetryVariable[] {
+  return [
+    {
+      id: 'temp',
+      name: 'TEMPERATURA AMBIENTE',
+      shortName: 'Temperatura',
+      value: 0,
+      unit: '°C',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 10,
+      thresholdMax: 26,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+    {
+      id: 'hum',
+      name: 'HUMEDAD RELATIVA',
+      shortName: 'Humedad',
+      value: 0,
+      unit: '%',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 20,
+      thresholdMax: 90,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+    {
+      id: 'co2',
+      name: 'GASES / CO (MQ-2 ADC)',
+      shortName: 'Gas MQ-2',
+      value: 0,
+      unit: 'ADC',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 0,
+      thresholdMax: 800,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+    {
+      id: 'lux',
+      name: 'MATERIAL PARTICULADO (PM2.5 ADC)',
+      shortName: 'Polvo PM2.5',
+      value: 0,
+      unit: 'ADC',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 0,
+      thresholdMax: 750,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+    {
+      id: 'kwh',
+      name: 'BATERÍA DISPOSITIVO IoT',
+      shortName: 'Batería Sensor',
+      value: 0,
+      unit: '%',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 20,
+      thresholdMax: 100,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+    {
+      id: 'air_flow',
+      name: 'FLUJO DE VENTILACIÓN',
+      shortName: 'Ventilación',
+      value: 0,
+      unit: 'm/s',
+      trend: 'estable',
+      status: 'desconectado',
+      statusLabel: 'Sin dispositivo',
+      thresholdMin: 0.5,
+      thresholdMax: 5,
+      lastUpdateSeconds: 0,
+      isSimulated: false,
+      historical: [],
+    },
+  ];
+}
+
+export function resolveScopedCurrentSite(
+  scopedSites: MiningSite[],
+  selectedSiteId: string | undefined,
+  effectiveOrgId: string,
+  orgName?: string
+): MiningSite {
+  if (scopedSites.length > 0) {
+    return scopedSites.find((s) => s.id === selectedSiteId) || scopedSites[0];
+  }
+  const fallbackOrgId = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION_ID : effectiveOrgId;
+  return {
+    id: `site-empty-${fallbackOrgId}`,
+    organizationId: fallbackOrgId,
+    name: 'Sin faena registrada',
+    company:
+      orgName ||
+      (fallbackOrgId === DEFAULT_ORGANIZATION_ID ? 'MineSafe Principal' : fallbackOrgId),
+    location: 'Chile',
+    region: 'Sin asignar',
+    type: 'subterranea',
+    elevationMsl: 0,
+    isPreloaded: false,
+    activeSectors: [],
+  };
+}
+
+export type OrgEmailConflictResult =
+  | { conflict: 'none' }
+  | { conflict: 'active_in_same_org'; existingUser: UserProfile }
+  | { conflict: 'blocked_in_same_org'; existingUser: UserProfile };
+
+export function findUserEmailConflictInOrg(
+  usersList: UserProfile[],
+  email: string,
+  targetOrgId: string
+): OrgEmailConflictResult {
+  const cleanEmail = email.trim().toLowerCase();
+  const normalizedTargetOrg = targetOrgId || DEFAULT_ORGANIZATION_ID;
+  if (!cleanEmail) return { conflict: 'none' };
+
+  const sameOrgMatch = usersList.find(
+    (u) =>
+      (u.email || '').trim().toLowerCase() === cleanEmail &&
+      (u.organizationId || DEFAULT_ORGANIZATION_ID) === normalizedTargetOrg
+  );
+  if (!sameOrgMatch) {
+    return { conflict: 'none' };
+  }
+  if (sameOrgMatch.status === 'inactivo') {
+    return { conflict: 'blocked_in_same_org', existingUser: sameOrgMatch };
+  }
+  return { conflict: 'active_in_same_org', existingUser: sameOrgMatch };
+}
+
+export interface EmailProfileEntry {
+  key: string;
+  profile: UserProfile;
+}
+
+export type LoginProfileResolution =
+  | { resolution: 'active_direct'; entry: EmailProfileEntry }
+  | { resolution: 'auto_claim_pending'; entry: EmailProfileEntry }
+  | { resolution: 'requires_new_account'; blockedEntry: EmailProfileEntry; pendingEntry: EmailProfileEntry }
+  | { resolution: 'blocked'; blockedEntry: EmailProfileEntry }
+  | { resolution: 'not_found' };
+
+export function selectBestLoginProfileForEmail(
+  entries: EmailProfileEntry[],
+  authUid: string
+): LoginProfileResolution {
+  if (!entries || entries.length === 0) {
+    return { resolution: 'not_found' };
+  }
+
+  const byUid = entries.find((e) => e.key === authUid);
+  if (byUid && byUid.profile.status === 'activo') {
+    return { resolution: 'active_direct', entry: byUid };
+  }
+
+  const byUidOrg = byUid ? (byUid.profile.organizationId || DEFAULT_ORGANIZATION_ID) : null;
+
+  const activePendingOtherOrg = entries.find((e) => {
+    if (e.key === authUid) return false;
+    if (e.profile.status !== 'activo') return false;
+    const isPendingKey =
+      Boolean(e.profile.pendingActivation) ||
+      e.key.startsWith('pend_') ||
+      e.key.startsWith('usr-') ||
+      e.key.startsWith('usr0');
+    if (!isPendingKey) return false;
+    if (!byUid) return true;
+    const entryOrg = e.profile.organizationId || DEFAULT_ORGANIZATION_ID;
+    return entryOrg !== byUidOrg;
+  });
+
+  if (activePendingOtherOrg) {
+    if (!byUid) {
+      return { resolution: 'auto_claim_pending', entry: activePendingOtherOrg };
+    }
+    return {
+      resolution: 'requires_new_account',
+      blockedEntry: byUid,
+      pendingEntry: activePendingOtherOrg,
+    };
+  }
+
+  if (!byUid) {
+    const activeLegacy = entries.find((e) => e.profile.status === 'activo');
+    if (activeLegacy) {
+      return { resolution: 'active_direct', entry: activeLegacy };
+    }
+  }
+
+  const blocked = byUid || entries.find((e) => e.profile.status === 'inactivo');
+  if (blocked) {
+    return { resolution: 'blocked', blockedEntry: blocked };
+  }
+
+  return { resolution: 'not_found' };
+}
+
 

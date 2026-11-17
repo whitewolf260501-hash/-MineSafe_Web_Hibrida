@@ -8,6 +8,7 @@ import {
   DEFAULT_PLATFORM_CONFIG,
   evaluateWatchedUserStatusSnapshots,
   fetchPaginatedTelemetryHistory,
+  isEquiposSubTabVisibleForUser,
   isTabVisibleForUser,
   mapRTDBContractToRental,
   validateRentalDatesAndCost,
@@ -25,11 +26,27 @@ import { buildTelemetryCsvContentAsync } from '../src/components/HistoricalRepor
 import { resolveNode3DLiveTelemetry } from '../src/components/Node3DInspectorView';
 import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspectorView';
 import {
+  canCreateOrEditOrganization,
+  canDeleteOrganization,
   canManageContractsAndPayments,
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  createEmptyTelemetryVariables,
+  DEFAULT_ORGANIZATION_ID,
+  filterScopedEntities,
   filterScopedUsers,
+  findUserEmailConflictInOrg,
+  getAuthorizedOrganizationIds,
+  resolveEffectiveOrgId,
+  resolveScopedCurrentSite,
+  selectBestLoginProfileForEmail,
 } from '../src/utils/accessControl';
+import {
+  getBulkCsvTemplate,
+  getBulkJsonBundleTemplate,
+  parseBulkCompanyBundle,
+  parseBulkInput,
+} from '../src/utils/bulkCompanyImport';
 import {
   P031_DELIVERABLE_FILENAMES,
   buildSuperAdminDocumentsCatalog,
@@ -37,7 +54,7 @@ import {
   parseMarkdownBlocks,
 } from '../src/utils/superAdminDocs';
 import { ROOT_MARKDOWN_FILES } from '../src/data/generatedDocs';
-import { PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
+import { Organization, PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
 
 const rootDir = process.cwd();
 const readRepoFile = (relPath: string) => fs.readFileSync(path.join(rootDir, relPath), 'utf8');
@@ -648,6 +665,557 @@ async function runTests() {
   assert.equal(zipArchive[eocdOffset + 2], 0x05);
   assert.equal(zipArchive[eocdOffset + 3], 0x06);
   console.log('✅ 13. SuperAdmin-only P031 docs center, RBAC guard & PKZIP export passed');
+
+  // ---------------------------------------------------------------------------
+  // 14. Admin: Creación de Empresas Propias, Aislamiento Multi-Org y Carga Masiva
+  // ---------------------------------------------------------------------------
+  assert.ok(
+    rtdbRules.rules.organizaciones['.indexOn'].includes('ownerUid'),
+    'RTDB organizaciones indexes ownerUid for admin queries'
+  );
+  assert.ok(
+    rtdbRules.rules.organizaciones['$orgId']['.write'].includes('ownerUid'),
+    'RTDB organizaciones/$orgId enforces ownerUid for admin creation/edit'
+  );
+  assert.ok(
+    rtdbRules.rules.organizaciones['$orgId']['.write'].includes(DEFAULT_ORGANIZATION_ID),
+    'RTDB protects default org from admin edits'
+  );
+
+  const ownedOrgs: Organization[] = [
+    {
+      id: DEFAULT_ORGANIZATION_ID,
+      name: 'MineSafe Principal',
+      rut: '76.111.222-3',
+      industry: 'Minería',
+      status: 'activa',
+      createdAt: 1700000000000,
+    },
+    {
+      id: 'org-gamma',
+      name: 'Minera Gamma SpA',
+      rut: '76.999.888-7',
+      industry: 'Minería Subterránea',
+      status: 'activa',
+      createdAt: 1700000001000,
+      ownerUid: admA.id,
+      ownerId: admA.id,
+      ownerEmail: admA.email,
+    },
+    {
+      id: 'org-beta',
+      name: 'Minera Beta S.A.',
+      rut: '76.555.444-3',
+      industry: 'Rajo',
+      status: 'activa',
+      createdAt: 1700000002000,
+      ownerUid: 'adm-b',
+      ownerId: 'adm-b',
+      ownerEmail: 'adm-b@minesafe.cl',
+    },
+  ];
+
+  // Tab visibility: empresas enabled for superadmin & admin, hidden for operador & monotoriador
+  const monA = makeUser({ id: 'mon-a', role: 'monotoriador', organizationId: 'org-alpha' });
+  assert.equal(isTabVisibleForUser('empresas', sa, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isTabVisibleForUser('empresas', admA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isTabVisibleForUser('empresas', monA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isTabVisibleForUser('empresas', opA, DEFAULT_PLATFORM_CONFIG), false);
+
+  // Admin can create new orgs and edit/delete orgs they own, but NOT default org or third-party orgs
+  assert.equal(canCreateOrEditOrganization(admA, null).allowed, true);
+  assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[1]).allowed, true);
+  assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[0]).allowed, false);
+  assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[2]).allowed, false);
+  assert.equal(canCreateOrEditOrganization(opA, null).allowed, false);
+  assert.equal(canDeleteOrganization(admA, ownedOrgs[1]).allowed, true);
+  assert.equal(canDeleteOrganization(admA, ownedOrgs[0]).allowed, false);
+  assert.equal(canDeleteOrganization(admA, ownedOrgs[2]).allowed, false);
+
+  assert.deepEqual(
+    getAuthorizedOrganizationIds(admA, ownedOrgs),
+    ['org-alpha', 'org-gamma']
+  );
+  assert.equal(resolveEffectiveOrgId(admA, 'org-gamma', ownedOrgs), 'org-gamma');
+  assert.equal(resolveEffectiveOrgId(admA, 'org-beta', ownedOrgs), 'org-alpha');
+  assert.equal(canProvisionUserInOrganization(admA, 'org-gamma', 'monotoriador', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admA, 'org-beta', 'operador', ownedOrgs).allowed, false);
+  assert.equal(canManageContractsAndPayments(admA, 'org-gamma', ownedOrgs).allowed, true);
+  assert.equal(canManageContractsAndPayments(admA, 'org-beta', ownedOrgs).allowed, false);
+  assert.equal(
+    canModifyTargetUser(admA, makeUser({ id: 'u-gamma', organizationId: 'org-gamma' }), 'admin', ownedOrgs).allowed,
+    true
+  );
+
+  // Bulk CSV parsing (comma + semicolon + UTF-8 BOM + quotes + superadmin rejection)
+  const usersCsvWithBomAndSuperAdmin = [
+    '\uFEFFnombre;email;rut;rol;turno',
+    '"Juan Pérez, Jr.";jperez@gamma.cl;16.111.222-3;operador;Turno A',
+    'Ana Silva;asilva@gamma.cl;17.222.333-4;monotoriador;Turno B',
+    'Intento Escalado;hacker@gamma.cl;19.333.444-5;superadmin;Turno C',
+    'Duplicado;jperez@gamma.cl;16.111.222-3;admin;Turno A',
+  ].join('\n');
+  const parsedUsers = parseBulkInput('users', usersCsvWithBomAndSuperAdmin, {
+    organizationId: 'org-gamma',
+  });
+  assert.equal(parsedUsers.totalRows, 4);
+  assert.equal(parsedUsers.validRows.length, 2);
+  assert.equal(parsedUsers.invalidRows.length, 2);
+  assert.equal(parsedUsers.validRows[0].data.name, 'Juan Pérez, Jr.');
+  assert.equal(parsedUsers.validRows[1].data.role, 'monotoriador');
+  assert.ok(parsedUsers.invalidRows[0].errors[0].includes('SuperAdmin'));
+
+  // Bulk CSV templates parse cleanly 100%
+  const usersTpl = parseBulkInput('users', getBulkCsvTemplate('users'), { organizationId: 'org-gamma' });
+  assert.equal(usersTpl.invalidRows.length, 0);
+  assert.equal(usersTpl.validRows.length, 3);
+
+  // Sites grouping (2 sectors under 1 faena -> 1 MiningSite with 2 activeSectors)
+  const sitesTpl = parseBulkInput('sites', getBulkCsvTemplate('sites'), {
+    organizationId: 'org-gamma',
+    defaultCompanyName: 'Minera Gamma SpA',
+  });
+  assert.equal(sitesTpl.invalidRows.length, 0);
+  assert.equal(sitesTpl.validRows.length, 1);
+  assert.equal(sitesTpl.validRows[0].data.site.activeSectors.length, 2);
+  assert.equal(sitesTpl.validRows[0].data.site.organizationId, 'org-gamma');
+
+  // Rentals validation (dates, cost > 0)
+  const rentalsBad = parseBulkInput(
+    'rentals',
+    [
+      'numeroContrato,codigoDispositivo,proveedor,fechaInicio,fechaTermino,costoMensualClp',
+      'CT-1,DEV-1,MineSafe,2026-12-01,2026-11-01,250000',
+      'CT-2,DEV-2,MineSafe,2026-01-01,2026-12-31,0',
+      'CT-3,DEV-3,MineSafe,2026-01-01,2026-12-31,250000',
+    ].join('\n'),
+    { organizationId: 'org-gamma' }
+  );
+  assert.equal(rentalsBad.validRows.length, 1);
+  assert.equal(rentalsBad.invalidRows.length, 2);
+
+  // Full JSON bundle template
+  const bundleParsed = parseBulkCompanyBundle(getBulkJsonBundleTemplate(), 'org-gamma');
+  assert.equal(bundleParsed.formatError, undefined);
+  assert.equal(bundleParsed.organization?.valid, true);
+  assert.equal(bundleParsed.users.validRows.length, 2);
+  assert.equal(bundleParsed.sites.validRows.length, 1);
+  assert.equal(bundleParsed.rentals.validRows.length, 1);
+  assert.equal(bundleParsed.assignments.validRows.length, 1);
+
+  console.log('✅ 14. Admin company creation, ownerUid scoping & bulk CSV/JSON import passed');
+
+  // ---------------------------------------------------------------------------
+  // 15. Aislamiento estricto por nueva empresa y limitaciones de Operador/Monotoriador
+  // ---------------------------------------------------------------------------
+  const admB = makeUser({ id: 'adm-b', email: 'adm-b@minesafe.cl', role: 'admin', organizationId: 'org-beta' });
+  const admG = makeUser({ id: 'adm-g', email: 'adm-g@gamma.cl', role: 'admin', organizationId: 'org-gamma' });
+  const monG = makeUser({
+    id: 'mon-g',
+    email: 'mon-g@gamma.cl',
+    role: 'monotoriador',
+    roleLabel: 'Monotoriador Ambiental',
+    organizationId: 'org-gamma',
+  });
+  const opG = makeUser({
+    id: 'op-g',
+    email: 'op-g@gamma.cl',
+    role: 'operador',
+    roleLabel: 'Operador',
+    organizationId: 'org-gamma',
+  });
+  const opPrincipal = makeUser({
+    id: 'op-p',
+    email: 'op@principal.cl',
+    role: 'operador',
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  });
+
+  const mixedUsers = [sa, admA, admB, admG, opA, opB, monA, monG, opG, opPrincipal];
+
+  // Cross-company isolation: admB (org-beta) and Principal users never see org-gamma
+  assert.deepEqual(getAuthorizedOrganizationIds(admB, ownedOrgs), ['org-beta']);
+  assert.deepEqual(getAuthorizedOrganizationIds(monG, ownedOrgs), ['org-gamma']);
+  assert.deepEqual(getAuthorizedOrganizationIds(opG, ownedOrgs), ['org-gamma']);
+  assert.deepEqual(getAuthorizedOrganizationIds(opB, ownedOrgs), ['org-beta']);
+
+  assert.equal(resolveEffectiveOrgId(admB, 'org-gamma', ownedOrgs), 'org-beta');
+  assert.equal(resolveEffectiveOrgId(monG, 'org-beta', ownedOrgs), 'org-gamma');
+  assert.equal(resolveEffectiveOrgId(opG, DEFAULT_ORGANIZATION_ID, ownedOrgs), 'org-gamma');
+  assert.equal(resolveEffectiveOrgId(opPrincipal, 'org-gamma', ownedOrgs), DEFAULT_ORGANIZATION_ID);
+
+  assert.deepEqual(
+    filterScopedUsers(mixedUsers, admB, 'org-beta', ownedOrgs).map((u) => u.id),
+    ['adm-b', 'op-b']
+  );
+  assert.deepEqual(
+    filterScopedUsers(mixedUsers, monG, 'org-gamma', ownedOrgs).map((u) => u.id),
+    ['adm-g', 'mon-g', 'op-g']
+  );
+  assert.deepEqual(
+    filterScopedUsers(mixedUsers, opG, 'org-alpha', ownedOrgs).map((u) => u.id),
+    ['adm-g', 'mon-g', 'op-g']
+  );
+
+  // Scoped entities isolation (sites, devices, rentals, assignments)
+  const mixedEntities = [
+    { id: 'ent-principal', organizationId: DEFAULT_ORGANIZATION_ID },
+    { id: 'ent-alpha', organizationId: 'org-alpha' },
+    { id: 'ent-beta', organizationId: 'org-beta' },
+    { id: 'ent-gamma', organizationId: 'org-gamma' },
+  ];
+  assert.deepEqual(
+    filterScopedEntities(mixedEntities, admB, 'org-gamma', ownedOrgs).map((e) => e.id),
+    ['ent-beta']
+  );
+  assert.deepEqual(
+    filterScopedEntities(mixedEntities, monG, 'org-alpha', ownedOrgs).map((e) => e.id),
+    ['ent-gamma']
+  );
+  assert.deepEqual(
+    filterScopedEntities(mixedEntities, opPrincipal, 'org-gamma', ownedOrgs).map((e) => e.id),
+    ['ent-principal']
+  );
+
+  // New organization with 0 sites/devices falls back to neutral empty states (no Principal/El Teniente mock leak)
+  const neutralGammaSite = resolveScopedCurrentSite([], undefined, 'org-gamma', 'Minera Gamma SpA');
+  assert.equal(neutralGammaSite.organizationId, 'org-gamma');
+  assert.equal(neutralGammaSite.name, 'Sin faena registrada');
+  assert.equal(neutralGammaSite.company, 'Minera Gamma SpA');
+  assert.equal(neutralGammaSite.activeSectors.length, 0);
+  assert.ok(!neutralGammaSite.name.includes('Teniente') && !neutralGammaSite.name.includes('Chuquicamata'));
+
+  const emptyTelemetry = createEmptyTelemetryVariables();
+  assert.equal(emptyTelemetry.length, 6);
+  assert.ok(emptyTelemetry.every((v) => v.value === 0 && v.status === 'desconectado'));
+
+  // Strict role lock for operador & monotoriador even with tampered platformConfig overrides
+  const tamperedOpMonConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      userOverrides: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.userOverrides,
+        [monG.id]: {
+          empresas: 'allow',
+          usuarios: 'allow',
+          superadmin_panel: 'allow',
+          superadmin_docs: 'allow',
+          gateway_3d: 'allow',
+        },
+        [opG.id]: {
+          empresas: 'allow',
+          usuarios: 'allow',
+          superadmin_panel: 'allow',
+          superadmin_docs: 'allow',
+        },
+      },
+      userOverridesByEmail: {
+        'mon-g@gamma_cl': { empresas: 'allow', usuarios: 'allow' },
+        'op-g@gamma_cl': { empresas: 'allow', usuarios: 'allow' },
+      },
+    },
+  } as unknown as PlatformConfig;
+
+  for (const lockedTab of ['empresas', 'usuarios', 'superadmin_panel', 'superadmin_docs'] as const) {
+    assert.equal(
+      isTabVisibleForUser(lockedTab, monG, tamperedOpMonConfig),
+      false,
+      `Monotoriador blocked from ${lockedTab} even with override`
+    );
+    assert.equal(
+      isTabVisibleForUser(lockedTab, opG, tamperedOpMonConfig),
+      false,
+      `Operador blocked from ${lockedTab} even with override`
+    );
+  }
+  assert.equal(
+    isTabVisibleForUser('gateway_3d', monG, tamperedOpMonConfig),
+    true,
+    'Non-locked configurable tabs like gateway_3d still respect userOverrides'
+  );
+
+  for (const restrictedUser of [monG, opG]) {
+    assert.equal(canCreateOrEditOrganization(restrictedUser, null).allowed, false);
+    assert.equal(canDeleteOrganization(restrictedUser, ownedOrgs[1]).allowed, false);
+    assert.equal(canManageContractsAndPayments(restrictedUser, 'org-gamma', ownedOrgs).allowed, false);
+    assert.equal(canProvisionUserInOrganization(restrictedUser, 'org-gamma', 'operador', ownedOrgs).allowed, false);
+    assert.equal(canModifyTargetUser(restrictedUser, admG, 'operador', ownedOrgs).allowed, false);
+  }
+
+  // Static audit of cross-tenant isolation & role guards in UI/services
+  const firebaseSvcSrc = readRepoFile('src/services/firebase.ts');
+  const appSrc = readRepoFile('src/App.tsx');
+  const rootAppSrc = readRepoFile('src/RootApp.tsx');
+  const sectorsSrc = readRepoFile('src/components/MiningSectorsView.tsx');
+  const monitoringSrc = readRepoFile('src/components/MonitoringView.tsx');
+  const emergencySrc = readRepoFile('src/components/EmergencyModal.tsx');
+  const gatewaySecSrc = readRepoFile('src/components/ESP32GatewaySection.tsx');
+  const alertCfgSrc = readRepoFile('src/components/AlertConfigurationView.tsx');
+
+  assert.ok(rootAppSrc.includes('key={currentUser.id}'), 'RootApp keys MineSafePanel by currentUser.id to reset state on switch');
+  assert.ok(
+    firebaseSvcSrc.includes("if (tab === 'empresas' || tab === 'usuarios')"),
+    'firebase.ts hard-locks empresas and usuarios to superadmin/admin'
+  );
+  assert.ok(
+    firebaseSvcSrc.includes('buildOrgScopedQuery(\'dispositivos\', scope)') || firebaseSvcSrc.includes("buildOrgScopedQuery('dispositivos', scope)"),
+    'firebase.ts uses org-scoped device query without unscoped fallback'
+  );
+  assert.ok(
+    appSrc.includes('createEmptyTelemetryVariables()') && appSrc.includes('resolveScopedCurrentSite('),
+    'App.tsx uses neutral scoped fallback helpers'
+  );
+  assert.ok(sectorsSrc.includes('canManageSites'), 'MiningSectorsView enforces read-only view for operador/monotoriador');
+  assert.ok(monitoringSrc.includes('canSimulateEvents'), 'MonitoringView hides simulator for operador/monotoriador');
+  assert.ok(emergencySrc.includes('isAdminOrSuper'), 'EmergencyModal hides drill mode for operador/monotoriador');
+  assert.ok(gatewaySecSrc.includes('canOperateHardware'), 'ESP32GatewaySection gates hardware actuators');
+  assert.ok(alertCfgSrc.includes('subscribeToAllThresholdConfigs'), 'AlertConfigurationView subscribes with org/device scope');
+
+  console.log('✅ 15. Cross-company isolation & operador/monotoriador limitations passed');
+
+  // ---------------------------------------------------------------------------
+  // 16. Bloqueo de usuarios despedidos y nueva cuenta con correo anterior en otra empresa
+  // ---------------------------------------------------------------------------
+  const blockedAlphaWorker = makeUser({
+    id: 'uid-old-alpha',
+    email: 'juan.perez@correo.cl',
+    role: 'operador',
+    status: 'inactivo',
+    organizationId: 'org-alpha',
+    blockedReason: 'Desvinculación de la empresa',
+    blockedAt: 1700500000000,
+    blockedBy: 'Admin Alpha',
+  });
+  const activeAlphaWorker = makeUser({
+    id: 'uid-active-alpha',
+    email: 'maria.lopez@correo.cl',
+    role: 'operador',
+    status: 'activo',
+    organizationId: 'org-alpha',
+  });
+  const pendingBetaWorker = makeUser({
+    id: 'pend_org_beta_1700600000_ab12',
+    email: 'juan.perez@correo.cl',
+    role: 'monotoriador',
+    status: 'activo',
+    pendingActivation: true,
+    organizationId: 'org-beta',
+  });
+
+  // Same company conflict vs cross-company reuse
+  assert.equal(
+    findUserEmailConflictInOrg([activeAlphaWorker, blockedAlphaWorker], 'maria.lopez@correo.cl', 'org-alpha').conflict,
+    'active_in_same_org',
+    'Rejects active duplicate inside same company'
+  );
+  assert.equal(
+    findUserEmailConflictInOrg([activeAlphaWorker, blockedAlphaWorker], 'juan.perez@correo.cl', 'org-alpha').conflict,
+    'blocked_in_same_org',
+    'Flags blocked email inside same company so admin uses Desbloquear instead of duplicating'
+  );
+  assert.equal(
+    findUserEmailConflictInOrg([activeAlphaWorker, blockedAlphaWorker], 'juan.perez@correo.cl', 'org-beta').conflict,
+    'none',
+    'Allows another company (org-beta) to hire/register worker using their previous email'
+  );
+
+  // Login resolution across UID states
+  const activeRes = selectBestLoginProfileForEmail(
+    [{ key: 'uid-active-alpha', profile: activeAlphaWorker }],
+    'uid-active-alpha'
+  );
+  assert.equal(activeRes.resolution, 'active_direct');
+
+  const blockedOnlyRes = selectBestLoginProfileForEmail(
+    [{ key: 'uid-old-alpha', profile: blockedAlphaWorker }],
+    'uid-old-alpha'
+  );
+  assert.equal(blockedOnlyRes.resolution, 'blocked');
+
+  const requiresNewAccountRes = selectBestLoginProfileForEmail(
+    [
+      { key: 'uid-old-alpha', profile: blockedAlphaWorker },
+      { key: pendingBetaWorker.id, profile: pendingBetaWorker },
+    ],
+    'uid-old-alpha'
+  );
+  assert.equal(
+    requiresNewAccountRes.resolution,
+    'requires_new_account',
+    'Blocked user invited by Company B is guided to create a brand-new Firebase Auth account using previous email'
+  );
+  if (requiresNewAccountRes.resolution === 'requires_new_account') {
+    assert.equal(requiresNewAccountRes.pendingEntry.profile.organizationId, 'org-beta');
+    assert.equal(requiresNewAccountRes.blockedEntry.profile.organizationId, 'org-alpha');
+  }
+
+  const autoClaimRes = selectBestLoginProfileForEmail(
+    [
+      { key: 'uid-old-alpha', profile: blockedAlphaWorker },
+      { key: pendingBetaWorker.id, profile: pendingBetaWorker },
+    ],
+    'uid-brand-new-beta'
+  );
+  assert.equal(
+    autoClaimRes.resolution,
+    'auto_claim_pending',
+    'New Firebase Auth UID auto-claims Company B pending profile while preserving Company A blocked node'
+  );
+
+  assert.equal(
+    selectBestLoginProfileForEmail([], 'uid-any').resolution,
+    'not_found'
+  );
+
+  // Static audit of RTDB rules, sibling sync isolation, UI blocking & account recreation
+  const usersViewSrc = readRepoFile('src/components/UsersManagementView.tsx');
+  const loginViewSrc = readRepoFile('src/components/LoginView.tsx');
+  const loginModalSrc = readRepoFile('src/components/LoginModal.tsx');
+  const bulkViewSrc = readRepoFile('src/components/CompanyBulkManagementView.tsx');
+
+  assert.ok(
+    rtdbRules.rules.usuarios['$userId']['.write'].includes('claimedFromKey') &&
+      rtdbRules.rules.usuarios['$userId']['.write'].includes("child('pendingActivation').val() === true"),
+    'RTDB usuarios/$userId allows secure single-use pendingActivation claim and cleanup'
+  );
+  assert.ok(
+    firebaseSvcSrc.includes('createNewCompanyAccountWithPreviousEmail') &&
+      firebaseSvcSrc.includes('deleteUser(oldFbUser)') &&
+      firebaseSvcSrc.includes("query(ref(rtdb, 'usuarios'), orderByChild('organizationId'), equalTo(targetOrg))"),
+    'firebase.ts supports new-account recreation without touching previous blocked company node and scopes sibling sync by org'
+  );
+  assert.ok(
+    usersViewSrc.includes('Bloquear') &&
+      usersViewSrc.includes('Desbloquear') &&
+      usersViewSrc.includes('blockedReason'),
+    'UsersManagementView exposes block/unblock actions with reason tracking'
+  );
+  assert.ok(
+    loginViewSrc.includes('createNewCompanyAccountWithPreviousEmail') &&
+      loginViewSrc.includes('auth/account-recreation-required') &&
+      loginModalSrc.includes('createNewCompanyAccountWithPreviousEmail') &&
+      loginModalSrc.includes('auth/account-recreation-required'),
+    'LoginView and LoginModal expose previous-email new-account flow'
+  );
+  assert.ok(
+    bulkViewSrc.includes('pendingActivation'),
+    'CompanyBulkManagementView notifies admins when bulk-imported users require creating a new account with their previous email'
+  );
+
+  console.log('✅ 16. Fired-user blocking & cross-company new account with previous email passed');
+
+  // ---------------------------------------------------------------------------
+  // 17. Limitación estricta Operador: solo ver datos y descripción de alertas
+  // ---------------------------------------------------------------------------
+  const allNavigationTabs = [
+    'dashboard',
+    'monitoreo',
+    'alertas',
+    'configuracion_alertas',
+    'equipos',
+    'reportes',
+    'faenas',
+    'usuarios',
+    'empresas',
+    'visor_3d',
+    'gateway_3d',
+    'superadmin_panel',
+    'superadmin_docs',
+  ] as const;
+
+  const tamperedAllAllowOpConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      rolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+        operador: {
+          dashboard: true,
+          monitoreo: true,
+          alertas: true,
+          configuracion_alertas: true,
+          equipos: true,
+          reportes: true,
+          faenas: true,
+          usuarios: true,
+          empresas: true,
+          visor_3d: true,
+          gateway_3d: true,
+        },
+      },
+      userOverrides: {
+        [opG.id]: {
+          dashboard: 'allow',
+          monitoreo: 'allow',
+          reportes: 'allow',
+          faenas: 'allow',
+          equipos: 'allow',
+          gateway_3d: 'allow',
+          visor_3d: 'allow',
+          alertas: 'block',
+        },
+      },
+    },
+  } as unknown as PlatformConfig;
+
+  assert.equal(DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.alertas, true);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.dashboard, false);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.monitoreo, false);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.reportes, false);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador.faenas, false);
+
+  for (const tab of allNavigationTabs) {
+    assert.equal(
+      isTabVisibleForUser(tab, opG, DEFAULT_PLATFORM_CONFIG),
+      tab === 'alertas',
+      `Default config allows operador ONLY alertas (checked ${tab})`
+    );
+    assert.equal(
+      isTabVisibleForUser(tab, opG, tamperedAllAllowOpConfig),
+      tab === 'alertas',
+      `Even tampered config allows operador ONLY alertas (checked ${tab})`
+    );
+  }
+
+  for (const sub of ['asignaciones', 'arriendos', 'pagos', 'inventario'] as const) {
+    assert.equal(
+      isEquiposSubTabVisibleForUser(sub, opG, tamperedAllAllowOpConfig),
+      false,
+      `Operador cannot access equipos sub-tab ${sub}`
+    );
+  }
+
+  const alertsViewSrc = readRepoFile('src/components/AlertsView.tsx');
+  const navbarSrc = readRepoFile('src/components/Navbar.tsx');
+  assert.ok(
+    alertsViewSrc.includes('isOperadorReadOnly') &&
+      alertsViewSrc.includes('Modo Solo Lectura — Operador') &&
+      alertsViewSrc.includes('{!isOperadorReadOnly && (') &&
+      alertsViewSrc.includes('effectiveSubTab') &&
+      alertsViewSrc.includes('alertToResolve && !isOperadorReadOnly'),
+    'AlertsView enforces read-only data and descriptions for operador'
+  );
+  assert.ok(
+    appSrc.includes("authenticatedUser.role === 'operador' ? 'alertas' : 'dashboard'") &&
+      appSrc.includes('isReadOnly={currentUser.role === \'operador\'}') &&
+      appSrc.includes("showEmergencyModal && currentUser.role !== 'operador'"),
+    'App.tsx lands operador on alertas, sets isReadOnly, and disables EmergencyModal/alert mutations'
+  );
+  assert.ok(
+    navbarSrc.includes('!isOperador') && navbarSrc.includes("isOperador ? 'alertas' : 'dashboard'"),
+    'Navbar hides emergency trigger and routes logo to alertas for operador'
+  );
+  assert.ok(
+    rtdbRules.rules.alertas['$alertId']['.write'].includes("tipoUsuario').val() !== 'operador'") &&
+      rtdbRules.rules.bitacora_contingencias['$alertId']['.write'].includes("tipoUsuario').val() !== 'operador'") &&
+      rtdbRules.rules.adjuntos['$attachmentId']['.write'].includes("tipoUsuario').val() !== 'operador'") &&
+      rtdbRules.rules.eventos_umbrales['$eventId']['.write'].includes("tipoUsuario').val() !== 'operador'") &&
+      rtdbRules.rules.emergencia['$orgId']['.write'].includes("tipoUsuario').val() !== 'operador'"),
+    'RTDB security rules block operador writes on alerts, logs, attachments, threshold events, and emergency node'
+  );
+
+  console.log('✅ 17. Operador alert-only read-only limitation passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

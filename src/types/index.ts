@@ -9,6 +9,9 @@ export interface Organization {
   createdAt: number;
   updatedAt?: number;
   createdBy?: string;
+  ownerId?: string;
+  ownerUid?: string;
+  ownerEmail?: string;
 }
 
 export interface TelemetryHistoryPoint {
@@ -249,7 +252,7 @@ export interface WorkerAssignment {
   emergencyContact: string;
 }
 
-export type UserRole = 'superadmin' | 'admin' | 'operador';
+export type UserRole = 'superadmin' | 'admin' | 'operador' | 'monotoriador';
 
 export interface UserProfile {
   id: string;
@@ -262,6 +265,11 @@ export interface UserProfile {
   shift: string;
   avatarUrl?: string;
   status: 'activo' | 'inactivo';
+  blockedReason?: string;
+  blockedAt?: number;
+  blockedBy?: string;
+  pendingActivation?: boolean;
+  claimedFromKey?: string;
   lastLogin?: string;
   assignedSector?: string;
   assignedDeviceCode?: string;
@@ -276,6 +284,7 @@ export type ControllableTab =
   | 'reportes'
   | 'faenas'
   | 'usuarios'
+  | 'empresas'
   | 'visor_3d'
   | 'gateway_3d';
 
@@ -289,12 +298,14 @@ export interface PlatformVisibilityConfig {
   rolePermissions: {
     admin: Record<ControllableTab, boolean>;
     operador: Record<ControllableTab, boolean>;
+    monotoriador: Record<ControllableTab, boolean>;
   };
   userOverrides: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
   userOverridesByEmail?: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
   equiposSubTabRolePermissions?: {
     admin: Record<EquiposSubTab, boolean>;
     operador: Record<EquiposSubTab, boolean>;
+    monotoriador: Record<EquiposSubTab, boolean>;
   };
   equiposSubTabUserOverrides?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
   equiposSubTabUserOverridesByEmail?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;

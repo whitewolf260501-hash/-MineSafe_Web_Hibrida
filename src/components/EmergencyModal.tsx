@@ -115,21 +115,23 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({
             </button>
           </div>
 
-          {/* Mode Switch Tabs (Simulacro vs Real) */}
+          {/* Mode Switch Tabs (Simulacro solo Admin/SuperAdmin vs Emergencia Real) */}
           <div className="px-5 sm:px-6 pt-3 shrink-0">
             <div className="flex items-center p-1 bg-slate-950 rounded-lg border border-slate-800 text-xs">
-              <button
-                type="button"
-                onClick={() => setModalTab('simulacro')}
-                className={`flex-1 py-1.5 font-bold rounded-md transition-colors flex items-center justify-center gap-1.5 ${
-                  modalTab === 'simulacro'
-                    ? 'bg-amber-600 text-white shadow-sm'
-                    : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                <Sliders className="w-3.5 h-3.5" />
-                <span>Simulacro (Admin / Prevención)</span>
-              </button>
+              {isAdminOrSuper && (
+                <button
+                  type="button"
+                  onClick={() => setModalTab('simulacro')}
+                  className={`flex-1 py-1.5 font-bold rounded-md transition-colors flex items-center justify-center gap-1.5 ${
+                    modalTab === 'simulacro'
+                      ? 'bg-amber-600 text-white shadow-sm'
+                      : 'text-slate-400 hover:text-slate-200'
+                  }`}
+                >
+                  <Sliders className="w-3.5 h-3.5" />
+                  <span>Simulacro (Admin / Prevención)</span>
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => setModalTab('real')}

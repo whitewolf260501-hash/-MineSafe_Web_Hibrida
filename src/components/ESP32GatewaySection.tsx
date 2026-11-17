@@ -122,20 +122,30 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
     }, 3500);
   };
 
+  const canOperateHardware = isSuperAdmin || currentUser?.role === 'admin';
+
   const handleToggleAcquisition = async (newState: 'activo' | 'pausado') => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
+      return;
+    }
     setAcquisitionState(newState);
     soundAlert.playFeedbackBeep();
     if (currentDevice) {
-      await sendESP32Command(currentDevice.id, newState === 'activo' ? 'resume' : 'pause');
+      await sendESP32Command(currentDevice.id, newState === 'activo' ? 'resume' : 'pause', currentUser);
       showNotification(`Adquisición ${newState === 'activo' ? 'reanudada' : 'pausada'} en el ESP32.`);
     }
   };
 
   const handleTriggerPing = async () => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
+      return;
+    }
     soundAlert.playFeedbackBeep();
     setIsSimulatingHeartbeat(true);
     if (currentDevice) {
-      await sendESP32Command(currentDevice.id, 'ping');
+      await sendESP32Command(currentDevice.id, 'ping', currentUser);
       showNotification(`Latido enviado: Dispositivo marcado "En línea" (ventana ${effectiveTimeout}s).`);
     }
     setTimeout(() => {
@@ -155,6 +165,10 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
   // 1. Resetear niveles de la página
   const handleResetPageLevels = () => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
+      return;
+    }
     if (effectiveAlarmActive && !isSuperAdmin) {
       showNotification('Acción bloqueada: Solo el SuperAdministrador puede apagar o resetear una alarma activa.');
       return;
@@ -166,6 +180,10 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
   // 2. Resetear datos del Gateway (Firebase RTDB)
   const handleResetGatewayData = async () => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
+      return;
+    }
     if (!currentDevice) return;
     if (effectiveAlarmActive) {
       const verifiedSuper = isSuperAdmin && await verifySuperAdminPrivileges(currentUser);
@@ -208,8 +226,12 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
     showNotification(`Historial de alarmas descargado en formato Excel / CSV para ${currentDevice.id}.`);
   };
 
-  // 3. Encender alarma (cualquiera con acceso) o Apagar alarma completamente (SOLO SuperAdmin)
+  // 3. Encender alarma (Admin/SuperAdmin) o Apagar alarma completamente (SOLO SuperAdmin)
   const handleToggleAlarmClick = async () => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
+      return;
+    }
     if (effectiveAlarmActive) {
       if (!isSuperAdmin) {
         showNotification('Acceso denegado: Solo el usuario SuperAdministrador puede apagar la alarma completamente.');
@@ -248,13 +270,17 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
   // 4. Encender y apagar la luz
   const handleToggleLightClick = async () => {
+    if (!canOperateHardware) {
+      showNotification('Acceso denegado: Operadores y Monotoriadores no pueden controlar actuadores LED.');
+      return;
+    }
     soundAlert.playFeedbackBeep();
     if (onToggleLight) {
       onToggleLight();
     } else {
       const nextState = !isLightActive;
       if (currentDevice) {
-        await toggleGatewayLightInRTDB(currentDevice.id, nextState);
+        await toggleGatewayLightInRTDB(currentDevice.id, nextState, currentUser);
       }
       showNotification(nextState ? 'Luz / Baliza LED encendida en el nodo.' : 'Luz / Baliza LED apagada.');
     }
@@ -501,37 +527,44 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
               </a>
             )}
 
-            <div className="mt-2 flex items-center gap-2">
-              {acquisitionState === 'activo' ? (
-                <button
-                  type="button"
-                  onClick={() => handleToggleAcquisition('pausado')}
-                  className="flex-1 py-1 px-2 text-[11px] font-bold bg-amber-950/70 hover:bg-amber-900 border border-amber-800 text-amber-300 rounded flex items-center justify-center gap-1 transition-colors"
-                >
-                  <Pause className="w-3 h-3" />
-                  <span>Pausar</span>
-                </button>
-              ) : (
-                <button
-                  type="button"
-                  onClick={() => handleToggleAcquisition('activo')}
-                  className="flex-1 py-1 px-2 text-[11px] font-bold bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 rounded flex items-center justify-center gap-1 transition-colors"
-                >
-                  <Play className="w-3 h-3" />
-                  <span>Reanudar</span>
-                </button>
-              )}
+            {canOperateHardware ? (
+              <div className="mt-2 flex items-center gap-2">
+                {acquisitionState === 'activo' ? (
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAcquisition('pausado')}
+                    className="flex-1 py-1 px-2 text-[11px] font-bold bg-amber-950/70 hover:bg-amber-900 border border-amber-800 text-amber-300 rounded flex items-center justify-center gap-1 transition-colors"
+                  >
+                    <Pause className="w-3 h-3" />
+                    <span>Pausar</span>
+                  </button>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => handleToggleAcquisition('activo')}
+                    className="flex-1 py-1 px-2 text-[11px] font-bold bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 rounded flex items-center justify-center gap-1 transition-colors"
+                  >
+                    <Play className="w-3 h-3" />
+                    <span>Reanudar</span>
+                  </button>
+                )}
 
-              <button
-                type="button"
-                onClick={handleTriggerPing}
-                className="py-1 px-2 text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded flex items-center justify-center gap-1 transition-colors"
-                title="Forzar latido / ping en línea"
-              >
-                <RefreshCw className={`w-3 h-3 ${isSimulatingHeartbeat ? 'animate-spin text-cyan-400' : ''}`} />
-                <span>Ping</span>
-              </button>
-            </div>
+                <button
+                  type="button"
+                  onClick={handleTriggerPing}
+                  className="py-1 px-2 text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded flex items-center justify-center gap-1 transition-colors"
+                  title="Forzar latido / ping en línea"
+                >
+                  <RefreshCw className={`w-3 h-3 ${isSimulatingHeartbeat ? 'animate-spin text-cyan-400' : ''}`} />
+                  <span>Ping</span>
+                </button>
+              </div>
+            ) : (
+              <div className="mt-2 text-[10px] text-slate-400 flex items-center gap-1.5">
+                <Lock className="w-3 h-3 text-amber-400 shrink-0" />
+                <span>Control de adquisición reservado a Administración</span>
+              </div>
+            )}
           </div>
 
           <div className="text-[10px] text-slate-400 pt-1 border-t border-slate-900 flex items-center justify-between">
@@ -602,6 +635,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
           PANEL DE COMANDOS RÁPIDOS IOT Y CONTROL DE FAENA
           (4 Botones Solicitados: Reset Página, Reset Gateway, Alarma, Luz)
          ============================================================== */}
+      {canOperateHardware ? (
       <div className="mt-5 pt-4 border-t border-slate-800">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
           <div className="flex items-center gap-2">
@@ -611,7 +645,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
             </span>
           </div>
           <span className="text-[11px] text-slate-400 font-mono">
-            Dispositivo Objetivo: <span className="text-white font-bold">{currentDevice?.id}</span>
+            Dispositivo Objetivo: <span className="text-white font-bold">{currentDevice?.id || 'Sin asignar'}</span>
           </span>
         </div>
 
@@ -746,6 +780,14 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
         </div>
       </div>
+      ) : (
+        <div className="mt-5 pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
+          <span className="flex items-center gap-2">
+            <Lock className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>Comandos de actuadores IoT y reseteo de hardware habilitados solo para Administración / SuperAdmin.</span>
+          </span>
+        </div>
+      )}
 
     </div>
   );

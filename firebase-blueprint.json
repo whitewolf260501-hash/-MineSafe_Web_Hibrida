@@ -36,7 +36,7 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "email": { "type": "string", "format": "email", "maxLength": 200 },
-        "role": { "type": "string", "enum": ["superadmin", "admin", "operador"] },
+        "role": { "type": "string", "enum": ["superadmin", "admin", "operador", "monotoriador"] },
         "roleLabel": { "type": "string", "maxLength": 80 },
         "organizationId": { "type": "string", "maxLength": 128 },
         "rut": { "type": "string", "maxLength": 32 },

@@ -16,7 +16,8 @@ import {
   Clock,
   Radio,
   ShieldCheck,
-  AlertCircle
+  AlertCircle,
+  Eye
 } from 'lucide-react';
 import { Organization, UserProfile, UserRole } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -28,6 +29,8 @@ import {
 import {
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  findUserEmailConflictInOrg,
+  getAuthorizedOrganizationIds,
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 
@@ -38,7 +41,7 @@ interface UsersManagementViewProps {
   activeOrganizationId?: string;
   onAddUser: (newUser: UserProfile) => Promise<void> | void;
   onUpdateUserRole: (userId: string, newRole: UserRole) => Promise<void> | void;
-  onToggleUserStatus: (userId: string) => Promise<void> | void;
+  onToggleUserStatus: (userId: string, reason?: string) => Promise<void> | void;
 }
 
 export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
@@ -52,7 +55,11 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
+  const [statusFilter, setStatusFilter] = useState<'all' | 'activo' | 'inactivo' | 'pending'>('all');
   const [showAddModal, setShowAddModal] = useState(false);
+  const [userToBlock, setUserToBlock] = useState<UserProfile | null>(null);
+  const [blockReason, setBlockReason] = useState('Desvinculación / Despido laboral');
+  const [isTogglingBlock, setIsTogglingBlock] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // New user form state
@@ -72,10 +79,14 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
   const isSuperAdmin = currentUser.role === 'superadmin';
   const isAdminOrSuper = currentUser.role === 'superadmin' || currentUser.role === 'admin';
+  const authorizedOrgIds = getAuthorizedOrganizationIds(currentUser, organizations);
+  const authorizedOrgs = isSuperAdmin
+    ? organizations
+    : organizations.filter((o) => authorizedOrgIds.includes(o.id));
 
   const showToast = (type: 'success' | 'error', text: string) => {
     setFeedbackToast({ type, text });
-    setTimeout(() => setFeedbackToast(null), 4000);
+    setTimeout(() => setFeedbackToast(null), 6000);
   };
 
   const filteredUsers = usersList.filter((u) => {
@@ -84,11 +95,15 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       u.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.rut.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesRole = roleFilter === 'all' || u.role === roleFilter;
-    return matchesSearch && matchesRole;
+    const matchesStatus =
+      statusFilter === 'all' ||
+      (statusFilter === 'pending' && Boolean(u.pendingActivation)) ||
+      (statusFilter !== 'pending' && u.status === statusFilter);
+    return matchesSearch && matchesRole && matchesStatus;
   });
 
   const handleRoleSelectChange = async (targetUser: UserProfile, nextRole: UserRole) => {
-    const check = canModifyTargetUser(currentUser, targetUser, nextRole);
+    const check = canModifyTargetUser(currentUser, targetUser, nextRole, organizations);
     if (!check.allowed) {
       soundAlert.playFeedbackBeep();
       showToast('error', check.reason || 'Acción denegada.');
@@ -101,6 +116,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         'success',
         nextRole === 'admin'
           ? `Permisos de Administrador otorgados a ${targetUser.name}.`
+          : nextRole === 'monotoriador'
+          ? `Rol actualizado a Monotoriador Ambiental para ${targetUser.name}.`
           : `Rol actualizado a Operador (Usuario Normal) para ${targetUser.name}.`
       );
     } catch (err: any) {
@@ -109,20 +126,40 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   };
 
   const handleStatusToggleClick = async (targetUser: UserProfile) => {
-    const check = canModifyTargetUser(currentUser, targetUser);
+    const check = canModifyTargetUser(currentUser, targetUser, undefined, organizations);
     if (!check.allowed) {
       soundAlert.playFeedbackBeep();
       showToast('error', check.reason || 'Acción denegada.');
       return;
     }
+    if (targetUser.status === 'activo') {
+      setBlockReason('Desvinculación / Despido laboral');
+      setUserToBlock(targetUser);
+      return;
+    }
     try {
       await onToggleUserStatus(targetUser.id);
+      showToast('success', `Acceso desbloqueado para ${targetUser.name}.`);
+    } catch (err: any) {
+      showToast('error', err?.message || 'No se pudo desbloquear al usuario en Firebase RTDB.');
+    }
+  };
+
+  const handleConfirmBlockUser = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!userToBlock) return;
+    setIsTogglingBlock(true);
+    try {
+      await onToggleUserStatus(userToBlock.id, blockReason.trim() || 'Desvinculación / Despido laboral');
       showToast(
         'success',
-        `Cuenta de ${targetUser.name} ${targetUser.status === 'activo' ? 'desactivada' : 'activada'}.`
+        `Usuario ${userToBlock.name} bloqueado de esta empresa. Si otra empresa lo contrata, podrá crear una cuenta nueva con su correo anterior.`
       );
+      setUserToBlock(null);
     } catch (err: any) {
-      showToast('error', err?.message || 'No se pudo actualizar el estado en Firebase RTDB.');
+      showToast('error', err?.message || 'No se pudo bloquear al usuario en Firebase RTDB.');
+    } finally {
+      setIsTogglingBlock(false);
     }
   };
 
@@ -142,17 +179,40 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     if (!newName.trim() || !newEmail.trim()) return;
 
     // Garantizar que nunca se cree un segundo superadmin y respetar el ámbito de organización
-    const safeRole: 'admin' | 'operador' = newRole === 'admin' ? 'admin' : 'operador';
-    const targetOrgId = isSuperAdmin
-      ? newOrganizationId ||
-        (activeOrganizationId && activeOrganizationId !== 'all'
-          ? activeOrganizationId
-          : DEFAULT_ORGANIZATION.id)
-      : currentUser.organizationId || DEFAULT_ORGANIZATION_ID;
+    const safeRole: 'admin' | 'operador' | 'monotoriador' =
+      newRole === 'admin'
+        ? 'admin'
+        : newRole === 'monotoriador'
+        ? 'monotoriador'
+        : 'operador';
+    const targetOrgId =
+      isSuperAdmin || authorizedOrgs.length > 1
+        ? newOrganizationId ||
+          (activeOrganizationId && activeOrganizationId !== 'all'
+            ? activeOrganizationId
+            : currentUser.organizationId || DEFAULT_ORGANIZATION.id)
+        : currentUser.organizationId || DEFAULT_ORGANIZATION_ID;
 
-    const provisionCheck = canProvisionUserInOrganization(currentUser, targetOrgId, safeRole);
+    const provisionCheck = canProvisionUserInOrganization(
+      currentUser,
+      targetOrgId,
+      safeRole,
+      organizations
+    );
     if (!provisionCheck.allowed) {
       setCreateError(provisionCheck.reason || 'Permisos insuficientes para crear el usuario.');
+      return;
+    }
+
+    const sameOrgConflict = findUserEmailConflictInOrg(usersList, newEmail, targetOrgId);
+    if (sameOrgConflict.conflict === 'active_in_same_org') {
+      setCreateError(`El correo ${newEmail.trim()} ya tiene una cuenta activa en esta empresa.`);
+      return;
+    }
+    if (sameOrgConflict.conflict === 'blocked_in_same_org') {
+      setCreateError(
+        `El correo ${newEmail.trim()} está bloqueado en esta empresa. Usa el botón "Desbloquear" en la lista si deseas rehabilitarlo aquí.`
+      );
       return;
     }
 
@@ -174,12 +234,21 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           organizationId: targetOrgId,
           sendResetEmail,
           actingUser: currentUser,
+          organizations,
+          existingUsersInOrg: usersList,
         });
         soundAlert.playFeedbackBeep();
-        showToast(
-          'success',
-          `Cuenta Firebase Auth y perfil RTDB creados para ${created.name} (${safeRole}).`
-        );
+        if (created.pendingActivation) {
+          showToast(
+            'success',
+            `Perfil habilitado para ${created.name} (${created.email}). Como su correo pertenecía a otra empresa, el trabajador debe entrar a Acceso → "Nueva cuenta (correo anterior)" para crear su nueva cuenta con ese correo.`
+          );
+        } else {
+          showToast(
+            'success',
+            `Cuenta Firebase Auth y perfil RTDB creados para ${created.name} (${safeRole}).`
+          );
+        }
         setShowAddModal(false);
         setNewName('');
         setNewEmail('');
@@ -197,6 +266,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     const roleLabels: Record<UserRole, string> = {
       superadmin: 'Super Administrador de Seguridad Minera',
       admin: 'Administrador / Prevencionista Sernageomin',
+      monotoriador: 'Monotoriador Ambiental',
       operador: 'Usuario Normal / Operador de Faena',
     };
 
@@ -204,20 +274,24 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       id: `usr-${Date.now()}`,
       organizationId: targetOrgId,
       name: newName.trim(),
-      email: newEmail.trim(),
+      email: newEmail.trim().toLowerCase(),
       role: safeRole,
       roleLabel: roleLabels[safeRole],
       rut: newRut.trim() || 'No registrado',
       shift: newShift,
       status: 'activo',
-      lastLogin: 'Pre-registro administrativo (sin clave Auth)',
+      pendingActivation: true,
+      lastLogin: 'Pendiente crear nueva cuenta (/acceso)',
     };
 
     setIsCreating(true);
     try {
       await onAddUser(created);
       soundAlert.playFeedbackBeep();
-      showToast('success', `Perfil RTDB de ${created.name} guardado (${safeRole}).`);
+      showToast(
+        'success',
+        `Ficha creada para ${created.name} (${safeRole}). El trabajador puede activar su cuenta nueva en /acceso usando su correo.`
+      );
       setShowAddModal(false);
       setNewName('');
       setNewEmail('');
@@ -247,6 +321,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             Admin / Prevencionista
           </span>
         );
+      case 'monotoriador':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+            <Eye className="w-3.5 h-3.5 text-emerald-400" />
+            Monotoriador
+          </span>
+        );
       default:
         return (
           <span className="inline-flex items-center gap-1 text-[11px] font-semibold text-amber-300 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
@@ -269,7 +350,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               Gestión de Usuarios y Roles (RBAC)
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-cyan-400 font-semibold">Administradores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
+              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-cyan-400 font-semibold">Administradores</span>, <span className="text-emerald-400 font-semibold">Monotoriadores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
             </p>
           </div>
 
@@ -278,11 +359,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               onClick={() => {
                 setCreateError(null);
                 setNewOrganizationId(
-                  isSuperAdmin
-                    ? activeOrganizationId && activeOrganizationId !== 'all'
-                      ? activeOrganizationId
-                      : DEFAULT_ORGANIZATION.id
-                    : currentUser.organizationId || DEFAULT_ORGANIZATION_ID
+                  activeOrganizationId &&
+                    activeOrganizationId !== 'all' &&
+                    (isSuperAdmin || authorizedOrgs.some((o) => o.id === activeOrganizationId))
+                    ? activeOrganizationId
+                    : currentUser.organizationId ||
+                      authorizedOrgs[0]?.id ||
+                      DEFAULT_ORGANIZATION.id
                 );
                 setShowAddModal(true);
               }}
@@ -316,7 +399,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         )}
 
         {/* Roles Permission Matrix Card */}
-        <div className="grid grid-cols-1 md:grid-cols-3 gap-3 p-4 bg-slate-950/70 rounded-xl border border-slate-800 text-xs">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 p-4 bg-slate-950/70 rounded-xl border border-slate-800 text-xs">
           
           <div className="p-3 bg-purple-950/20 border border-purple-900/40 rounded-lg space-y-1.5">
             <div className="flex items-center justify-between gap-1.5 text-purple-300 font-bold">
@@ -340,6 +423,16 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             </div>
             <p className="text-slate-400 text-[11px]">
               Gestión operacional: monitoreo, umbrales, arriendos y gestión de operadores. No puede quitarle permisos ni desactivar al SuperAdministrador.
+            </p>
+          </div>
+
+          <div className="p-3 bg-emerald-950/20 border border-emerald-900/40 rounded-lg space-y-1.5">
+            <div className="flex items-center gap-1.5 text-emerald-300 font-bold">
+              <Eye className="w-4 h-4" />
+              Monotoriador Ambiental
+            </div>
+            <p className="text-slate-400 text-[11px]">
+              Supervisión continua de telemetría en vivo, alertas e historial ambiental de su organización, sin permisos para editar configuraciones críticas ni gestionar usuarios.
             </p>
           </div>
 
@@ -369,7 +462,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           />
         </div>
 
-        <div className="flex items-center gap-2 self-end sm:self-auto">
+        <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
           <select
             value={roleFilter}
             onChange={(e) => setRoleFilter(e.target.value)}
@@ -378,7 +471,18 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             <option value="all">Todos los Roles</option>
             <option value="superadmin">SuperAdmin Único</option>
             <option value="admin">Solo Administradores</option>
+            <option value="monotoriador">Solo Monotoriadores</option>
             <option value="operador">Solo Usuarios Normales</option>
+          </select>
+          <select
+            value={statusFilter}
+            onChange={(e) => setStatusFilter(e.target.value as 'all' | 'activo' | 'inactivo' | 'pending')}
+            className="px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+          >
+            <option value="all">Todos los Estados</option>
+            <option value="activo">Solo Activos</option>
+            <option value="inactivo">Solo Bloqueados</option>
+            <option value="pending">Pendiente Cuenta Nueva</option>
           </select>
         </div>
       </div>
@@ -402,7 +506,12 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               {filteredUsers.map((user) => {
                 const isTargetSuperAdmin = user.role === 'superadmin';
                 const isCurrentSession = user.id === currentUser.id;
-                const canModifyTarget = canModifyTargetUser(currentUser, user).allowed;
+                const canModifyTarget = canModifyTargetUser(
+                  currentUser,
+                  user,
+                  undefined,
+                  organizations
+                ).allowed;
 
                 return (
                   <tr key={user.id} className="hover:bg-slate-800/40 transition-colors">
@@ -431,11 +540,26 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                       )}
                     </td>
                     <td className="px-4 py-3.5">
-                      <span className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
-                        user.status === 'activo' ? 'bg-emerald-950 text-emerald-300 border border-emerald-800' : 'bg-slate-900 text-slate-500 border border-slate-800'
-                      }`}>
-                        {user.status}
-                      </span>
+                      <div className="space-y-1">
+                        <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase ${
+                          user.status === 'activo'
+                            ? user.pendingActivation
+                              ? 'bg-amber-950 text-amber-300 border border-amber-800'
+                              : 'bg-emerald-950 text-emerald-300 border border-emerald-800'
+                            : 'bg-rose-950 text-rose-300 border border-rose-800'
+                        }`}>
+                          {user.status === 'activo'
+                            ? user.pendingActivation
+                              ? 'Pendiente cuenta nueva'
+                              : 'Activo'
+                            : 'Bloqueado'}
+                        </span>
+                        {user.status === 'inactivo' && user.blockedReason && (
+                          <div className="text-[10px] text-rose-300/80 max-w-[180px] truncate" title={user.blockedReason}>
+                            {user.blockedReason}
+                          </div>
+                        )}
+                      </div>
                     </td>
                     <td className="px-4 py-3.5">
                       {isTargetSuperAdmin ? (
@@ -455,14 +579,19 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                             className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-[11px] text-cyan-200 font-medium focus:border-cyan-500"
                           >
                             <option value="admin">Admin (Prevencionista)</option>
+                            <option value="monotoriador">Monotoriador</option>
                             <option value="operador">Operador (Normal)</option>
                           </select>
                           <button
                             type="button"
                             onClick={() => handleStatusToggleClick(user)}
-                            className="text-[11px] text-slate-400 hover:text-white underline"
+                            className={`px-2 py-0.5 rounded border text-[10px] font-semibold transition-colors ${
+                              user.status === 'activo'
+                                ? 'bg-rose-950/70 hover:bg-rose-900 text-rose-200 border-rose-800'
+                                : 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-200 border-emerald-800'
+                            }`}
                           >
-                            {user.status === 'activo' ? 'Desactivar' : 'Activar'}
+                            {user.status === 'activo' ? 'Bloquear' : 'Desbloquear'}
                           </button>
                           {user.email && (
                             <button
@@ -548,6 +677,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                   >
                     <option value="operador">Usuario Normal (Operador)</option>
+                    <option value="monotoriador">Monotoriador</option>
                     <option value="admin">Administrador (Prevencionista)</option>
                   </select>
                 </div>
@@ -556,7 +686,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               <div className="p-2.5 rounded-lg bg-purple-950/30 border border-purple-800/40 text-[11px] text-purple-200/90 flex items-center gap-2">
                 <Crown className="w-4 h-4 text-purple-400 shrink-0" />
                 <span>
-                  Solo existe <strong>1 SuperAdministrador</strong> en toda la plataforma. Puedes asignar rol de <strong>Operador</strong> o <strong>Administrador</strong>.
+                  Solo existe <strong>1 SuperAdministrador</strong> en toda la plataforma. Puedes asignar rol de <strong>Operador</strong>, <strong>Monotoriador</strong> o <strong>Administrador</strong>.
                 </span>
               </div>
 
@@ -573,13 +703,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               {organizations.length > 0 && (
                 <div>
                   <label className="text-slate-300 block mb-1">Organización / Empresa</label>
-                  {isSuperAdmin ? (
+                  {isSuperAdmin || authorizedOrgs.length > 1 ? (
                     <select
                       value={newOrganizationId}
                       onChange={(e) => setNewOrganizationId(e.target.value)}
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                     >
-                      {organizations.map((org) => (
+                      {(authorizedOrgs.length > 0 ? authorizedOrgs : organizations).map((org) => (
                         <option key={org.id} value={org.id}>
                           {org.name} ({org.rut || org.id})
                         </option>
@@ -659,6 +789,94 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                   className="px-4 py-2 text-white bg-cyan-600 hover:bg-cyan-500 rounded-lg font-semibold disabled:opacity-50"
                 >
                   {isCreating ? 'Creando en Firebase...' : 'Crear Usuario'}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: BLOQUEAR USUARIO POR DESVINCULACIÓN */}
+      {userToBlock && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
+          <div className="bg-slate-900 border border-rose-800/70 rounded-2xl max-w-md w-full p-6 space-y-4 animate-in fade-in">
+            <div className="flex items-center justify-between">
+              <h3 className="text-base font-bold text-white flex items-center gap-2">
+                <Lock className="w-4 h-4 text-rose-400" />
+                Bloquear acceso en esta empresa
+              </h3>
+              <button
+                type="button"
+                onClick={() => setUserToBlock(null)}
+                className="text-slate-400 hover:text-white"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <form onSubmit={handleConfirmBlockUser} className="space-y-3 text-xs">
+              <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-900/60 text-rose-200 space-y-1">
+                <p className="font-semibold">
+                  {userToBlock.name} ({userToBlock.email})
+                </p>
+                <p className="text-[11px] text-rose-200/80">
+                  Su sesión será revocada de inmediato y no podrá volver a entrar a esta empresa. Si otra empresa distinta lo contrata, podrá crear una cuenta nueva ocupando este mismo correo.
+                </p>
+              </div>
+
+              <div>
+                <label className="text-slate-300 block mb-1">Motivo del bloqueo</label>
+                <select
+                  value={
+                    [
+                      'Desvinculación / Despido laboral',
+                      'Término de contrato',
+                      'Renuncia voluntaria',
+                      'Bloqueo preventivo de seguridad',
+                    ].includes(blockReason)
+                      ? blockReason
+                      : '__custom__'
+                  }
+                  onChange={(e) => {
+                    if (e.target.value !== '__custom__') {
+                      setBlockReason(e.target.value);
+                    } else {
+                      setBlockReason('');
+                    }
+                  }}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white mb-2"
+                >
+                  <option value="Desvinculación / Despido laboral">Desvinculación / Despido laboral</option>
+                  <option value="Término de contrato">Término de contrato</option>
+                  <option value="Renuncia voluntaria">Renuncia voluntaria</option>
+                  <option value="Bloqueo preventivo de seguridad">Bloqueo preventivo de seguridad</option>
+                  <option value="__custom__">Otro motivo...</option>
+                </select>
+                <input
+                  type="text"
+                  required
+                  placeholder="Describe el motivo de bloqueo..."
+                  value={blockReason}
+                  onChange={(e) => setBlockReason(e.target.value)}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                />
+              </div>
+
+              <div className="flex justify-end gap-2 pt-3 border-t border-slate-800">
+                <button
+                  type="button"
+                  onClick={() => setUserToBlock(null)}
+                  disabled={isTogglingBlock}
+                  className="px-4 py-2 text-slate-300 bg-slate-800 rounded-lg"
+                >
+                  Cancelar
+                </button>
+                <button
+                  type="submit"
+                  disabled={isTogglingBlock}
+                  className="px-4 py-2 text-white bg-rose-600 hover:bg-rose-500 rounded-lg font-semibold disabled:opacity-50"
+                >
+                  {isTogglingBlock ? 'Bloqueando...' : 'Confirmar Bloqueo'}
                 </button>
               </div>
             </form>

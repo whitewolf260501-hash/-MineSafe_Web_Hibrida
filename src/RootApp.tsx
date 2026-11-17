@@ -250,6 +250,7 @@ export const RootApp: React.FC = () => {
       }
     >
       <MineSafePanel
+        key={currentUser.id}
         authenticatedUser={currentUser}
         onSessionUserUpdated={setCurrentUser}
         onLogoutRequest={handleLogout}

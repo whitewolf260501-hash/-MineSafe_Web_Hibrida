@@ -118,6 +118,11 @@ const CONTROLLABLE_WINDOWS: Array<{
     description: 'Administración de cuentas RBAC, altas y permisos',
   },
   {
+    id: 'empresas',
+    label: 'Empresas y Carga Masiva',
+    description: 'Creación de empresas autorizadas e importación masiva CSV/JSON',
+  },
+  {
     id: 'visor_3d',
     label: 'Inspector 3D del Nodo',
     description: 'Visor 3D interactivo de hardware ESP32, sensores, carcasa y simulación de gases',
@@ -268,24 +273,31 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       });
   };
 
-  const handleToggleRoleWindow = (role: 'admin' | 'operador', tabId: ControllableTab) => {
+  const handleToggleRoleWindow = (role: 'admin' | 'operador' | 'monotoriador', tabId: ControllableTab) => {
+    if (role === 'operador') return;
     soundAlert.playFeedbackBeep();
-    commitVisibilityChange((prev) => ({
-      ...prev,
-      visibility: {
-        ...prev.visibility,
-        rolePermissions: {
-          ...prev.visibility.rolePermissions,
-          [role]: {
-            ...prev.visibility.rolePermissions[role],
-            [tabId]: !prev.visibility.rolePermissions[role][tabId],
+    commitVisibilityChange((prev) => {
+      const currentRoleMap =
+        prev.visibility.rolePermissions[role] ||
+        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role];
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          rolePermissions: {
+            ...prev.visibility.rolePermissions,
+            [role]: {
+              ...currentRoleMap,
+              [tabId]: !currentRoleMap[tabId],
+            },
           },
         },
-      },
-    }));
+      };
+    });
   };
 
-  const handleSetAllRoleWindows = (role: 'admin' | 'operador', allowed: boolean) => {
+  const handleSetAllRoleWindows = (role: 'admin' | 'operador' | 'monotoriador', allowed: boolean) => {
+    if (role === 'operador') return;
     soundAlert.playFeedbackBeep();
     const updated: Record<ControllableTab, boolean> = {
       dashboard: allowed,
@@ -296,6 +308,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       reportes: allowed,
       faenas: allowed,
       usuarios: allowed,
+      empresas: allowed,
       visor_3d: allowed,
       gateway_3d: allowed,
     };
@@ -316,6 +329,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     tabId: ControllableTab,
     value: WindowOverrideValue
   ) => {
+    if (targetUser.role === 'operador') return;
     soundAlert.playFeedbackBeep();
     const emailKey = normalizeEmailOverrideKey(targetUser.email);
     commitVisibilityChange((prev) => {
@@ -358,13 +372,19 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     });
   };
 
-  const handleToggleEquiposSubTabRole = (role: 'admin' | 'operador', subId: EquiposSubTab) => {
+  const handleToggleEquiposSubTabRole = (
+    role: 'admin' | 'operador' | 'monotoriador',
+    subId: EquiposSubTab
+  ) => {
     soundAlert.playFeedbackBeep();
     commitVisibilityChange((prev) => {
       const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
         admin: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         operador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
+        monotoriador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
       };
+      const roleSubMap =
+        currentPerms[role] || { asignaciones: true, arriendos: true, pagos: true, inventario: true };
       return {
         ...prev,
         visibility: {
@@ -372,8 +392,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
           equiposSubTabRolePermissions: {
             ...currentPerms,
             [role]: {
-              ...currentPerms[role],
-              [subId]: !currentPerms[role][subId],
+              ...roleSubMap,
+              [subId]: !roleSubMap[subId],
             },
           },
         },
@@ -989,10 +1009,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
             </div>
 
             {/* Quick Bulk Controls */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px]">
               <div className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-900/40 flex items-center justify-between gap-2">
                 <span className="font-bold text-cyan-300 flex items-center gap-1.5">
-                  <Shield className="w-3.5 h-3.5" /> Administradores
+                  <Shield className="w-3.5 h-3.5" /> Admins
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
@@ -1007,31 +1027,40 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     onClick={() => handleSetAllRoleWindows('admin', false)}
                     className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
                   >
-                    Bloquear todas
+                    Bloquear
                   </button>
                 </div>
               </div>
 
-              <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                  <HardHat className="w-3.5 h-3.5" /> Usuarios Normales
+              <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                  <Eye className="w-3.5 h-3.5" /> Monotoriadores
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => handleSetAllRoleWindows('operador', true)}
+                    onClick={() => handleSetAllRoleWindows('monotoriador', true)}
                     className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
                   >
                     Ver todas
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSetAllRoleWindows('operador', false)}
+                    onClick={() => handleSetAllRoleWindows('monotoriador', false)}
                     className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
                   >
-                    Bloquear todas
+                    Bloquear
                   </button>
                 </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 flex items-center justify-between gap-2">
+                <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                  <HardHat className="w-3.5 h-3.5" /> Operadores
+                </span>
+                <span className="px-2 py-1 rounded bg-amber-950/80 text-amber-200 border border-amber-800/80 text-[10px] font-bold">
+                  Fija: Solo Alertas (Lectura)
+                </span>
               </div>
             </div>
 
@@ -1042,12 +1071,16 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   <tr>
                     <th className="px-4 py-3">Ventana de la Plataforma</th>
                     <th className="px-4 py-3 text-center">Administrador</th>
+                    <th className="px-4 py-3 text-center">Monotoriador</th>
                     <th className="px-4 py-3 text-center">Operador (Normal)</th>
                   </tr>
                 </thead>
                 <tbody className="divide-y divide-slate-800/80">
                   {CONTROLLABLE_WINDOWS.map((win) => {
                     const adminVisible = draftConfig.visibility.rolePermissions.admin[win.id];
+                    const monVisible =
+                      draftConfig.visibility.rolePermissions.monotoriador?.[win.id] ??
+                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador[win.id];
                     const opVisible = draftConfig.visibility.rolePermissions.operador[win.id];
 
                     return (
@@ -1082,14 +1115,14 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         <td className="px-4 py-3 text-center">
                           <button
                             type="button"
-                            onClick={() => handleToggleRoleWindow('operador', win.id)}
+                            onClick={() => handleToggleRoleWindow('monotoriador', win.id)}
                             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                              opVisible
+                              monVisible
                                 ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
                                 : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
                             }`}
                           >
-                            {opVisible ? (
+                            {monVisible ? (
                               <>
                                 <Unlock className="w-3.5 h-3.5" />
                                 <span>Visible</span>
@@ -1101,6 +1134,22 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                               </>
                             )}
                           </button>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {win.id === 'alertas' ? (
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-emerald-950/70 text-emerald-300 border-emerald-700">
+                              <Unlock className="w-3.5 h-3.5" />
+                              <span>Solo Lectura (Fija)</span>
+                            </span>
+                          ) : (
+                            <span
+                              title="Por política de seguridad, el Operador solo puede ver datos y descripciones de alertas"
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700"
+                            >
+                              <Lock className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Bloqueada ({opVisible ? 'Restringida' : 'Política'})</span>
+                            </span>
+                          )}
                         </td>
                       </tr>
                     );
@@ -1127,6 +1176,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     <tr>
                       <th className="px-4 py-2.5">Sub-ventana</th>
                       <th className="px-4 py-2.5 text-center">Administrador</th>
+                      <th className="px-4 py-2.5 text-center">Monotoriador</th>
                       <th className="px-4 py-2.5 text-center">Operador (Normal)</th>
                     </tr>
                   </thead>
@@ -1134,6 +1184,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     {EQUIPOS_SUB_WINDOWS.map((sub) => {
                       const subPerms = draftConfig.visibility.equiposSubTabRolePermissions;
                       const adminSubVisible = subPerms?.admin?.[sub.id] ?? true;
+                      const monSubVisible = subPerms?.monotoriador?.[sub.id] ?? true;
                       const opSubVisible = subPerms?.operador?.[sub.id] ?? true;
 
                       return (
@@ -1168,14 +1219,14 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           <td className="px-4 py-2.5 text-center">
                             <button
                               type="button"
-                              onClick={() => handleToggleEquiposSubTabRole('operador', sub.id)}
+                              onClick={() => handleToggleEquiposSubTabRole('monotoriador', sub.id)}
                               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                                opSubVisible
+                                monSubVisible
                                   ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
                                   : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
                               }`}
                             >
-                              {opSubVisible ? (
+                              {monSubVisible ? (
                                 <>
                                   <Unlock className="w-3.5 h-3.5" />
                                   <span>Visible</span>
@@ -1187,6 +1238,12 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                 </>
                               )}
                             </button>
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700">
+                              <Lock className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Bloqueada ({opSubVisible ? 'Política' : 'Política'})</span>
+                            </span>
                           </td>
                         </tr>
                       );
@@ -1205,7 +1262,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 Rol y Bloqueo Individual por Usuario
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Selecciona cualquier usuario para cambiar su rol (Operador o Administrador), activar/desactivar su cuenta o bloquearle ventanas puntuales.
+                Selecciona cualquier usuario para cambiar su rol (Operador, Monotoriador o Administrador), activar/desactivar su cuenta o bloquearle ventanas puntuales.
               </p>
             </div>
 
@@ -1250,7 +1307,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       <div className="min-w-0">
                         <span className="font-bold block truncate">{u.name}</span>
                         <span className="text-[10px] text-slate-400 block truncate">
-                          {u.email} · {u.role === 'admin' ? 'Admin' : 'Operador'}
+                          {u.email} · {u.role === 'admin' ? 'Admin' : u.role === 'monotoriador' ? 'Monotoriador' : 'Operador'}
                         </span>
                       </div>
                       {customCount > 0 && (
@@ -1273,7 +1330,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       {activeTargetUser.name}
                     </span>
                     <span className="text-[10px] text-cyan-400 font-semibold uppercase">
-                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin' ? 'Administrador' : 'Usuario Normal (Operador)'}
+                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin' ? 'Administrador' : activeTargetUser.role === 'monotoriador' ? 'Monotoriador' : 'Usuario Normal (Operador)'}
                     </span>
                   </div>
                   <button
@@ -1315,7 +1372,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     </div>
 
                     {onUpdateUserRole && (
-                      <div className="grid grid-cols-2 gap-2 text-[11px] font-bold">
+                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-bold">
                         <button
                           type="button"
                           onClick={() => {
@@ -1333,7 +1390,26 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           }`}
                         >
                           <HardHat className="w-3.5 h-3.5" />
-                          <span>Operador (Normal)</span>
+                          <span>Operador</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (activeTargetUser.role === 'monotoriador') return;
+                            onUpdateUserRole(activeTargetUser.id, 'monotoriador');
+                            showNotice(
+                              'success',
+                              `Rol actualizado a Monotoriador Ambiental para ${activeTargetUser.name}.`
+                            );
+                          }}
+                          className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
+                            activeTargetUser.role === 'monotoriador'
+                              ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-emerald-300 hover:border-emerald-800'
+                          }`}
+                        >
+                          <Eye className="w-3.5 h-3.5" />
+                          <span>Monotoriador</span>
                         </button>
                         <button
                           type="button"
@@ -1378,14 +1454,21 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       : []),
                   ]).size;
 
-                  const roleKey = activeTargetUser.role === 'admin' ? 'admin' : 'operador';
+                  const roleKey: 'admin' | 'operador' | 'monotoriador' =
+                    activeTargetUser.role === 'admin'
+                      ? 'admin'
+                      : activeTargetUser.role === 'monotoriador'
+                      ? 'monotoriador'
+                      : 'operador';
                   const parentById = draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.equipos;
                   const parentByEmail = activeEmailKey
                     ? draftConfig.visibility.userOverridesByEmail?.[activeEmailKey]?.equipos
                     : undefined;
                   const parentOverride: WindowOverrideValue =
                     (parentById && parentById !== 'inherit' ? parentById : parentByEmail) || 'inherit';
-                  const parentRoleVisible = draftConfig.visibility.rolePermissions[roleKey].equipos;
+                  const parentRoleVisible =
+                    draftConfig.visibility.rolePermissions[roleKey]?.equipos ??
+                    DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey].equipos;
                   const isParentEquiposVisible =
                     parentOverride === 'allow'
                       ? true
@@ -1439,10 +1522,24 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         </button>
                       </div>
 
-                      {userOverrideSection === 'main' ? (
+                      {activeTargetUser.role === 'operador' ? (
+                        <div className="p-3.5 rounded-xl bg-amber-950/35 border border-amber-800/60 text-xs text-amber-200 flex items-start gap-2.5">
+                          <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                          <div>
+                            <strong className="block text-amber-100">
+                              Política Fija para Operador
+                            </strong>
+                            <span className="text-[11px] text-amber-200/90">
+                              Por limitación de rol, este usuario solo tiene acceso de lectura a los datos y descripción de alertas en el módulo <strong>Alertas</strong>. Las demás ventanas y ediciones permanecen bloqueadas.
+                            </span>
+                          </div>
+                        </div>
+                      ) : userOverrideSection === 'main' ? (
                         <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                           {CONTROLLABLE_WINDOWS.map((win) => {
-                            const roleDefault = draftConfig.visibility.rolePermissions[roleKey][win.id];
+                            const roleDefault =
+                              draftConfig.visibility.rolePermissions[roleKey]?.[win.id] ??
+                              DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey][win.id];
                             const byIdVal =
                               draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.[win.id];
                             const byEmailVal = activeEmailKey

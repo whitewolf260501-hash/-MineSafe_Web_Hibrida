@@ -209,8 +209,8 @@ export function downsampleChartPoints<T>(items: T[], maxPoints: number = 48): T[
 export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   variables,
   currentSite,
-  activeDeviceId = 'device_38A839E81F84',
-  activeDeviceName = 'Nodo Activo',
+  activeDeviceId = '',
+  activeDeviceName = 'Sin dispositivo asignado',
   telemetryHistory = [],
   alertEvents = [],
   alerts = [],
@@ -380,9 +380,10 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
     setIsExportingCsv(true);
     soundAlert.playFeedbackBeep();
     try {
+      const safeDeviceId = activeDeviceId || 'sin_dispositivo';
       const csvContent = await buildTelemetryCsvContentAsync({
         rows: fullSeries.map((pt) => ({ timestamp: pt.timestamp, value: pt.value })),
-        deviceId: activeDeviceId,
+        deviceId: safeDeviceId,
         variableName: currentVar.name,
         unit: currentVar.unit,
         siteName: currentSite.name,
@@ -393,7 +394,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
-      link.setAttribute('download', `minesafe_reporte_${activeDeviceId}_${currentVar.id}_${timeRange}.csv`);
+      link.setAttribute('download', `minesafe_reporte_${safeDeviceId}_${currentVar.id}_${timeRange}.csv`);
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);

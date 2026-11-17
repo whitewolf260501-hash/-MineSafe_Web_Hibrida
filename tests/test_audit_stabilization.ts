@@ -11,9 +11,11 @@ import {
   DEFAULT_PLATFORM_CONFIG,
   buildAlertBasePayload,
   buildRentalContractRTDBPayload,
+  isEquiposSubTabVisibleForUser,
   isTabVisibleForUser,
   mapRTDBAlertRecord,
   mapRTDBContractToRental,
+  mapRTDBUserToUserProfile,
   resolveConfiguredRtdbUrl,
   resolveTelemetryWindowMs,
 } from '../src/services/firebase';
@@ -337,6 +339,7 @@ assert.equal(
   'Operador cannot see gateway_3d under default config'
 );
 
+const monSpecial = makeUser({ id: 'mon-spec', email: 'mon_special@minesafe.cl', role: 'monotoriador', organizationId: 'org-alpha' });
 const gatewayCustomConfig = {
   ...DEFAULT_PLATFORM_CONFIG,
   visibility: {
@@ -347,20 +350,30 @@ const gatewayCustomConfig = {
         ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
         gateway_3d: true,
       },
+      monotoriador: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+        gateway_3d: true,
+      },
     },
     userOverrides: {
       'adm-a': { gateway_3d: 'block' as const },
     },
     userOverridesByEmail: {
       'op_special@minesafe_cl': { gateway_3d: 'allow' as const },
+      'mon_special@minesafe_cl': { gateway_3d: 'allow' as const },
     },
   },
 };
 
 assert.equal(
   isTabVisibleForUser('gateway_3d', opAlpha, gatewayCustomConfig),
+  false,
+  'Operador stays locked to alertas only even if config attempts to enable gateway_3d'
+);
+assert.equal(
+  isTabVisibleForUser('alertas', opAlpha, gatewayCustomConfig),
   true,
-  'Operador role toggle enables gateway_3d'
+  'Operador always retains read-only access to alertas'
 );
 assert.equal(
   isTabVisibleForUser('gateway_3d', adminAlpha, gatewayCustomConfig),
@@ -374,9 +387,89 @@ assert.equal(
 );
 assert.equal(
   isTabVisibleForUser('gateway_3d', opSpecial, gatewayCustomConfig),
+  false,
+  'Per-user email allow override cannot bypass operador alert-only restriction'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', monSpecial, DEFAULT_PLATFORM_CONFIG),
+  false
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', monSpecial, gatewayCustomConfig),
   true,
-  'Per-user email allow override grants gateway_3d access'
+  'Per-user email allow override grants gateway_3d access to monotoriador'
 );
 
-console.log('✅ 6. Gateway 3D role & individual visibility rules passed');
+const monAlpha = makeUser({ id: 'mon-a', email: 'mon@minesafe.cl', role: 'monotoriador', organizationId: 'org-alpha' });
+assert.equal(
+  canManageContractsAndPayments(monAlpha, 'org-alpha').allowed,
+  false,
+  'Monotoriador cannot manage contracts or payments'
+);
+assert.equal(
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador.monitoreo,
+  true,
+  'monitoreo defaults to visible for monotoriador'
+);
+assert.equal(
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador.usuarios,
+  false,
+  'usuarios defaults to hidden for monotoriador'
+);
+assert.equal(
+  isTabVisibleForUser('superadmin_panel', monAlpha, DEFAULT_PLATFORM_CONFIG),
+  false,
+  'Monotoriador never accesses superadmin_panel'
+);
+assert.equal(
+  isTabVisibleForUser('monitoreo', monAlpha, DEFAULT_PLATFORM_CONFIG),
+  true,
+  'Monotoriador accesses monitoreo by default'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', monAlpha, DEFAULT_PLATFORM_CONFIG),
+  false,
+  'Monotoriador hides gateway_3d by default'
+);
+assert.equal(
+  isEquiposSubTabVisibleForUser('asignaciones', monAlpha, DEFAULT_PLATFORM_CONFIG),
+  true,
+  'Equipos sub-tab defaults work for monotoriador'
+);
+
+const monMapped = mapRTDBUserToUserProfile('uid-mon-1', {
+  nombre: 'Elena Monotoriadora',
+  email: 'elena@minesafe.cl',
+  tipoUsuario: 'monotoriador',
+  isActive: true,
+  organizationId: 'org-alpha',
+});
+assert.equal(monMapped.role, 'monotoriador', 'mapRTDBUserToUserProfile resolves monotoriador');
+assert.equal(monMapped.roleLabel, 'Monotoriador Ambiental');
+
+const monCustomConfig = {
+  ...DEFAULT_PLATFORM_CONFIG,
+  visibility: {
+    ...DEFAULT_PLATFORM_CONFIG.visibility,
+    rolePermissions: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+      monotoriador: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+        gateway_3d: true,
+      },
+    },
+  },
+};
+assert.equal(
+  isTabVisibleForUser('gateway_3d', monAlpha, monCustomConfig),
+  true,
+  'Monotoriador role visibility toggle works independently from operador'
+);
+assert.equal(
+  isTabVisibleForUser('gateway_3d', opAlpha, monCustomConfig),
+  false,
+  'Operador stays hidden when only monotoriador is toggled'
+);
+
+console.log('✅ 6. Gateway 3D & Monotoriador role/individual visibility rules passed');
 console.log('\n🎉 All MineSafe Audit & Stabilization checks passed!');

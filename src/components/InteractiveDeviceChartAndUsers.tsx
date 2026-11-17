@@ -25,7 +25,8 @@ import {
   Volume2,
   Zap,
   Gauge,
-  ShieldCheck
+  ShieldCheck,
+  Eye
 } from 'lucide-react';
 import { PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile, UserRole } from '../types';
 
@@ -87,6 +88,16 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           avatarBg: 'bg-gradient-to-br from-cyan-600 to-blue-800 text-white border-cyan-400',
           icon: <Shield className="w-4 h-4 text-cyan-400" />,
           description: 'Gestión de Alertas, Equipos, Reportes y Operaciones'
+        };
+      case 'monotoriador':
+        return {
+          label: 'Monotoriador Ambiental',
+          typeText: '(Monotoriador)',
+          bg: 'bg-emerald-950/70 border-emerald-600/70 text-emerald-300 shadow-emerald-950/40',
+          badgeBg: 'bg-emerald-900/60 border-emerald-500/80 text-emerald-200',
+          avatarBg: 'bg-gradient-to-br from-emerald-600 to-teal-800 text-white border-emerald-400',
+          icon: <Eye className="w-4 h-4 text-emerald-400" />,
+          description: 'Supervisión Continua de Telemetría, Alertas e Historial'
         };
       case 'operador':
       default:
@@ -964,7 +975,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
 
             {/* Quick role pills */}
             <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px]">
-              {(['todos', 'superadmin', 'admin', 'operador'] as const).map((role) => {
+              {(['todos', 'superadmin', 'admin', 'monotoriador', 'operador'] as const).map((role) => {
                 const isActive = selectedRoleFilter === role;
                 return (
                   <button
@@ -976,7 +987,15 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                         : 'bg-slate-950 text-slate-400 hover:text-slate-200 hover:bg-slate-800 border border-slate-800'
                     }`}
                   >
-                    {role === 'todos' ? 'Todos' : role === 'superadmin' ? 'Superadmin' : role === 'admin' ? 'Admin' : 'Operadores'}
+                    {role === 'todos'
+                      ? 'Todos'
+                      : role === 'superadmin'
+                      ? 'Superadmin'
+                      : role === 'admin'
+                      ? 'Admin'
+                      : role === 'monotoriador'
+                      ? 'Monotoriador'
+                      : 'Operadores'}
                   </button>
                 );
               })}

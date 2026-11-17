@@ -34,7 +34,10 @@ import {
   Wifi,
   WifiOff,
   Check,
-  Building2
+  Building2,
+  ShieldCheck,
+  X,
+  ArrowRight
 } from 'lucide-react';
 import {
   ControllableTab,
@@ -68,7 +71,7 @@ interface SuperAdminControlViewProps {
   organizations?: Organization[];
   activeOrganizationId?: string;
   onSelectOrganization?: (orgId: string) => void;
-  onUpdateUserRole?: (userId: string, newRole: UserRole) => void;
+  onUpdateUserRole?: (userId: string, newRole: UserRole) => Promise<void> | void;
   onToggleUserStatus?: (userId: string) => void;
 }
 
@@ -184,6 +187,11 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   const [userOverrideSection, setUserOverrideSection] = useState<'main' | 'equipos'>('main');
   const [isSaving, setIsSaving] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+  const [pendingRoleChange, setPendingRoleChange] = useState<{
+    user: UserProfile;
+    nextRole: UserRole;
+  } | null>(null);
+  const [isUpdatingRole, setIsUpdatingRole] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // Estado del formulario para agregar o editar Sensores y Gateways
@@ -273,13 +281,17 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       });
   };
 
-  const handleToggleRoleWindow = (role: 'admin' | 'operador' | 'monotoriador', tabId: ControllableTab) => {
+  const handleToggleRoleWindow = (
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
+    tabId: ControllableTab
+  ) => {
     if (role === 'operador') return;
+    if (role === 'admin_minesafe' && (tabId === 'visor_3d' || tabId === 'gateway_3d')) return;
     soundAlert.playFeedbackBeep();
     commitVisibilityChange((prev) => {
-      const currentRoleMap =
-        prev.visibility.rolePermissions[role] ||
-        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role];
+      const currentRoleMap = (prev.visibility.rolePermissions[role] ||
+        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role] ||
+        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin) as Record<ControllableTab, boolean>;
       return {
         ...prev,
         visibility: {
@@ -296,7 +308,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     });
   };
 
-  const handleSetAllRoleWindows = (role: 'admin' | 'operador' | 'monotoriador', allowed: boolean) => {
+  const handleSetAllRoleWindows = (
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
+    allowed: boolean
+  ) => {
     if (role === 'operador') return;
     soundAlert.playFeedbackBeep();
     const updated: Record<ControllableTab, boolean> = {
@@ -309,8 +324,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       faenas: allowed,
       usuarios: allowed,
       empresas: allowed,
-      visor_3d: allowed,
-      gateway_3d: allowed,
+      visor_3d: role === 'admin_minesafe' ? false : allowed,
+      gateway_3d: role === 'admin_minesafe' ? false : allowed,
     };
     commitVisibilityChange((prev) => ({
       ...prev,
@@ -330,6 +345,9 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     value: WindowOverrideValue
   ) => {
     if (targetUser.role === 'operador') return;
+    if (targetUser.role === 'admin_minesafe' && (tabId === 'visor_3d' || tabId === 'gateway_3d')) {
+      return;
+    }
     soundAlert.playFeedbackBeep();
     const emailKey = normalizeEmailOverrideKey(targetUser.email);
     commitVisibilityChange((prev) => {
@@ -373,12 +391,13 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   };
 
   const handleToggleEquiposSubTabRole = (
-    role: 'admin' | 'operador' | 'monotoriador',
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
     subId: EquiposSubTab
   ) => {
     soundAlert.playFeedbackBeep();
     commitVisibilityChange((prev) => {
       const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
+        admin_minesafe: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         admin: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         operador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         monotoriador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
@@ -1009,7 +1028,29 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
             </div>
 
             {/* Quick Bulk Controls */}
-            <div className="grid grid-cols-1 sm:grid-cols-3 gap-3 text-[11px]">
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-[11px]">
+              <div className="p-3 rounded-xl bg-indigo-950/25 border border-indigo-800/50 flex items-center justify-between gap-2">
+                <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                  <ShieldCheck className="w-3.5 h-3.5" /> Admin MineSafe
+                </span>
+                <div className="flex items-center gap-1.5">
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('admin_minesafe', true)}
+                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                  >
+                    Ver permitidas
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => handleSetAllRoleWindows('admin_minesafe', false)}
+                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                  >
+                    Bloquear
+                  </button>
+                </div>
+              </div>
+
               <div className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-900/40 flex items-center justify-between gap-2">
                 <span className="font-bold text-cyan-300 flex items-center gap-1.5">
                   <Shield className="w-3.5 h-3.5" /> Admins
@@ -1070,6 +1111,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
                   <tr>
                     <th className="px-4 py-3">Ventana de la Plataforma</th>
+                    <th className="px-4 py-3 text-center text-indigo-300">Admin MineSafe</th>
                     <th className="px-4 py-3 text-center">Administrador</th>
                     <th className="px-4 py-3 text-center">Monotoriador</th>
                     <th className="px-4 py-3 text-center">Operador (Normal)</th>
@@ -1077,10 +1119,18 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-800/80">
                   {CONTROLLABLE_WINDOWS.map((win) => {
+                    const isHardLockedForMineSafeAdmin =
+                      win.id === 'visor_3d' || win.id === 'gateway_3d';
+                    const mineSafeAdminVisible = isHardLockedForMineSafeAdmin
+                      ? false
+                      : draftConfig.visibility.rolePermissions.admin_minesafe?.[win.id] ??
+                        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe?.[win.id] ??
+                        true;
                     const adminVisible = draftConfig.visibility.rolePermissions.admin[win.id];
                     const monVisible =
                       draftConfig.visibility.rolePermissions.monotoriador?.[win.id] ??
-                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador[win.id];
+                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador?.[win.id] ??
+                      true;
                     const opVisible = draftConfig.visibility.rolePermissions.operador[win.id];
 
                     return (
@@ -1088,6 +1138,39 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         <td className="px-4 py-3">
                           <span className="font-bold text-white block">{win.label}</span>
                           <span className="text-[11px] text-slate-400">{win.description}</span>
+                        </td>
+                        <td className="px-4 py-3 text-center">
+                          {isHardLockedForMineSafeAdmin ? (
+                            <span
+                              title="Por política MineSafe, este rol nunca puede abrir Inspector 3D ni Gateway 3D."
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700"
+                            >
+                              <Lock className="w-3.5 h-3.5 text-indigo-400" />
+                              <span>Bloqueada (Política)</span>
+                            </span>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleRoleWindow('admin_minesafe', win.id)}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                                mineSafeAdminVisible
+                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                              }`}
+                            >
+                              {mineSafeAdminVisible ? (
+                                <>
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>Visible</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Lock className="w-3.5 h-3.5" />
+                                  <span>Bloqueada</span>
+                                </>
+                              )}
+                            </button>
+                          )}
                         </td>
                         <td className="px-4 py-3 text-center">
                           <button
@@ -1175,6 +1258,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider border-b border-slate-800">
                     <tr>
                       <th className="px-4 py-2.5">Sub-ventana</th>
+                      <th className="px-4 py-2.5 text-center text-indigo-300">Admin MineSafe</th>
                       <th className="px-4 py-2.5 text-center">Administrador</th>
                       <th className="px-4 py-2.5 text-center">Monotoriador</th>
                       <th className="px-4 py-2.5 text-center">Operador (Normal)</th>
@@ -1183,6 +1267,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   <tbody className="divide-y divide-slate-800/80">
                     {EQUIPOS_SUB_WINDOWS.map((sub) => {
                       const subPerms = draftConfig.visibility.equiposSubTabRolePermissions;
+                      const mineSafeAdminSubVisible = subPerms?.admin_minesafe?.[sub.id] ?? true;
                       const adminSubVisible = subPerms?.admin?.[sub.id] ?? true;
                       const monSubVisible = subPerms?.monotoriador?.[sub.id] ?? true;
                       const opSubVisible = subPerms?.operador?.[sub.id] ?? true;
@@ -1192,6 +1277,29 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           <td className="px-4 py-2.5">
                             <span className="font-bold text-white block">{sub.label}</span>
                             <span className="text-[11px] text-slate-400">{sub.description}</span>
+                          </td>
+                          <td className="px-4 py-2.5 text-center">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleEquiposSubTabRole('admin_minesafe', sub.id)}
+                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                                mineSafeAdminSubVisible
+                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                              }`}
+                            >
+                              {mineSafeAdminSubVisible ? (
+                                <>
+                                  <Unlock className="w-3.5 h-3.5" />
+                                  <span>Visible</span>
+                                </>
+                              ) : (
+                                <>
+                                  <Lock className="w-3.5 h-3.5" />
+                                  <span>Bloqueada</span>
+                                </>
+                              )}
+                            </button>
                           </td>
                           <td className="px-4 py-2.5 text-center">
                             <button
@@ -1307,7 +1415,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       <div className="min-w-0">
                         <span className="font-bold block truncate">{u.name}</span>
                         <span className="text-[10px] text-slate-400 block truncate">
-                          {u.email} · {u.role === 'admin' ? 'Admin' : u.role === 'monotoriador' ? 'Monotoriador' : 'Operador'}
+                          {u.email} · {u.role === 'admin_minesafe' ? 'Admin MineSafe' : u.role === 'admin' ? 'Admin' : u.role === 'monotoriador' ? 'Monotoriador' : 'Operador'}
                         </span>
                       </div>
                       {customCount > 0 && (
@@ -1330,7 +1438,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       {activeTargetUser.name}
                     </span>
                     <span className="text-[10px] text-cyan-400 font-semibold uppercase">
-                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin' ? 'Administrador' : activeTargetUser.role === 'monotoriador' ? 'Monotoriador' : 'Usuario Normal (Operador)'}
+                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin_minesafe' ? 'Admin Corporativo MineSafe' : activeTargetUser.role === 'admin' ? 'Administrador' : activeTargetUser.role === 'monotoriador' ? 'Monotoriador' : 'Usuario Normal (Operador)'}
                     </span>
                   </div>
                   <button
@@ -1372,16 +1480,12 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     </div>
 
                     {onUpdateUserRole && (
-                      <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 text-[11px] font-bold">
+                      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-2 text-[11px] font-bold">
                         <button
                           type="button"
                           onClick={() => {
                             if (activeTargetUser.role === 'operador') return;
-                            onUpdateUserRole(activeTargetUser.id, 'operador');
-                            showNotice(
-                              'success',
-                              `Rol actualizado a Usuario Normal (Operador) para ${activeTargetUser.name}.`
-                            );
+                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'operador' });
                           }}
                           className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
                             activeTargetUser.role === 'operador'
@@ -1396,11 +1500,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           type="button"
                           onClick={() => {
                             if (activeTargetUser.role === 'monotoriador') return;
-                            onUpdateUserRole(activeTargetUser.id, 'monotoriador');
-                            showNotice(
-                              'success',
-                              `Rol actualizado a Monotoriador Ambiental para ${activeTargetUser.name}.`
-                            );
+                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'monotoriador' });
                           }}
                           className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
                             activeTargetUser.role === 'monotoriador'
@@ -1415,11 +1515,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           type="button"
                           onClick={() => {
                             if (activeTargetUser.role === 'admin') return;
-                            onUpdateUserRole(activeTargetUser.id, 'admin');
-                            showNotice(
-                              'success',
-                              `Permisos de Administrador otorgados a ${activeTargetUser.name}.`
-                            );
+                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'admin' });
                           }}
                           className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
                             activeTargetUser.role === 'admin'
@@ -1429,6 +1525,21 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         >
                           <Shield className="w-3.5 h-3.5" />
                           <span>Administrador</span>
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            if (activeTargetUser.role === 'admin_minesafe') return;
+                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'admin_minesafe' });
+                          }}
+                          className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
+                            activeTargetUser.role === 'admin_minesafe'
+                              ? 'bg-indigo-600 text-white border-indigo-400 shadow-sm'
+                              : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-indigo-300 hover:border-indigo-800'
+                          }`}
+                        >
+                          <ShieldCheck className="w-3.5 h-3.5" />
+                          <span>Admin MineSafe</span>
                         </button>
                       </div>
                     )}
@@ -1454,8 +1565,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       : []),
                   ]).size;
 
-                  const roleKey: 'admin' | 'operador' | 'monotoriador' =
-                    activeTargetUser.role === 'admin'
+                  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+                    activeTargetUser.role === 'admin_minesafe'
+                      ? 'admin_minesafe'
+                      : activeTargetUser.role === 'admin'
                       ? 'admin'
                       : activeTargetUser.role === 'monotoriador'
                       ? 'monotoriador'
@@ -1468,7 +1581,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     (parentById && parentById !== 'inherit' ? parentById : parentByEmail) || 'inherit';
                   const parentRoleVisible =
                     draftConfig.visibility.rolePermissions[roleKey]?.equipos ??
-                    DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey].equipos;
+                    DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey]?.equipos ??
+                    false;
                   const isParentEquiposVisible =
                     parentOverride === 'allow'
                       ? true
@@ -1537,9 +1651,14 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       ) : userOverrideSection === 'main' ? (
                         <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                           {CONTROLLABLE_WINDOWS.map((win) => {
-                            const roleDefault =
-                              draftConfig.visibility.rolePermissions[roleKey]?.[win.id] ??
-                              DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey][win.id];
+                            const isPolicyLockedForMineSafeAdmin =
+                              activeTargetUser.role === 'admin_minesafe' &&
+                              (win.id === 'visor_3d' || win.id === 'gateway_3d');
+                            const roleDefault = isPolicyLockedForMineSafeAdmin
+                              ? false
+                              : draftConfig.visibility.rolePermissions[roleKey]?.[win.id] ??
+                                DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey]?.[win.id] ??
+                                false;
                             const byIdVal =
                               draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.[win.id];
                             const byEmailVal = activeEmailKey
@@ -1558,52 +1677,61 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                     {win.label}
                                   </span>
                                   <span className="text-[10px] text-slate-400">
-                                    Por rol: {roleDefault ? 'Visible' : 'Bloqueada'}
+                                    {isPolicyLockedForMineSafeAdmin
+                                      ? 'Política fija: Bloqueada'
+                                      : `Por rol: ${roleDefault ? 'Visible' : 'Bloqueada'}`}
                                   </span>
                                 </div>
 
-                                <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold">
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleUserWindowOverride(activeTargetUser, win.id, 'inherit')
-                                    }
-                                    className={`px-2 py-1 rounded border transition-colors ${
-                                      currentOverride === 'inherit'
-                                        ? 'bg-slate-700 text-white border-slate-500'
-                                        : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
-                                    }`}
-                                  >
-                                    Rol
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleUserWindowOverride(activeTargetUser, win.id, 'allow')
-                                    }
-                                    className={`px-2 py-1 rounded border transition-colors ${
-                                      currentOverride === 'allow'
-                                        ? 'bg-emerald-600 text-white border-emerald-400'
-                                        : 'bg-slate-950 text-emerald-400/70 border-slate-800 hover:text-emerald-300'
-                                    }`}
-                                  >
-                                    Ver
-                                  </button>
-                                  <button
-                                    type="button"
-                                    onClick={() =>
-                                      handleUserWindowOverride(activeTargetUser, win.id, 'block')
-                                    }
-                                    className={`px-2 py-1 rounded border flex items-center gap-1 transition-colors ${
-                                      currentOverride === 'block'
-                                        ? 'bg-rose-600 text-white border-rose-400'
-                                        : 'bg-slate-950 text-rose-400/70 border-slate-800 hover:text-rose-300'
-                                    }`}
-                                  >
+                                {isPolicyLockedForMineSafeAdmin ? (
+                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded border bg-slate-950 border-indigo-900/60 text-indigo-300 text-[10px] font-bold shrink-0">
                                     <Lock className="w-2.5 h-2.5" />
-                                    <span>Bloquear</span>
-                                  </button>
-                                </div>
+                                    <span>Bloqueada (Política)</span>
+                                  </span>
+                                ) : (
+                                  <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold">
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserWindowOverride(activeTargetUser, win.id, 'inherit')
+                                      }
+                                      className={`px-2 py-1 rounded border transition-colors ${
+                                        currentOverride === 'inherit'
+                                          ? 'bg-slate-700 text-white border-slate-500'
+                                          : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-white'
+                                      }`}
+                                    >
+                                      Rol
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserWindowOverride(activeTargetUser, win.id, 'allow')
+                                      }
+                                      className={`px-2 py-1 rounded border transition-colors ${
+                                        currentOverride === 'allow'
+                                          ? 'bg-emerald-600 text-white border-emerald-400'
+                                          : 'bg-slate-950 text-emerald-400/70 border-slate-800 hover:text-emerald-300'
+                                      }`}
+                                    >
+                                      Ver
+                                    </button>
+                                    <button
+                                      type="button"
+                                      onClick={() =>
+                                        handleUserWindowOverride(activeTargetUser, win.id, 'block')
+                                      }
+                                      className={`px-2 py-1 rounded border flex items-center gap-1 transition-colors ${
+                                        currentOverride === 'block'
+                                          ? 'bg-rose-600 text-white border-rose-400'
+                                          : 'bg-slate-950 text-rose-400/70 border-slate-800 hover:text-rose-300'
+                                      }`}
+                                    >
+                                      <Lock className="w-2.5 h-2.5" />
+                                      <span>Bloquear</span>
+                                    </button>
+                                  </div>
+                                )}
                               </div>
                             );
                           })}
@@ -2874,6 +3002,109 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   </div>
                 );
               })}
+            </div>
+          </div>
+        </div>
+      )}
+      {/* MODAL: CONFIRMAR CAMBIO DE ROL EN CONTROL MAESTRO */}
+      {pendingRoleChange && onUpdateUserRole && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="control-confirm-role-change-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+        >
+          <div className="bg-slate-900 border border-amber-700/70 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3
+                id="control-confirm-role-change-title"
+                className="text-base font-bold text-white flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                Confirmar cambio de rol
+              </h3>
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={() => setPendingRoleChange(null)}
+                className="text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-200 leading-relaxed">
+                ¿Estás seguro de que deseas cambiar el rol de{' '}
+                <span className="font-bold text-white">{pendingRoleChange.user.name}</span>?
+              </p>
+
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="text-[11px] text-slate-400 font-mono truncate">
+                  {pendingRoleChange.user.email}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] font-bold">
+                  <span className="px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300">
+                    {pendingRoleChange.user.role === 'admin_minesafe'
+                      ? 'Admin MineSafe'
+                      : pendingRoleChange.user.role === 'admin'
+                      ? 'Administrador'
+                      : pendingRoleChange.user.role === 'monotoriador'
+                      ? 'Monotoriador'
+                      : 'Operador'}
+                  </span>
+                  <ArrowRight className="w-4 h-4 text-amber-400 shrink-0" />
+                  <span className="px-2 py-0.5 rounded bg-amber-950 border border-amber-700 text-amber-200">
+                    {pendingRoleChange.nextRole === 'admin_minesafe'
+                      ? 'Admin MineSafe'
+                      : pendingRoleChange.nextRole === 'admin'
+                      ? 'Administrador'
+                      : pendingRoleChange.nextRole === 'monotoriador'
+                      ? 'Monotoriador'
+                      : 'Operador'}
+                  </span>
+                </div>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800 text-xs">
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={() => setPendingRoleChange(null)}
+                className="px-4 py-2 text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={async () => {
+                  const { user: targetUser, nextRole } = pendingRoleChange;
+                  setIsUpdatingRole(true);
+                  try {
+                    await Promise.resolve(onUpdateUserRole(targetUser.id, nextRole));
+                    showNotice(
+                      'success',
+                      nextRole === 'admin_minesafe'
+                        ? `Permisos de Admin Corporativo MineSafe otorgados a ${targetUser.name}.`
+                        : nextRole === 'admin'
+                        ? `Permisos de Administrador otorgados a ${targetUser.name}.`
+                        : nextRole === 'monotoriador'
+                        ? `Rol actualizado a Monotoriador Ambiental para ${targetUser.name}.`
+                        : `Rol actualizado a Usuario Normal (Operador) para ${targetUser.name}.`
+                    );
+                    setPendingRoleChange(null);
+                  } catch (err: any) {
+                    showNotice('error', err?.message || 'No se pudo actualizar el rol en Firebase RTDB.');
+                  } finally {
+                    setIsUpdatingRole(false);
+                  }
+                }}
+                className="px-4 py-2 text-white bg-amber-600 hover:bg-amber-500 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {isUpdatingRole ? 'Guardando cambio...' : 'Sí, cambiar rol'}
+              </button>
             </div>
           </div>
         </div>

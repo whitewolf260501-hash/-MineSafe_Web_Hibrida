@@ -237,9 +237,45 @@ export interface DeviceRental {
   notes: string;
 }
 
+export interface CrewMember {
+  id: string;
+  userId?: string;
+  assignmentId?: string;
+  name: string;
+  rut: string;
+  role: string;
+  email?: string;
+  assignedDeviceCode?: string;
+  emergencyContact?: string;
+  isLeader?: boolean;
+  addedAt: number;
+}
+
+export interface MiningCrew {
+  id: string;
+  organizationId: string;
+  name: string;
+  code: string;
+  shift: string;
+  leaderName?: string;
+  leaderUserId?: string;
+  siteId?: string;
+  siteName?: string;
+  sectorId?: string;
+  sectorName?: string;
+  notes?: string;
+  status: 'activa' | 'en_descanso' | 'inactiva';
+  members: CrewMember[];
+  createdBy?: string;
+  createdAt: number;
+  updatedAt: number;
+}
+
 export interface WorkerAssignment {
   id: string;
   organizationId?: string;
+  userId?: string;
+  crewId?: string;
   workerRut: string;
   workerName: string;
   role: string;
@@ -252,7 +288,7 @@ export interface WorkerAssignment {
   emergencyContact: string;
 }
 
-export type UserRole = 'superadmin' | 'admin' | 'operador' | 'monotoriador';
+export type UserRole = 'superadmin' | 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador';
 
 export interface UserProfile {
   id: string;
@@ -296,6 +332,7 @@ export type WindowOverrideValue = 'inherit' | 'allow' | 'block';
 
 export interface PlatformVisibilityConfig {
   rolePermissions: {
+    admin_minesafe?: Record<ControllableTab, boolean>;
     admin: Record<ControllableTab, boolean>;
     operador: Record<ControllableTab, boolean>;
     monotoriador: Record<ControllableTab, boolean>;
@@ -303,6 +340,7 @@ export interface PlatformVisibilityConfig {
   userOverrides: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
   userOverridesByEmail?: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
   equiposSubTabRolePermissions?: {
+    admin_minesafe?: Record<EquiposSubTab, boolean>;
     admin: Record<EquiposSubTab, boolean>;
     operador: Record<EquiposSubTab, boolean>;
     monotoriador: Record<EquiposSubTab, boolean>;

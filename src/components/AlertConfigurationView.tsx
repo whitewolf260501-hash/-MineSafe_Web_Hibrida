@@ -40,6 +40,7 @@ import {
   RTDBSubscriptionScope
 } from '../services/firebase';
 import { alertEngine } from '../services/alertEngine';
+import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 
 interface AlertConfigurationViewProps {
   devices: SensorDevice[];
@@ -56,7 +57,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
-      : isSuperAdmin
+      : isGlobalMineSafeAdmin(currentUser.role)
       ? 'all'
       : currentUser.organizationId || DEFAULT_ORGANIZATION.id;
 
@@ -88,8 +89,8 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
 
-  // Permisos: Solo SuperAdmin y Admin pueden guardar/restaurar
-  const isAuthorized = currentUser.role === 'admin' || currentUser.role === 'superadmin';
+  // Permisos: Administradores (local o MineSafe) y SuperAdmin pueden guardar/restaurar umbrales por dispositivo
+  const isAuthorized = isAnyAdminRole(currentUser.role);
 
   useEffect(() => {
     if (!isSuperAdmin) {

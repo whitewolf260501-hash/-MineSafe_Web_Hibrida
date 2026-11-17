@@ -26,9 +26,12 @@ import { buildTelemetryCsvContentAsync } from '../src/components/HistoricalRepor
 import { resolveNode3DLiveTelemetry } from '../src/components/Node3DInspectorView';
 import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspectorView';
 import {
+  assignWorkersToCrew,
+  buildCrewMemberFromUser,
   canCreateOrEditOrganization,
   canDeleteOrganization,
   canManageContractsAndPayments,
+  canManageCrews,
   canModifyTargetUser,
   canProvisionUserInOrganization,
   createEmptyTelemetryVariables,
@@ -54,7 +57,7 @@ import {
   parseMarkdownBlocks,
 } from '../src/utils/superAdminDocs';
 import { ROOT_MARKDOWN_FILES } from '../src/data/generatedDocs';
-import { Organization, PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
+import { MiningCrew, Organization, PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
 
 const rootDir = process.cwd();
 const readRepoFile = (relPath: string) => fs.readFileSync(path.join(rootDir, relPath), 'utf8');
@@ -1216,6 +1219,303 @@ async function runTests() {
   );
 
   console.log('✅ 17. Operador alert-only read-only limitation passed');
+
+  // ---------------------------------------------------------------------------
+  // 18. Rol Admin Corporativo MineSafe (admin_minesafe) y sus limitaciones
+  // ---------------------------------------------------------------------------
+  const admMs = makeUser({
+    id: 'adm-ms-1',
+    email: 'corporativo@minesafe.cl',
+    role: 'admin_minesafe',
+    roleLabel: 'Admin Corporativo MineSafe',
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  });
+  const admMs2 = makeUser({
+    id: 'adm-ms-2',
+    email: 'corporativo2@minesafe.cl',
+    role: 'admin_minesafe',
+    roleLabel: 'Admin Corporativo MineSafe',
+    organizationId: DEFAULT_ORGANIZATION_ID,
+  });
+
+  const expectedAllowedForAdminMinesafe = new Set<string>([
+    'dashboard',
+    'monitoreo',
+    'alertas',
+    'configuracion_alertas',
+    'equipos',
+    'reportes',
+    'faenas',
+    'usuarios',
+    'empresas',
+  ]);
+  const blockedForAdminMinesafe = [
+    'visor_3d',
+    'gateway_3d',
+    'superadmin_panel',
+    'superadmin_docs',
+  ] as const;
+
+  const tamperedAdminMinesafeConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      rolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+        admin_minesafe: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe!,
+          visor_3d: true,
+          gateway_3d: true,
+        },
+      },
+      userOverrides: {
+        [admMs.id]: {
+          visor_3d: 'allow',
+          gateway_3d: 'allow',
+          superadmin_panel: 'allow',
+          superadmin_docs: 'allow',
+        },
+      },
+      userOverridesByEmail: {
+        'corporativo@minesafe_cl': {
+          visor_3d: 'allow',
+          gateway_3d: 'allow',
+          superadmin_panel: 'allow',
+          superadmin_docs: 'allow',
+        },
+      },
+    },
+  } as unknown as PlatformConfig;
+
+  for (const tab of allNavigationTabs) {
+    const shouldSee = expectedAllowedForAdminMinesafe.has(tab);
+    assert.equal(
+      isTabVisibleForUser(tab, admMs, DEFAULT_PLATFORM_CONFIG),
+      shouldSee,
+      `Default config visibility for admin_minesafe on ${tab}`
+    );
+    assert.equal(
+      isTabVisibleForUser(tab, admMs, tamperedAdminMinesafeConfig),
+      shouldSee,
+      `Tampered config still blocks 4 restricted windows for admin_minesafe (${tab})`
+    );
+  }
+  for (const blockedTab of blockedForAdminMinesafe) {
+    assert.equal(
+      isTabVisibleForUser(blockedTab, admMs, tamperedAdminMinesafeConfig),
+      false,
+      `admin_minesafe unconditionally blocked from ${blockedTab}`
+    );
+  }
+  for (const sub of ['asignaciones', 'arriendos', 'pagos', 'inventario'] as const) {
+    assert.equal(
+      isEquiposSubTabVisibleForUser(sub, admMs, DEFAULT_PLATFORM_CONFIG),
+      true,
+      `admin_minesafe can access equipos sub-tab ${sub}`
+    );
+  }
+
+  // Global cross-company visibility & operational scoping
+  assert.equal(resolveEffectiveOrgId(admMs, 'all', ownedOrgs), 'all');
+  assert.equal(resolveEffectiveOrgId(admMs, 'org-gamma', ownedOrgs), 'org-gamma');
+  assert.deepEqual(
+    getAuthorizedOrganizationIds(admMs, ownedOrgs),
+    [DEFAULT_ORGANIZATION_ID, 'org-gamma', 'org-beta']
+  );
+  assert.deepEqual(
+    filterScopedEntities(mixedEntities, admMs, 'all', ownedOrgs).map((e) => e.id),
+    ['ent-principal', 'ent-alpha', 'ent-beta', 'ent-gamma']
+  );
+  const admMsVisibleUsers = filterScopedUsers([sa, admMs, admMs2, ...mixedUsers.slice(1)], admMs, 'all', ownedOrgs);
+  assert.ok(!admMsVisibleUsers.some((u) => u.role === 'superadmin'), 'admin_minesafe does not view/manage superadmin');
+  assert.ok(admMsVisibleUsers.some((u) => u.id === 'op-b') && admMsVisibleUsers.some((u) => u.id === 'adm-g'));
+
+  // Smart security limitations: companies & hierarchy
+  assert.equal(canCreateOrEditOrganization(admMs, null).allowed, true, 'Can create new client orgs');
+  assert.equal(canCreateOrEditOrganization(admMs, ownedOrgs[1]).allowed, true, 'Can edit client orgs');
+  assert.equal(canCreateOrEditOrganization(admMs, ownedOrgs[0]).allowed, false, 'Cannot edit Principal org');
+  assert.equal(canDeleteOrganization(admMs, ownedOrgs[1]).allowed, false, 'Cannot permanently delete orgs');
+  assert.equal(canManageContractsAndPayments(admMs, 'org-gamma', ownedOrgs).allowed, true);
+
+  assert.equal(canProvisionUserInOrganization(admMs, 'org-gamma', 'admin', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'monotoriador', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'admin_minesafe', ownedOrgs).allowed, false);
+  assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'superadmin', ownedOrgs).allowed, false);
+  assert.equal(canProvisionUserInOrganization(sa, DEFAULT_ORGANIZATION_ID, 'admin_minesafe', ownedOrgs).allowed, true);
+
+  assert.equal(canModifyTargetUser(admMs, admB, 'operador', ownedOrgs).allowed, true);
+  assert.equal(canModifyTargetUser(admMs, admMs2, 'operador', ownedOrgs).allowed, false, 'Cannot modify peer admin_minesafe');
+  assert.equal(canModifyTargetUser(admMs, sa, 'operador', ownedOrgs).allowed, false, 'Cannot modify superadmin');
+  assert.equal(canModifyTargetUser(admMs, admB, 'admin_minesafe', ownedOrgs).allowed, false, 'Cannot promote to admin_minesafe');
+  assert.equal(canModifyTargetUser(sa, admMs, 'admin', ownedOrgs).allowed, true, 'SuperAdmin can manage admin_minesafe');
+
+  // Bulk import blocks escalation to admin_minesafe
+  const bulkWithAdminMinesafe = parseBulkInput(
+    'users',
+    [
+      'nombre,email,rut,rol,turno',
+      'Operador Valido,opvalido@gamma.cl,16.111.222-3,operador,Turno A',
+      'Escalada Corporativa,corp@gamma.cl,17.222.333-4,admin_minesafe,Turno A',
+    ].join('\n'),
+    { organizationId: 'org-gamma' }
+  );
+  assert.equal(bulkWithAdminMinesafe.validRows.length, 1);
+  assert.equal(bulkWithAdminMinesafe.invalidRows.length, 1);
+  assert.ok(bulkWithAdminMinesafe.invalidRows[0].errors[0].includes('Admin Corporativo MineSafe'));
+
+  // Rules, Blueprint & App/Service guards static checks
+  const blueprintJson = JSON.parse(readRepoFile('firebase-blueprint.json'));
+  const controlViewSrc = readRepoFile('src/components/SuperAdminControlView.tsx');
+  assert.ok(blueprintJson.entities.user.properties.role.enum.includes('admin_minesafe'));
+  assert.ok(firestoreRules.includes("'admin_minesafe'"));
+  assert.ok(!rtdbRules.rules.configuracion_plataforma['.write'].includes('admin_minesafe'));
+  assert.ok(!rtdbRules.rules.precarga['.read'].includes('admin_minesafe'));
+  assert.ok(
+    rtdbRules.rules.organizaciones['$orgId']['.write'].includes("tipoUsuario').val() === 'admin_minesafe' && $orgId !== 'org-minesafe-principal' && newData.exists()"),
+    'RTDB allows admin_minesafe org create/update on client orgs without deletion'
+  );
+  assert.ok(
+    rtdbRules.rules.configuracion_alertas['$targetId']['.write'].includes("tipoUsuario').val() === 'admin_minesafe' && $targetId !== 'global'"),
+    'RTDB blocks admin_minesafe from global alert threshold config'
+  );
+  assert.ok(
+    rtdbRules.rules.usuarios['$userId']['.write'].includes("tipoUsuario').val() === 'admin_minesafe'") &&
+      rtdbRules.rules.usuarios['$userId']['.validate'].includes("newData.child('tipoUsuario').val() !== 'admin_minesafe'"),
+    'RTDB enforces admin_minesafe cannot create/modify superadmin or peer admin_minesafe'
+  );
+  assert.ok(
+    firebaseSvcSrc.includes('savePlatformConfig') &&
+      appSrc.includes("currentUser.role !== 'superadmin'") &&
+      controlViewSrc.includes('Bloqueada (Política)'),
+    'Service, App, and SuperAdminControlView enforce admin_minesafe smart boundaries'
+  );
+
+  console.log('✅ 18. Admin Corporativo MineSafe (admin_minesafe) & security limitations passed');
+
+  // ---------------------------------------------------------------------------
+  // 19. Creación de cuadrillas y asignación de trabajadores a la cuadrilla
+  // ---------------------------------------------------------------------------
+  // RBAC: who can create/edit/delete crews & assign workers
+  const inactiveAdm = makeUser({
+    id: 'adm-inactive-crew',
+    role: 'admin',
+    status: 'inactivo',
+    organizationId: 'org-alpha',
+  });
+  assert.equal(canManageCrews(opG, 'org-gamma', ownedOrgs).allowed, false, 'Operador cannot manage crews');
+  assert.equal(canManageCrews(monG, 'org-gamma', ownedOrgs).allowed, false, 'Monotoriador cannot manage crews');
+  assert.equal(canManageCrews(inactiveAdm, 'org-alpha', ownedOrgs).allowed, false, 'Inactive user cannot manage crews');
+  assert.equal(canManageCrews(admG, 'org-gamma', ownedOrgs).allowed, true, 'Admin can manage crews in primary org');
+  assert.equal(canManageCrews(admA, 'org-gamma', ownedOrgs).allowed, true, 'Admin can manage crews in owned org');
+  assert.equal(canManageCrews(admG, 'org-beta', ownedOrgs).allowed, false, 'Admin cannot manage crews in non-owned third-party org');
+  assert.equal(canManageCrews(admMs, 'org-alpha', ownedOrgs).allowed, true, 'admin_minesafe can manage crews across orgs');
+  assert.equal(canManageCrews(sa, 'org-beta', ownedOrgs).allowed, true, 'superadmin can manage crews');
+
+  // Worker assignment & leader deduplication logic
+  const workerA = makeUser({
+    id: 'usr-worker-a',
+    name: 'Carlos Muñoz',
+    email: 'cmunoz@gamma.cl',
+    rut: '16.543.210-1',
+    role: 'operador',
+    organizationId: 'org-gamma',
+    assignedDeviceCode: 'MS-GAS-201',
+  });
+  const workerB = makeUser({
+    id: 'usr-worker-b',
+    name: 'Elena Soto',
+    email: 'esoto@gamma.cl',
+    rut: '17.654.321-K',
+    role: 'monotoriador',
+    organizationId: 'org-gamma',
+  });
+
+  const baseCrew: MiningCrew = {
+    id: 'crew-test-01',
+    organizationId: 'org-gamma',
+    name: 'Cuadrilla Gamma Perforación',
+    code: 'CUA-01',
+    shift: 'Turno Mañana (07:00 - 15:30)',
+    status: 'activa',
+    siteId: 'site-gamma-1',
+    siteName: 'Mina Gamma',
+    sectorId: 'sec-gamma-1',
+    sectorName: 'Nivel -320',
+    members: [],
+    createdAt: 1000,
+    updatedAt: 1000,
+  };
+
+  const memberA = buildCrewMemberFromUser(workerA, { isLeader: true });
+  const memberADup = buildCrewMemberFromUser(workerA, { isLeader: false });
+  const memberB = buildCrewMemberFromUser(workerB, { isLeader: true });
+
+  const crewWithWorkers = assignWorkersToCrew(baseCrew, [memberA, memberADup, memberB], 2000);
+  assert.equal(crewWithWorkers.members.length, 2, 'Deduplicates duplicate worker entry');
+  assert.equal(crewWithWorkers.leaderUserId, workerB.id, 'Last designated leader becomes sole leader');
+  assert.equal(crewWithWorkers.leaderName, 'Elena Soto');
+  assert.equal(crewWithWorkers.members.filter((m) => m.isLeader).length, 1, 'At most one leader per crew');
+  assert.equal(crewWithWorkers.updatedAt, 2000);
+
+  const crewAfterRemoval = assignWorkersToCrew(
+    crewWithWorkers,
+    crewWithWorkers.members.filter((m) => m.userId !== workerB.id),
+    3000
+  );
+  assert.equal(crewAfterRemoval.members.length, 1);
+  assert.equal(crewAfterRemoval.leaderUserId, undefined, 'Clears leaderUserId when former leader is removed');
+  assert.equal(crewAfterRemoval.leaderName, undefined, 'Clears leaderName when former leader is removed');
+  assert.equal(crewAfterRemoval.members[0].userId, workerA.id);
+
+  // Rules, Blueprint & UI/App wiring static checks for Cuadrillas
+  const crewMgmtSrc = readRepoFile('src/components/CrewManagementSection.tsx');
+  const devicesViewSrc = readRepoFile('src/components/DevicesAndRentalsView.tsx');
+  const miningSectorsSrc = readRepoFile('src/components/MiningSectorsView.tsx');
+
+  assert.ok(
+    Boolean(rtdbRules.rules.cuadrillas) &&
+      Array.isArray(rtdbRules.rules.cuadrillas['.indexOn']) &&
+      rtdbRules.rules.cuadrillas['.indexOn'].includes('organizationId') &&
+      rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("tipoUsuario').val() === 'admin'") &&
+      rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("tipoUsuario').val() === 'admin_minesafe'") &&
+      !rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("'operador'") &&
+      !rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("'monotoriador'") &&
+      rtdbRules.rules.cuadrillas['$crewId']['.validate'].includes('organizationId'),
+    'RTDB /cuadrillas enforces organizationId indexing, admin/corporate allowlist writes, and validation'
+  );
+  assert.ok(
+    Boolean(blueprintJson.entities.crew) &&
+      Boolean(blueprintJson.firestore['/crews/{crewId}']) &&
+      firestoreRules.includes('function isValidCrew(data)') &&
+      firestoreRules.includes('match /crews/{crewId}'),
+    'firebase-blueprint.json and firestore.rules define validated /crews collection'
+  );
+  assert.ok(
+    firebaseSvcSrc.includes('subscribeToRTDBCrews') &&
+      firebaseSvcSrc.includes('saveCrewToRTDB') &&
+      firebaseSvcSrc.includes('deleteCrewFromRTDB') &&
+      crewMgmtSrc.includes('Nueva Cuadrilla') &&
+      crewMgmtSrc.includes('Asignar Trabajadores') &&
+      crewMgmtSrc.includes('assignWorkersToCrew') &&
+      devicesViewSrc.includes('<CrewManagementSection') &&
+      miningSectorsSrc.includes('<CrewManagementSection') &&
+      appSrc.includes('handleSaveCrew') &&
+      appSrc.includes('handleDeleteCrew') &&
+      appSrc.includes('scopedCrews'),
+    'Firebase service, CrewManagementSection, DevicesAndRentalsView, MiningSectorsView, and App.tsx wire crew creation and worker assignment'
+  );
+
+  assert.ok(
+    usersViewSrc.includes('pendingRoleChange') &&
+      usersViewSrc.includes('handleConfirmRoleChange') &&
+      usersViewSrc.includes('Confirmar cambio de rol') &&
+      usersViewSrc.includes('¿Estás seguro de que deseas cambiar el rol de') &&
+      controlViewSrc.includes('pendingRoleChange') &&
+      controlViewSrc.includes('Confirmar cambio de rol'),
+    'UsersManagementView and SuperAdminControlView require confirmation modal before changing user roles'
+  );
+
+  console.log('✅ 19. Crew creation & worker assignment (cuadrillas) + role-change confirmation passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

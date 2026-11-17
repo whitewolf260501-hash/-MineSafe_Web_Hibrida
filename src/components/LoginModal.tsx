@@ -232,6 +232,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <span className="text-[10px] text-cyan-400 uppercase font-semibold">
                       {currentUser.role === 'superadmin'
                         ? 'SuperAdmin'
+                        : currentUser.role === 'admin_minesafe'
+                        ? 'Admin Corporativo MineSafe'
                         : currentUser.role === 'admin'
                         ? 'Admin'
                         : currentUser.role === 'monotoriador'

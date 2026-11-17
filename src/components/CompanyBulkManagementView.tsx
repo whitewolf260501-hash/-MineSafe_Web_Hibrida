@@ -35,6 +35,8 @@ import {
   canCreateOrEditOrganization,
   canDeleteOrganization,
   getAuthorizedOrganizationIds,
+  isAnyAdminRole,
+  isGlobalMineSafeAdmin,
   isOrganizationOwner,
 } from '../utils/accessControl';
 import {
@@ -106,13 +108,14 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   onBulkImportCompleted,
 }) => {
   const isSuperAdmin = currentUser.role === 'superadmin';
-  const isAdminOrSuper = isSuperAdmin || currentUser.role === 'admin';
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
+  const isAdminOrSuper = isAnyAdminRole(currentUser.role);
 
   const authorizedOrganizations = useMemo(() => {
-    if (isSuperAdmin) return organizations;
+    if (isGlobalAdmin) return organizations;
     const allowedIds = new Set(getAuthorizedOrganizationIds(currentUser, organizations));
     return organizations.filter((o) => allowedIds.has(o.id));
-  }, [isSuperAdmin, currentUser, organizations]);
+  }, [isGlobalAdmin, currentUser, organizations]);
 
   const [section, setSection] = useState<'empresas' | 'carga_masiva'>('empresas');
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
@@ -450,7 +453,11 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                   Gestión de Empresas y Carga Masiva
                 </h1>
                 <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-cyan-950 text-cyan-200 border border-cyan-700">
-                  {isSuperAdmin ? 'SuperAdmin Global' : 'Administrador Multi-Empresa'}
+                  {isSuperAdmin
+                    ? 'SuperAdmin Global'
+                    : isGlobalAdmin
+                    ? 'Admin Corporativo MineSafe'
+                    : 'Administrador Multi-Empresa'}
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1">
@@ -626,7 +633,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                   Puedes activar el contexto de tu empresa principal o de cualquier empresa creada por ti, y cargar sus datos masivamente.
                 </p>
               </div>
-              {isSuperAdmin && (
+              {isGlobalAdmin && (
                 <button
                   type="button"
                   onClick={() => onSelectOrganization('all')}
@@ -645,7 +652,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
               {authorizedOrganizations.map((org) => {
                 const isSelected = activeOrganizationId === org.id;
                 const isDefaultOrg = org.id === DEFAULT_ORGANIZATION.id;
-                const isOwnedByActor = !isSuperAdmin && isOrganizationOwner(currentUser, org);
+                const isOwnedByActor = !isGlobalAdmin && isOrganizationOwner(currentUser, org);
                 const canEdit = canCreateOrEditOrganization(currentUser, org).allowed;
                 const canDel = canDeleteOrganization(currentUser, org).allowed;
 

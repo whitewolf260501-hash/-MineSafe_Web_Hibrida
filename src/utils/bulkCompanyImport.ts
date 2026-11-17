@@ -223,6 +223,9 @@ function normalizeBulkUserRole(rawRole: string): { role?: 'operador' | 'monotori
   if (clean === 'superadmin' || clean === 'superadministrador' || clean === 'super_admin') {
     return { error: 'Bloqueado: no se permite importar ni escalar usuarios con rol SuperAdmin.' };
   }
+  if (clean === 'admin_minesafe' || clean === 'adminminesafe' || clean === 'admin_corporativo') {
+    return { error: 'Bloqueado: el rol Admin Corporativo MineSafe solo puede ser otorgado directamente por el SuperAdministrador.' };
+  }
   return { error: `Rol inválido "${rawRole}". Usa: operador, monotoriador o admin.` };
 }
 
@@ -805,6 +808,7 @@ export function buildCompanyUserProfile(
 ): UserProfile {
   const roleLabels: Record<UserRole, string> = {
     superadmin: 'Super Administrador de Seguridad Minera',
+    admin_minesafe: 'Admin Corporativo MineSafe',
     admin: 'Administrador / Prevencionista Sernageomin',
     monotoriador: 'Monotoriador Ambiental',
     operador: 'Usuario Normal / Operador de Faena',

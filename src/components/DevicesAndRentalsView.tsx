@@ -27,16 +27,26 @@ import {
   SensorDevice,
   UserProfile,
   PlatformConfig,
-  EquiposSubTab
+  EquiposSubTab,
+  MiningCrew,
+  MiningSite,
+  Organization,
+  CrewMember
 } from '../types';
+import { PRELOADED_CREWS } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION, isEquiposSubTabVisibleForUser } from '../services/firebase';
-import { canManageContractsAndPayments } from '../utils/accessControl';
+import { assignWorkersToCrew, canManageContractsAndPayments } from '../utils/accessControl';
+import { CrewManagementSection } from './CrewManagementSection';
 
 interface DevicesAndRentalsViewProps {
   rentals: DeviceRental[];
   assignments: WorkerAssignment[];
   devices: SensorDevice[];
+  crews?: MiningCrew[];
+  usersList?: UserProfile[];
+  allSites?: MiningSite[];
+  organizations?: Organization[];
   currentUser?: UserProfile | null;
   platformConfig?: PlatformConfig;
   activeOrganizationId?: string;
@@ -44,6 +54,8 @@ interface DevicesAndRentalsViewProps {
   onAddRentalContract: (contract: Omit<DeviceRental, 'id'>) => Promise<void> | void;
   onUpdateRentalContract?: (contractId: string, updates: Partial<DeviceRental>) => Promise<DeviceRental | void> | void;
   onRecordPayment: (contractId: string) => Promise<void> | void;
+  onSaveCrew?: (crew: MiningCrew) => Promise<void> | void;
+  onDeleteCrew?: (crewId: string, organizationId: string) => Promise<void> | void;
 }
 
 const EQUIPOS_SUBTAB_ORDER: EquiposSubTab[] = ['asignaciones', 'arriendos', 'pagos', 'inventario'];
@@ -52,6 +64,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   rentals,
   assignments,
   devices,
+  crews = [],
+  usersList = [],
+  allSites = [],
+  organizations = [],
   currentUser = null,
   platformConfig,
   activeOrganizationId,
@@ -59,6 +75,8 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   onAddRentalContract,
   onUpdateRentalContract,
   onRecordPayment,
+  onSaveCrew,
+  onDeleteCrew,
 }) => {
   const [activeSubTab, setActiveSubTab] = useState<EquiposSubTab>('asignaciones');
   const [searchQuery, setSearchQuery] = useState('');
@@ -86,9 +104,29 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const [newWorkerRut, setNewWorkerRut] = useState('');
   const [newRole, setNewRole] = useState('Operador Subterráneo');
   const [newCrew, setNewCrew] = useState('Cuadrilla Alfa - Turno A');
+  const [newCrewSelectMode, setNewCrewSelectMode] = useState<string>('Cuadrilla Alfa - Turno A');
   const [newSector, setNewSector] = useState('Socavón Norte Frente de Avance');
   const [newSelectedDeviceCode, setNewSelectedDeviceCode] = useState(devices[0]?.code || 'MS-GAS-101');
   const [newEmergencyContact, setNewEmergencyContact] = useState('+56 9 8765 4321');
+
+  const crewSelectOptions = useMemo(() => {
+    const seen = new Set<string>();
+    const options: Array<{ label: string; value: string; crewObj?: MiningCrew }> = [];
+    crews.forEach((c) => {
+      const val = c.name.trim();
+      if (val && !seen.has(val.toLowerCase())) {
+        seen.add(val.toLowerCase());
+        options.push({ label: `${c.code} · ${c.name}`, value: val, crewObj: c });
+      }
+    });
+    PRELOADED_CREWS.forEach((cName) => {
+      if (!seen.has(cName.toLowerCase())) {
+        seen.add(cName.toLowerCase());
+        options.push({ label: cName, value: cName });
+      }
+    });
+    return options;
+  }, [crews]);
 
   // New / edit contract form state
   const [newContractNumber, setNewContractNumber] = useState('');
@@ -159,19 +197,51 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
     try {
       setIsSubmitting(true);
       setModalError(null);
+      const chosenCrewName =
+        (newCrewSelectMode === '__custom__' ? newCrew : newCrewSelectMode).trim() ||
+        'Cuadrilla General';
+      const matchedCrew = crews.find(
+        (c) => c.name.trim().toLowerCase() === chosenCrewName.toLowerCase()
+      );
+
       await onAddAssignment({
         organizationId: effectiveOrgId,
+        crewId: matchedCrew?.id,
         workerName: newWorkerName.trim(),
         workerRut: newWorkerRut.trim(),
         role: newRole.trim(),
-        crew: newCrew.trim(),
-        sectorName: newSector.trim(),
+        crew: chosenCrewName,
+        sectorName: matchedCrew?.sectorName || newSector.trim(),
         assignedDeviceId: selectedDev.id,
         assignedDeviceCode: selectedDev.code,
         assignmentDate: new Date().toISOString().split('T')[0],
         deviceBattery: selectedDev.batteryPct,
         emergencyContact: newEmergencyContact.trim(),
       });
+
+      if (matchedCrew && onSaveCrew) {
+        const cleanRut = newWorkerRut.trim().toLowerCase();
+        const alreadyMember = (matchedCrew.members || []).some(
+          (m) =>
+            (cleanRut && (m.rut || '').trim().toLowerCase() === cleanRut) ||
+            m.name.trim().toLowerCase() === newWorkerName.trim().toLowerCase()
+        );
+        if (!alreadyMember) {
+          const newMember: CrewMember = {
+            id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            name: newWorkerName.trim(),
+            rut: newWorkerRut.trim(),
+            role: newRole.trim() || 'Operador Subterráneo',
+            assignedDeviceCode: selectedDev.code,
+            emergencyContact: newEmergencyContact.trim() || undefined,
+            isLeader: (matchedCrew.members || []).length === 0,
+            addedAt: Date.now(),
+          };
+          await onSaveCrew(
+            assignWorkersToCrew(matchedCrew, [...(matchedCrew.members || []), newMember])
+          );
+        }
+      }
 
       soundAlert.playFeedbackBeep();
       setShowAssignModal(false);
@@ -383,12 +453,16 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
               <button
                 onClick={() => {
                   setModalError(null);
+                  if (crewSelectOptions.length > 0) {
+                    setNewCrewSelectMode(crewSelectOptions[0].value);
+                    setNewCrew(crewSelectOptions[0].value);
+                  }
                   setShowAssignModal(true);
                 }}
                 className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 text-white rounded-lg transition-colors"
               >
                 <Plus className="w-4 h-4" />
-                Nueva Asignación
+                Asignar Sensor a Operador
               </button>
             )}
 
@@ -499,10 +573,34 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       ) : (
         <>
       {/* ==============================================================
-          SUBTAB 1: ASIGNACIONES A TRABAJADORES
+          SUBTAB 1: CUADRILLAS OPERATIVAS Y ASIGNACIONES DE SENSORES
          ============================================================== */}
       {activeSubTab === 'asignaciones' && canViewSubTab('asignaciones') && (
-        <div className="space-y-4">
+        <div className="space-y-6">
+          {onSaveCrew && onDeleteCrew && (
+            <CrewManagementSection
+              crews={crews}
+              usersList={usersList}
+              assignments={assignments}
+              allSites={allSites}
+              devices={activeInventoryDevices}
+              organizations={organizations}
+              currentUser={currentUser}
+              activeOrganizationId={activeOrganizationId}
+              onSaveCrew={onSaveCrew}
+              onDeleteCrew={onDeleteCrew}
+              onAddAssignment={onAddAssignment}
+            />
+          )}
+
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h2 className="text-sm font-bold text-white flex items-center gap-2">
+                <UserCheck className="w-4 h-4 text-cyan-400" />
+                Sensores IoT Asignados por Trabajador ({assignments.length})
+              </h2>
+            </div>
+
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
             {assignments.map((item) => (
               <div 
@@ -555,6 +653,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </div>
               </div>
             ))}
+          </div>
           </div>
         </div>
       )}
@@ -793,12 +892,33 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                 </div>
                 <div>
                   <label className="text-slate-300 block mb-1">Cuadrilla / Turno</label>
-                  <input
-                    type="text"
-                    value={newCrew}
-                    onChange={(e) => setNewCrew(e.target.value)}
+                  <select
+                    value={newCrewSelectMode}
+                    onChange={(e) => {
+                      setNewCrewSelectMode(e.target.value);
+                      if (e.target.value !== '__custom__') {
+                        setNewCrew(e.target.value);
+                      }
+                    }}
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
-                  />
+                  >
+                    {crewSelectOptions.map((opt) => (
+                      <option key={opt.value} value={opt.value}>
+                        {opt.label}
+                      </option>
+                    ))}
+                    <option value="__custom__">+ Escribir otra cuadrilla...</option>
+                  </select>
+                  {newCrewSelectMode === '__custom__' && (
+                    <input
+                      type="text"
+                      required
+                      placeholder="Nombre de la cuadrilla..."
+                      value={newCrew}
+                      onChange={(e) => setNewCrew(e.target.value)}
+                      className="w-full mt-2 px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white"
+                    />
+                  )}
                 </div>
               </div>
 

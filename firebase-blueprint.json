@@ -36,7 +36,7 @@
         "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
         "name": { "type": "string", "minLength": 1, "maxLength": 120 },
         "email": { "type": "string", "format": "email", "maxLength": 200 },
-        "role": { "type": "string", "enum": ["superadmin", "admin", "operador", "monotoriador"] },
+        "role": { "type": "string", "enum": ["superadmin", "admin_minesafe", "admin", "operador", "monotoriador"] },
         "roleLabel": { "type": "string", "maxLength": 80 },
         "organizationId": { "type": "string", "maxLength": 128 },
         "rut": { "type": "string", "maxLength": 32 },
@@ -142,6 +142,27 @@
         "createdAt": { "type": "string", "format": "date-time" }
       },
       "required": ["id", "alertId", "ownerId", "organizationId", "fileName", "contentType", "sizeBytes", "downloadUrl", "storagePath", "uploadedBy", "createdAt"]
+    },
+    "crew": {
+      "title": "MiningCrew",
+      "description": "Operational mining crew with assigned shift, sector and workers",
+      "type": "object",
+      "properties": {
+        "id": { "type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-zA-Z0-9_\\-]+$" },
+        "ownerId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "organizationId": { "type": "string", "minLength": 1, "maxLength": 128 },
+        "name": { "type": "string", "minLength": 2, "maxLength": 120 },
+        "code": { "type": "string", "minLength": 1, "maxLength": 40 },
+        "shift": { "type": "string", "maxLength": 80 },
+        "leaderName": { "type": "string", "maxLength": 120 },
+        "siteName": { "type": "string", "maxLength": 160 },
+        "sectorName": { "type": "string", "maxLength": 160 },
+        "status": { "type": "string", "enum": ["activa", "en_descanso", "inactiva"] },
+        "memberCount": { "type": "number" },
+        "createdAt": { "type": "string", "format": "date-time" },
+        "updatedAt": { "type": "string", "format": "date-time" }
+      },
+      "required": ["id", "ownerId", "organizationId", "name", "code", "status", "createdAt", "updatedAt"]
     }
   },
   "firestore": {
@@ -172,6 +193,10 @@
     "/attachments/{attachmentId}": {
       "schema": "#/entities/attachment",
       "description": "Uploaded evidence attachments linked to safety alerts"
+    },
+    "/crews/{crewId}": {
+      "schema": "#/entities/crew",
+      "description": "Operational crews and worker rosters scoped per organization"
     }
   }
 }

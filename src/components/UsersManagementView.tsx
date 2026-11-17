@@ -17,7 +17,8 @@ import {
   Radio,
   ShieldCheck,
   AlertCircle,
-  Eye
+  Eye,
+  ArrowRight
 } from 'lucide-react';
 import { Organization, UserProfile, UserRole } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -31,6 +32,8 @@ import {
   canProvisionUserInOrganization,
   findUserEmailConflictInOrg,
   getAuthorizedOrganizationIds,
+  isAnyAdminRole,
+  isGlobalMineSafeAdmin,
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 
@@ -60,6 +63,11 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [userToBlock, setUserToBlock] = useState<UserProfile | null>(null);
   const [blockReason, setBlockReason] = useState('Desvinculación / Despido laboral');
   const [isTogglingBlock, setIsTogglingBlock] = useState(false);
+  const [pendingRoleChange, setPendingRoleChange] = useState<{
+    user: UserProfile;
+    nextRole: UserRole;
+  } | null>(null);
+  const [isUpdatingRole, setIsUpdatingRole] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // New user form state
@@ -78,9 +86,10 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [createError, setCreateError] = useState<string | null>(null);
 
   const isSuperAdmin = currentUser.role === 'superadmin';
-  const isAdminOrSuper = currentUser.role === 'superadmin' || currentUser.role === 'admin';
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
+  const isAdminOrSuper = isAnyAdminRole(currentUser.role);
   const authorizedOrgIds = getAuthorizedOrganizationIds(currentUser, organizations);
-  const authorizedOrgs = isSuperAdmin
+  const authorizedOrgs = isGlobalAdmin
     ? organizations
     : organizations.filter((o) => authorizedOrgIds.includes(o.id));
 
@@ -102,7 +111,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     return matchesSearch && matchesRole && matchesStatus;
   });
 
-  const handleRoleSelectChange = async (targetUser: UserProfile, nextRole: UserRole) => {
+  const handleRoleSelectChange = (targetUser: UserProfile, nextRole: UserRole) => {
+    if (targetUser.role === nextRole) return;
     const check = canModifyTargetUser(currentUser, targetUser, nextRole, organizations);
     if (!check.allowed) {
       soundAlert.playFeedbackBeep();
@@ -110,18 +120,39 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       return;
     }
 
+    setPendingRoleChange({ user: targetUser, nextRole });
+  };
+
+  const handleConfirmRoleChange = async () => {
+    if (!pendingRoleChange) return;
+    const { user: targetUser, nextRole } = pendingRoleChange;
+    const check = canModifyTargetUser(currentUser, targetUser, nextRole, organizations);
+    if (!check.allowed) {
+      soundAlert.playFeedbackBeep();
+      showToast('error', check.reason || 'Acción denegada.');
+      setPendingRoleChange(null);
+      return;
+    }
+
+    setIsUpdatingRole(true);
     try {
       await onUpdateUserRole(targetUser.id, nextRole);
+      soundAlert.playFeedbackBeep();
       showToast(
         'success',
-        nextRole === 'admin'
+        nextRole === 'admin_minesafe'
+          ? `Permisos de Admin Corporativo MineSafe otorgados a ${targetUser.name}.`
+          : nextRole === 'admin'
           ? `Permisos de Administrador otorgados a ${targetUser.name}.`
           : nextRole === 'monotoriador'
           ? `Rol actualizado a Monotoriador Ambiental para ${targetUser.name}.`
           : `Rol actualizado a Operador (Usuario Normal) para ${targetUser.name}.`
       );
+      setPendingRoleChange(null);
     } catch (err: any) {
       showToast('error', err?.message || 'No se pudo actualizar el rol en Firebase RTDB.');
+    } finally {
+      setIsUpdatingRole(false);
     }
   };
 
@@ -178,15 +209,19 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     setCreateError(null);
     if (!newName.trim() || !newEmail.trim()) return;
 
-    // Garantizar que nunca se cree un segundo superadmin y respetar el ámbito de organización
-    const safeRole: 'admin' | 'operador' | 'monotoriador' =
-      newRole === 'admin'
+    // Garantizar que nunca se cree un segundo superadmin y solo SuperAdmin pueda crear Admin MineSafe
+    const safeRole: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+      newRole === 'admin_minesafe' && isSuperAdmin
+        ? 'admin_minesafe'
+        : newRole === 'admin_minesafe'
+        ? 'admin'
+        : newRole === 'admin'
         ? 'admin'
         : newRole === 'monotoriador'
         ? 'monotoriador'
         : 'operador';
     const targetOrgId =
-      isSuperAdmin || authorizedOrgs.length > 1
+      isGlobalAdmin || authorizedOrgs.length > 1
         ? newOrganizationId ||
           (activeOrganizationId && activeOrganizationId !== 'all'
             ? activeOrganizationId
@@ -265,6 +300,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
     const roleLabels: Record<UserRole, string> = {
       superadmin: 'Super Administrador de Seguridad Minera',
+      admin_minesafe: 'Admin Corporativo MineSafe',
       admin: 'Administrador / Prevencionista Sernageomin',
       monotoriador: 'Monotoriador Ambiental',
       operador: 'Usuario Normal / Operador de Faena',
@@ -314,6 +350,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             SuperAdmin Único
           </span>
         );
+      case 'admin_minesafe':
+        return (
+          <span className="inline-flex items-center gap-1 text-[11px] font-bold text-indigo-300 bg-indigo-950 px-2 py-0.5 rounded border border-indigo-700">
+            <ShieldCheck className="w-3.5 h-3.5 text-indigo-400" />
+            Admin MineSafe
+          </span>
+        );
       case 'admin':
         return (
           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
@@ -350,7 +393,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               Gestión de Usuarios y Roles (RBAC)
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-cyan-400 font-semibold">Administradores</span>, <span className="text-emerald-400 font-semibold">Monotoriadores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
+              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-indigo-400 font-semibold">Admin Corporativo MineSafe</span>, <span className="text-cyan-400 font-semibold">Administradores</span>, <span className="text-emerald-400 font-semibold">Monotoriadores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
             </p>
           </div>
 
@@ -361,7 +404,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 setNewOrganizationId(
                   activeOrganizationId &&
                     activeOrganizationId !== 'all' &&
-                    (isSuperAdmin || authorizedOrgs.some((o) => o.id === activeOrganizationId))
+                    (isGlobalAdmin || authorizedOrgs.some((o) => o.id === activeOrganizationId))
                     ? activeOrganizationId
                     : currentUser.organizationId ||
                       authorizedOrgs[0]?.id ||
@@ -399,7 +442,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         )}
 
         {/* Roles Permission Matrix Card */}
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-3 p-4 bg-slate-950/70 rounded-xl border border-slate-800 text-xs">
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-5 gap-3 p-4 bg-slate-950/70 rounded-xl border border-slate-800 text-xs">
           
           <div className="p-3 bg-purple-950/20 border border-purple-900/40 rounded-lg space-y-1.5">
             <div className="flex items-center justify-between gap-1.5 text-purple-300 font-bold">
@@ -412,7 +455,22 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               </span>
             </div>
             <p className="text-slate-400 text-[11px]">
-              Autoridad máxima única e intransferible: otorga permisos de Administrador a los usuarios. Protegido contra cambios o revocación por parte de cualquier Admin.
+              Autoridad máxima única e intransferible: controla hardware 3D, Control Maestro, Entregables P031, apagado de alarmas y asignación de Admins MineSafe.
+            </p>
+          </div>
+
+          <div className="p-3 bg-indigo-950/25 border border-indigo-800/50 rounded-lg space-y-1.5">
+            <div className="flex items-center justify-between gap-1.5 text-indigo-300 font-bold">
+              <span className="flex items-center gap-1.5">
+                <ShieldCheck className="w-4 h-4" />
+                Admin MineSafe
+              </span>
+              <span className="text-[9px] font-mono px-1.5 py-0.5 rounded bg-indigo-950 border border-indigo-700 text-indigo-200">
+                Corporativo
+              </span>
+            </div>
+            <p className="text-slate-400 text-[11px]">
+              Gestión multi-empresa de MineSafe: empresas, usuarios, cargas masivas y operación. Sin acceso a Visor 3D, Gateway 3D, Control Maestro ni Entregables P031.
             </p>
           </div>
 
@@ -422,7 +480,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               Administrador / Prevencionista
             </div>
             <p className="text-slate-400 text-[11px]">
-              Gestión operacional: monitoreo, umbrales, arriendos y gestión de operadores. No puede quitarle permisos ni desactivar al SuperAdministrador.
+              Gestión operacional: monitoreo, umbrales, arriendos y gestión de operadores de su organización. No puede modificar al SuperAdmin ni a Admin MineSafe.
             </p>
           </div>
 
@@ -442,7 +500,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               Usuario Normal / Operador
             </div>
             <p className="text-slate-400 text-[11px]">
-              Acceso operativo asignado por defecto en todo registro nuevo: consulta en tiempo real de su sector y telemetría personal.
+              Acceso restringido a lectura de datos y descripciones de alertas de su empresa, sin acceso a configuración ni gestión.
             </p>
           </div>
 
@@ -470,6 +528,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           >
             <option value="all">Todos los Roles</option>
             <option value="superadmin">SuperAdmin Único</option>
+            <option value="admin_minesafe">Admin Corporativo MineSafe</option>
             <option value="admin">Solo Administradores</option>
             <option value="monotoriador">Solo Monotoriadores</option>
             <option value="operador">Solo Usuarios Normales</option>
@@ -505,6 +564,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             <tbody className="divide-y divide-slate-800/80">
               {filteredUsers.map((user) => {
                 const isTargetSuperAdmin = user.role === 'superadmin';
+                const isTargetMineSafeAdmin = user.role === 'admin_minesafe';
                 const isCurrentSession = user.id === currentUser.id;
                 const canModifyTarget = canModifyTargetUser(
                   currentUser,
@@ -520,6 +580,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                         <div className={`w-7 h-7 rounded-full flex items-center justify-center font-bold text-xs border ${
                           isTargetSuperAdmin
                             ? 'bg-purple-950 text-purple-300 border-purple-700'
+                            : isTargetMineSafeAdmin
+                            ? 'bg-indigo-950 text-indigo-300 border-indigo-700'
                             : 'bg-cyan-950 text-cyan-300 border-cyan-800'
                         }`}>
                           {user.name.charAt(0)}
@@ -570,6 +632,14 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                           <Lock className="w-3 h-3 text-purple-400" />
                           <span>{isCurrentSession ? 'Sesión actual (Protegida)' : 'SuperAdmin Protegido'}</span>
                         </span>
+                      ) : isTargetMineSafeAdmin && !isSuperAdmin ? (
+                        <span
+                          className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-md bg-indigo-950/70 border border-indigo-700/70 text-indigo-300 text-[11px] font-semibold"
+                          title="Solo el SuperAdministrador puede modificar o bloquear cuentas Admin Corporativo MineSafe."
+                        >
+                          <Lock className="w-3 h-3 text-indigo-400" />
+                          <span>{isCurrentSession ? 'Sesión actual (Protegida)' : 'Admin MineSafe Protegido'}</span>
+                        </span>
                       ) : canModifyTarget ? (
                         <div className="flex flex-wrap items-center gap-2">
                           <select
@@ -578,6 +648,9 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                             aria-label={`Cambiar rol de ${user.name}`}
                             className="px-2 py-1 bg-slate-950 border border-slate-700 rounded text-[11px] text-cyan-200 font-medium focus:border-cyan-500"
                           >
+                            {isSuperAdmin && (
+                              <option value="admin_minesafe">Admin MineSafe (Corporativo)</option>
+                            )}
                             <option value="admin">Admin (Prevencionista)</option>
                             <option value="monotoriador">Monotoriador</option>
                             <option value="operador">Operador (Normal)</option>
@@ -679,6 +752,9 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                     <option value="operador">Usuario Normal (Operador)</option>
                     <option value="monotoriador">Monotoriador</option>
                     <option value="admin">Administrador (Prevencionista)</option>
+                    {isSuperAdmin && (
+                      <option value="admin_minesafe">Admin Corporativo MineSafe</option>
+                    )}
                   </select>
                 </div>
               </div>
@@ -686,7 +762,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               <div className="p-2.5 rounded-lg bg-purple-950/30 border border-purple-800/40 text-[11px] text-purple-200/90 flex items-center gap-2">
                 <Crown className="w-4 h-4 text-purple-400 shrink-0" />
                 <span>
-                  Solo existe <strong>1 SuperAdministrador</strong> en toda la plataforma. Puedes asignar rol de <strong>Operador</strong>, <strong>Monotoriador</strong> o <strong>Administrador</strong>.
+                  Solo existe <strong>1 SuperAdministrador</strong> en toda la plataforma y solo él puede crear o asignar el rol <strong>Admin Corporativo MineSafe</strong>.
                 </span>
               </div>
 
@@ -703,7 +779,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               {organizations.length > 0 && (
                 <div>
                   <label className="text-slate-300 block mb-1">Organización / Empresa</label>
-                  {isSuperAdmin || authorizedOrgs.length > 1 ? (
+                  {isGlobalAdmin || authorizedOrgs.length > 1 ? (
                     <select
                       value={newOrganizationId}
                       onChange={(e) => setNewOrganizationId(e.target.value)}
@@ -880,6 +956,83 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 </button>
               </div>
             </form>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CONFIRMAR CAMBIO DE ROL */}
+      {pendingRoleChange && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-role-change-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+        >
+          <div className="bg-slate-900 border border-amber-700/70 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in">
+            <div className="flex items-center justify-between">
+              <h3
+                id="confirm-role-change-title"
+                className="text-base font-bold text-white flex items-center gap-2"
+              >
+                <AlertCircle className="w-4 h-4 text-amber-400" />
+                Confirmar cambio de rol
+              </h3>
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={() => setPendingRoleChange(null)}
+                className="text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-200 leading-relaxed">
+                ¿Estás seguro de que deseas cambiar el rol de{' '}
+                <span className="font-bold text-white">{pendingRoleChange.user.name}</span>?
+              </p>
+
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="text-[11px] text-slate-400 font-mono truncate">
+                  {pendingRoleChange.user.email}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  {getRoleBadge(pendingRoleChange.user.role)}
+                  <ArrowRight className="w-4 h-4 text-amber-400 shrink-0" />
+                  {getRoleBadge(pendingRoleChange.nextRole)}
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-amber-950/40 border border-amber-800/60 text-amber-200/90 text-[11px]">
+                {pendingRoleChange.nextRole === 'admin_minesafe'
+                  ? 'Este usuario obtendrá acceso administrativo corporativo multi-empresa en MineSafe.'
+                  : pendingRoleChange.nextRole === 'admin'
+                  ? 'Este usuario podrá administrar datos, usuarios y cuadrillas dentro de su empresa.'
+                  : pendingRoleChange.nextRole === 'monotoriador'
+                  ? 'Este usuario tendrá acceso de supervisión ambiental sin permisos de administración.'
+                  : 'Este usuario quedará restringido a Operador (solo lectura de alertas de su empresa).'}
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800 text-xs">
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={() => setPendingRoleChange(null)}
+                className="px-4 py-2 text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isUpdatingRole}
+                onClick={handleConfirmRoleChange}
+                className="px-4 py-2 text-white bg-amber-600 hover:bg-amber-500 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {isUpdatingRole ? 'Guardando cambio...' : 'Sí, cambiar rol'}
+              </button>
+            </div>
           </div>
         </div>
       )}

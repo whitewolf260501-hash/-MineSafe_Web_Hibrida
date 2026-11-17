@@ -23,6 +23,7 @@ import {
 } from 'lucide-react';
 import { soundAlert } from '../services/audioAlert';
 import { UserProfile, DrillDebriefRecord } from '../types';
+import { isAnyAdminRole } from '../utils/accessControl';
 
 export type DrillType = 'gas_critico' | 'incendio_polvo' | 'evacuacion_sirena';
 
@@ -45,7 +46,7 @@ export const EmergencyModal: React.FC<EmergencyModalProps> = ({
   onStopDrill,
   onSaveDrillDebrief,
 }) => {
-  const isAdminOrSuper = currentUser?.role === 'superadmin' || currentUser?.role === 'admin';
+  const isAdminOrSuper = isAnyAdminRole(currentUser?.role);
   const [modalTab, setModalTab] = useState<'simulacro' | 'real'>(isAdminOrSuper ? 'simulacro' : 'real');
   const [protocolStep, setProtocolStep] = useState<'confirm' | 'broadcasting' | 'active'>('confirm');
   const [selectedProtocol, setSelectedProtocol] = useState<'total' | 'galeria_sur' | 'gases'>('total');

@@ -22,6 +22,7 @@ import {
 } from 'lucide-react';
 import { SensorDevice, MiningSite, AlertSeverity, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
+import { isAnyAdminRole } from '../utils/accessControl';
 
 interface MonitoringViewProps {
   devices: SensorDevice[];
@@ -42,8 +43,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   onSimulateGasSpike,
   onResetSensor,
 }) => {
-  const canSimulateEvents =
-    currentUser?.role === 'superadmin' || currentUser?.role === 'admin';
+  const canSimulateEvents = isAnyAdminRole(currentUser?.role);
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSector, setSelectedSector] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');

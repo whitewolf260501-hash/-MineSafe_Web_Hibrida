@@ -38,6 +38,7 @@ import {
   verifySuperAdminPrivileges
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
+import { isAnyAdminRole } from '../utils/accessControl';
 
 interface ESP32GatewaySectionProps {
   devices: SensorDevice[];
@@ -122,7 +123,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
     }, 3500);
   };
 
-  const canOperateHardware = isSuperAdmin || currentUser?.role === 'admin';
+  const canOperateHardware = isSuperAdmin || isAnyAdminRole(currentUser?.role);
 
   const handleToggleAcquisition = async (newState: 'activo' | 'pausado') => {
     if (!canOperateHardware) {

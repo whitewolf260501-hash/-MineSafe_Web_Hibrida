@@ -83,7 +83,7 @@ service cloud.firestore {
         isValidId(data.id) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
-        data.role in ['superadmin', 'admin', 'operador', 'monotoriador'] &&
+        data.role in ['superadmin', 'admin_minesafe', 'admin', 'operador', 'monotoriador'] &&
         (!('roleLabel' in data) || (data.roleLabel is string && data.roleLabel.size() <= 80)) &&
         (!('organizationId' in data) || isValidId(data.organizationId)) &&
         (!('rut' in data) || (data.rut is string && data.rut.size() <= 32)) &&
@@ -201,6 +201,30 @@ service cloud.firestore {
         data.storagePath is string && data.storagePath.size() >= 1 && data.storagePath.size() <= 512 &&
         data.uploadedBy is string && data.uploadedBy.size() >= 1 && data.uploadedBy.size() <= 120 &&
         data.createdAt is timestamp;
+    }
+
+    function isValidCrew(data) {
+      return data.keys().hasAll([
+          'id', 'ownerId', 'organizationId', 'name', 'code', 'status', 'createdAt', 'updatedAt'
+        ]) &&
+        data.keys().hasOnly([
+          'id', 'ownerId', 'organizationId', 'name', 'code', 'shift',
+          'leaderName', 'siteName', 'sectorName', 'status', 'memberCount',
+          'createdAt', 'updatedAt'
+        ]) &&
+        isValidId(data.id) &&
+        isValidId(data.ownerId) &&
+        isValidId(data.organizationId) &&
+        data.name is string && data.name.size() >= 2 && data.name.size() <= 120 &&
+        data.code is string && data.code.size() >= 1 && data.code.size() <= 40 &&
+        (!('shift' in data) || (data.shift is string && data.shift.size() <= 80)) &&
+        (!('leaderName' in data) || (data.leaderName is string && data.leaderName.size() <= 120)) &&
+        (!('siteName' in data) || (data.siteName is string && data.siteName.size() <= 160)) &&
+        (!('sectorName' in data) || (data.sectorName is string && data.sectorName.size() <= 160)) &&
+        data.status in ['activa', 'en_descanso', 'inactiva'] &&
+        (!('memberCount' in data) || (data.memberCount is number && data.memberCount >= 0 && data.memberCount <= 200)) &&
+        data.createdAt is timestamp &&
+        data.updatedAt is timestamp;
     }
 
     // --- Admin Registry ---
@@ -376,6 +400,27 @@ service cloud.firestore {
         exists(/databases/$(database)/documents/alerts/$(incoming().alertId));
       allow update: if false;
       allow delete: if isValidId(attachmentId) && (isOwner(existing().ownerId) || isAdmin());
+    }
+
+    // --- Operational Mining Crews ---
+    match /crews/{crewId} {
+      allow get: if isValidId(crewId) && (isOwner(resource.data.ownerId) || isSameOrgMember(resource.data.organizationId) || isAdmin());
+      allow list: if isVerifiedUser() && (resource.data.ownerId == request.auth.uid || isPrimaryAdminEmail());
+      allow create: if isValidId(crewId) &&
+        isValidCrew(incoming()) &&
+        incoming().id == crewId &&
+        incoming().ownerId == request.auth.uid &&
+        incoming().createdAt == request.time &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow update: if isValidId(crewId) &&
+        isValidCrew(incoming()) &&
+        incoming().id == existing().id &&
+        incoming().ownerId == existing().ownerId &&
+        incoming().createdAt == existing().createdAt &&
+        incoming().updatedAt == request.time &&
+        isAdmin();
+      allow delete: if isValidId(crewId) && isAdmin();
     }
 
     // --- Healthcheck Doc ---

@@ -73,17 +73,23 @@ import {
   TelemetryHistoryPoint,
   TelemetryHistoryPageResult,
   AlertAttachment,
-  WorkerAssignment
+  WorkerAssignment,
+  CrewMember,
+  MiningCrew
 } from '../types';
 import {
   assertActiveSession,
   canCreateOrEditOrganization,
   canDeleteOrganization,
   canManageContractsAndPayments,
+  canManageCrews,
+  canModifyTargetUser,
   canProvisionUserInOrganization,
   DEFAULT_ORGANIZATION_ID,
   EmailProfileEntry,
   findUserEmailConflictInOrg,
+  isAnyAdminRole,
+  isGlobalMineSafeAdmin,
   isOrgAuthorizedForUser,
   selectBestLoginProfileForEmail,
 } from '../utils/accessControl';
@@ -392,12 +398,20 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
   const isCanonicalSuper =
     emailLower === PRIMARY_SUPERADMIN_EMAIL ||
     key === PRIMARY_SUPERADMIN_UID;
-  const isSuper = isCanonicalSuper || data?.isSuperUser === true || data?.tipoUsuario === 'superadmin';
-  const isAdmin = isSuper || data?.isAdmin === true || data?.tipoUsuario === 'admin' || data?.cargo === 'Administrador' || data?.tipoUsuario === 'supervisor';
+  const tipoRaw = String(data?.tipoUsuario || '').trim().toLowerCase();
+  const cargoRaw = String(data?.cargo || '').trim().toLowerCase();
+  const isSuper = isCanonicalSuper || data?.isSuperUser === true || tipoRaw === 'superadmin';
+  const isAdminMineSafe = !isSuper && (tipoRaw === 'admin_minesafe' || cargoRaw === 'admin_minesafe');
+  const isAdmin =
+    isSuper ||
+    isAdminMineSafe ||
+    data?.isAdmin === true ||
+    tipoRaw === 'admin' ||
+    data?.cargo === 'Administrador' ||
+    tipoRaw === 'supervisor';
   const isMonotoriador =
     !isAdmin &&
-    (String(data?.tipoUsuario || '').trim().toLowerCase() === 'monotoriador' ||
-      String(data?.cargo || '').trim().toLowerCase() === 'monotoriador');
+    (tipoRaw === 'monotoriador' || cargoRaw === 'monotoriador');
 
   let role: UserRole = 'operador';
   let roleLabel = 'Usuario Normal / Operador Minero';
@@ -405,6 +419,9 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
   if (isSuper) {
     role = 'superadmin';
     roleLabel = 'Super Administrador de Seguridad Minera';
+  } else if (isAdminMineSafe) {
+    role = 'admin_minesafe';
+    roleLabel = 'Admin Corporativo MineSafe';
   } else if (isAdmin) {
     role = 'admin';
     roleLabel = 'Administrador / Prevencionista de Faena';
@@ -449,18 +466,22 @@ async function claimPendingProfileForAuthUser(
   pendingRawData: any,
   emailLower: string
 ): Promise<UserProfile> {
+  const pendingTipo = String(pendingRawData?.tipoUsuario || '').trim().toLowerCase();
+  const claimedRole: UserRole =
+    pendingTipo === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : pendingTipo === 'admin'
+      ? 'admin'
+      : pendingTipo === 'monotoriador'
+      ? 'monotoriador'
+      : 'operador';
   const claimedPayload: Record<string, any> = {
     nombre: pendingRawData?.nombre || fbUser.displayName || emailLower,
     email: emailLower,
     organizationId: pendingRawData?.organizationId || DEFAULT_ORGANIZATION.id,
-    isAdmin: pendingRawData?.isAdmin === true || pendingRawData?.tipoUsuario === 'admin',
+    isAdmin: pendingRawData?.isAdmin === true || claimedRole === 'admin' || claimedRole === 'admin_minesafe',
     isSuperUser: false,
-    tipoUsuario:
-      pendingRawData?.tipoUsuario === 'admin'
-        ? 'admin'
-        : pendingRawData?.tipoUsuario === 'monotoriador'
-        ? 'monotoriador'
-        : 'operador',
+    tipoUsuario: claimedRole,
     isActive: true,
     pendingActivation: false,
     claimedFromKey: pendingKey,
@@ -642,7 +663,7 @@ export async function createUserAccountByAdmin(params: {
   name: string;
   email: string;
   password: string;
-  role: 'admin' | 'operador' | 'monotoriador';
+  role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador';
   rut: string;
   shift: string;
   assignedSector: string;
@@ -660,7 +681,9 @@ export async function createUserAccountByAdmin(params: {
   }
 
   const safeRole: UserRole =
-    params.role === 'admin'
+    params.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : params.role === 'admin'
       ? 'admin'
       : params.role === 'monotoriador'
       ? 'monotoriador'
@@ -726,7 +749,9 @@ export async function createUserAccountByAdmin(params: {
   let createdFbUser: FirebaseUser | null = null;
 
   const roleLabel =
-    safeRole === 'admin'
+    safeRole === 'admin_minesafe'
+      ? 'Admin Corporativo MineSafe'
+      : safeRole === 'admin'
       ? 'Administrador / Prevencionista de Faena'
       : safeRole === 'monotoriador'
       ? 'Monotoriador Ambiental'
@@ -1107,7 +1132,7 @@ export interface RTDBSubscriptionScope {
 
 function buildOrgScopedQuery(path: string, scope?: RTDBSubscriptionScope): DatabaseReference | Query {
   const baseRef = ref(rtdb, path);
-  if (scope?.role && scope.role !== 'superadmin') {
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const orgId = scope.organizationId && scope.organizationId !== 'all'
       ? scope.organizationId
       : DEFAULT_ORGANIZATION_ID;
@@ -1123,7 +1148,7 @@ export function subscribeToRTDBDevicesRaw(
   callback: (rawDevices: Record<string, any>) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  if (scope?.role && scope.role !== 'superadmin') {
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
         ? scope.organizationId
@@ -1221,7 +1246,7 @@ export async function forceRefreshDevicesFromRTDB(
   timeoutSeconds: number = 20,
   scope?: RTDBSubscriptionScope
 ): Promise<{ raw: Record<string, any>; devices: SensorDevice[] }> {
-  if (scope?.role && scope.role !== 'superadmin') {
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
         ? scope.organizationId
@@ -1455,9 +1480,10 @@ export function subscribeToRTDBUsers(
 
     const roleOrder: Record<UserRole, number> = {
       superadmin: 0,
-      admin: 1,
-      monotoriador: 2,
-      operador: 3,
+      admin_minesafe: 1,
+      admin: 2,
+      monotoriador: 3,
+      operador: 4,
     };
     normalizedList.sort((a, b) => {
       const diff = (roleOrder[a.role] ?? 9) - (roleOrder[b.role] ?? 9);
@@ -1658,7 +1684,7 @@ export async function addUserToRTDB(
       nombre: user.name,
       email: cleanEmail,
       organizationId: targetOrgId,
-      isAdmin: safeRole === 'superadmin' || safeRole === 'admin',
+      isAdmin: safeRole === 'superadmin' || safeRole === 'admin_minesafe' || safeRole === 'admin',
       isSuperUser: safeRole === 'superadmin',
       tipoUsuario: safeRole,
       isActive: user.status === 'activo',
@@ -1681,7 +1707,7 @@ export async function updateUserInRTDB(
   actingUser?: UserProfile | null,
   organizations?: Organization[]
 ): Promise<void> {
-  if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+  if (actingUser && !isAnyAdminRole(actingUser.role)) {
     throw new Error('Permisos insuficientes para modificar usuarios.');
   }
 
@@ -1691,25 +1717,46 @@ export async function updateUserInRTDB(
 
   const existingEmail = (existingData?.email || updates.email || '').trim().toLowerCase();
   const targetOrg = existingData?.organizationId || updates.organizationId || DEFAULT_ORGANIZATION_ID;
+  const existingMapped = existingData
+    ? mapRTDBUserToUserProfile(userId, existingData)
+    : ({
+        id: userId,
+        organizationId: targetOrg,
+        name: updates.name || userId,
+        email: existingEmail,
+        role: 'operador',
+        roleLabel: 'Operador',
+        rut: updates.rut || '',
+        shift: updates.shift || '',
+        status: 'activo',
+      } as UserProfile);
+
   const isTargetSuperAdmin =
     userId === PRIMARY_SUPERADMIN_UID ||
     existingEmail === PRIMARY_SUPERADMIN_EMAIL ||
     existingData?.isSuperUser === true ||
     existingData?.tipoUsuario === 'superadmin';
 
-  // Protección absoluta: Nadie (ni un admin) puede quitarle permisos ni desactivar al único SuperAdmin
+  // Protección absoluta: Nadie puede quitarle permisos ni desactivar al único SuperAdmin
   if (isTargetSuperAdmin) {
     if ((updates.role && updates.role !== 'superadmin') || updates.status === 'inactivo') {
       throw new Error('Acción denegada: No se pueden quitar permisos ni desactivar al SuperAdministrador.');
     }
   }
 
-  // Regla: Solo existe un SuperAdmin en toda la plataforma (no se puede promover a otro usuario a superadmin)
+  // Regla: Solo existe un SuperAdmin en toda la plataforma
   if (updates.role === 'superadmin' && !isTargetSuperAdmin) {
     throw new Error('Acción denegada: Solo puede existir un único SuperAdministrador en toda la plataforma.');
   }
 
-  // Aislamiento de organización: un Administrador no puede modificar usuarios de organizaciones no autorizadas
+  if (actingUser) {
+    const check = canModifyTargetUser(actingUser, existingMapped, updates.role, organizations);
+    if (!check.allowed) {
+      throw new Error(check.reason || 'Acción denegada para modificar este usuario.');
+    }
+  }
+
+  // Aislamiento de organización: un Administrador local no puede modificar usuarios de organizaciones no autorizadas
   if (actingUser && actingUser.role === 'admin') {
     const resolvedOrgs = await resolveAuthorizedOrganizationsForActor(actingUser, targetOrg, organizations);
     if (!isOrgAuthorizedForUser(actingUser, targetOrg, resolvedOrgs)) {
@@ -1732,13 +1779,14 @@ export async function updateUserInRTDB(
   };
   if (updates.name) rtdbUpdates.nombre = updates.name;
   if (updates.email) rtdbUpdates.email = updates.email.trim().toLowerCase();
-  if (updates.organizationId && (actingUser?.role === 'superadmin' || actingUser?.role === 'admin')) {
+  if (updates.organizationId && (!actingUser || isAnyAdminRole(actingUser.role))) {
     rtdbUpdates.organizationId = updates.organizationId;
   }
   if (updates.rut) rtdbUpdates.codigoId = updates.rut;
   if (updates.role) {
     rtdbUpdates.tipoUsuario = updates.role;
-    rtdbUpdates.isAdmin = updates.role === 'admin' || updates.role === 'superadmin';
+    rtdbUpdates.isAdmin =
+      updates.role === 'admin' || updates.role === 'admin_minesafe' || updates.role === 'superadmin';
     rtdbUpdates.isSuperUser = updates.role === 'superadmin';
   }
   if (updates.status) {
@@ -1888,7 +1936,7 @@ export async function addRentalContractToRTDB(
     if (actingUser.status !== 'activo') {
       throw new Error('Tu sesión se encuentra inactiva.');
     }
-    if (actingUser.role !== 'admin' && actingUser.role !== 'superadmin') {
+    if (!isAnyAdminRole(actingUser.role)) {
       throw new Error('Permisos insuficientes: solo Administradores o SuperAdministrador pueden registrar contratos.');
     }
   }
@@ -1948,7 +1996,7 @@ export async function updateRentalContractInRTDB(
     if (actingUser.status !== 'activo') {
       throw new Error('Tu sesión se encuentra inactiva.');
     }
-    if (actingUser.role !== 'admin' && actingUser.role !== 'superadmin') {
+    if (!isAnyAdminRole(actingUser.role)) {
       throw new Error('Permisos insuficientes: solo Administradores o SuperAdministrador pueden editar contratos.');
     }
   }
@@ -2039,7 +2087,7 @@ export async function recordPaymentInRTDB(
     if (actingUser.status !== 'activo') {
       throw new Error('Tu sesión se encuentra inactiva.');
     }
-    if (actingUser.role !== 'admin' && actingUser.role !== 'superadmin') {
+    if (!isAnyAdminRole(actingUser.role)) {
       throw new Error('Permisos insuficientes: solo Administradores o SuperAdministrador pueden registrar pagos.');
     }
   }
@@ -2113,7 +2161,7 @@ export async function sendESP32Command(
   command: 'pause' | 'resume' | 'ping',
   actingUser?: UserProfile | null
 ): Promise<void> {
-  if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+  if (actingUser && !isAnyAdminRole(actingUser.role)) {
     throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede enviar comandos al hardware ESP32.');
   }
   try {
@@ -2223,7 +2271,7 @@ export async function toggleGatewayAlarmInRTDB(
     if (!isSuper) {
       throw new Error('Acceso denegado: Solo un SuperAdministrador autenticado en Firebase Auth puede apagar la alarma.');
     }
-  } else if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+  } else if (actingUser && !isAnyAdminRole(actingUser.role)) {
     throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede activar manualmente la alarma del nodo.');
   }
 
@@ -2310,7 +2358,7 @@ export async function toggleGatewayLightInRTDB(
   active: boolean,
   actingUser?: UserProfile | null
 ): Promise<void> {
-  if (actingUser && actingUser.role !== 'superadmin' && actingUser.role !== 'admin') {
+  if (actingUser && !isAnyAdminRole(actingUser.role)) {
     throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la baliza LED del nodo.');
   }
   const now = Date.now();
@@ -2971,7 +3019,7 @@ export function subscribeToAllThresholdConfigs(
   callback: (configs: Record<string, DeviceThresholdsConfig>) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  if (scope?.role && scope.role !== 'superadmin') {
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const watchedIds = Array.from(
       new Set(['global', ...(scope.deviceIds || []).filter(Boolean)])
     );
@@ -3033,7 +3081,7 @@ export async function saveThresholdConfig(
   user: UserProfile,
   organizationIdOverride?: string
 ): Promise<void> {
-  if (user.role !== 'admin' && user.role !== 'superadmin') {
+  if (!isAnyAdminRole(user.role)) {
     throw new Error('Permisos insuficientes: Solo los usuarios con rol Administrador o SuperAdmin pueden modificar los umbrales de seguridad operacional.');
   }
   if (targetId === 'global' && user.role !== 'superadmin') {
@@ -3106,7 +3154,7 @@ export async function resetThresholdConfigToDefault(
   targetId: string, 
   user: UserProfile
 ): Promise<DeviceThresholdsConfig> {
-  if (user.role !== 'admin' && user.role !== 'superadmin') {
+  if (!isAnyAdminRole(user.role)) {
     throw new Error('Permisos insuficientes: Solo los administradores pueden restaurar valores de seguridad.');
   }
   if (targetId === 'global' && user.role !== 'superadmin') {
@@ -3221,6 +3269,19 @@ export function subscribeToAlertEvents(
 export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
   visibility: {
     rolePermissions: {
+      admin_minesafe: {
+        dashboard: true,
+        monitoreo: true,
+        alertas: true,
+        configuracion_alertas: true,
+        equipos: true,
+        reportes: true,
+        faenas: true,
+        usuarios: true,
+        empresas: true,
+        visor_3d: false,
+        gateway_3d: false,
+      },
       admin: {
         dashboard: true,
         monitoreo: true,
@@ -3264,6 +3325,12 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     userOverrides: {},
     userOverridesByEmail: {},
     equiposSubTabRolePermissions: {
+      admin_minesafe: {
+        asignaciones: true,
+        arriendos: true,
+        pagos: true,
+        inventario: true,
+      },
       admin: {
         asignaciones: true,
         arriendos: true,
@@ -3365,8 +3432,11 @@ export function isTabVisibleForUser(
   if (tab === 'superadmin_panel' || tab === 'superadmin_docs') {
     return user.role === 'superadmin';
   }
+  if (user.role === 'admin_minesafe' && (tab === 'visor_3d' || tab === 'gateway_3d')) {
+    return false;
+  }
   if (tab === 'empresas' || tab === 'usuarios') {
-    return user.role === 'superadmin' || user.role === 'admin';
+    return isAnyAdminRole(user.role);
   }
   if (user.role === 'superadmin') {
     return true;
@@ -3390,8 +3460,10 @@ export function isTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin' | 'operador' | 'monotoriador' =
-    user.role === 'admin'
+  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+    user.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : user.role === 'admin'
       ? 'admin'
       : user.role === 'monotoriador'
       ? 'monotoriador'
@@ -3401,7 +3473,7 @@ export function isTabVisibleForUser(
     return configuredRoleVal;
   }
 
-  return DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey][controllableTab];
+  return DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey]![controllableTab];
 }
 
 export function isEquiposSubTabVisibleForUser(
@@ -3431,8 +3503,10 @@ export function isEquiposSubTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin' | 'operador' | 'monotoriador' =
-    user.role === 'admin'
+  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+    user.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : user.role === 'admin'
       ? 'admin'
       : user.role === 'monotoriador'
       ? 'monotoriador'
@@ -3442,13 +3516,19 @@ export function isEquiposSubTabVisibleForUser(
     return configuredRoleVal;
   }
 
-  return DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions![roleKey][subTab];
+  return DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions![roleKey]![subTab];
 }
 
 function mergePlatformConfig(raw: any): PlatformConfig {
   return {
     visibility: {
       rolePermissions: {
+        admin_minesafe: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe!,
+          ...(raw?.visibility?.rolePermissions?.admin_minesafe || {}),
+          visor_3d: false,
+          gateway_3d: false,
+        },
         admin: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin,
           ...(raw?.visibility?.rolePermissions?.admin || {}),
@@ -3464,6 +3544,10 @@ function mergePlatformConfig(raw: any): PlatformConfig {
       userOverrides: raw?.visibility?.userOverrides || {},
       userOverridesByEmail: raw?.visibility?.userOverridesByEmail || {},
       equiposSubTabRolePermissions: {
+        admin_minesafe: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.admin_minesafe!,
+          ...(raw?.visibility?.equiposSubTabRolePermissions?.admin_minesafe || {}),
+        },
         admin: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.admin,
           ...(raw?.visibility?.equiposSubTabRolePermissions?.admin || {}),
@@ -3891,7 +3975,7 @@ export function subscribeToRTDBOrganizations(
     };
   }
 
-  if (scope?.role && scope.role !== 'superadmin') {
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const orgId =
       scope.organizationId && scope.organizationId !== 'all'
         ? scope.organizationId
@@ -4044,6 +4128,8 @@ export function subscribeToRTDBAssignments(
           assignmentDate: val[k]?.assignmentDate || new Date().toISOString().split('T')[0],
           deviceBattery: typeof val[k]?.deviceBattery === 'number' ? val[k].deviceBattery : 100,
           emergencyContact: val[k]?.emergencyContact || '',
+          userId: val[k]?.userId || undefined,
+          crewId: val[k]?.crewId || undefined,
         }));
         callback(list);
       } else {
@@ -4056,12 +4142,190 @@ export function subscribeToRTDBAssignments(
 
 export async function saveAssignmentToRTDB(assignment: WorkerAssignment): Promise<void> {
   const cleanId = assignment.id.replace(/[^a-zA-Z0-9_-]/g, '_');
-  await set(ref(rtdb, `asignaciones/${cleanId}`), {
-    ...assignment,
-    id: cleanId,
-    organizationId: assignment.organizationId || DEFAULT_ORGANIZATION.id,
-    updatedAt: Date.now(),
-  });
+  const payload = JSON.parse(
+    JSON.stringify({
+      ...assignment,
+      id: cleanId,
+      organizationId: assignment.organizationId || DEFAULT_ORGANIZATION.id,
+      updatedAt: Date.now(),
+    })
+  );
+  await set(ref(rtdb, `asignaciones/${cleanId}`), payload);
+}
+
+/**
+ * ============================================================================
+ * CUADRILLAS OPERATIVAS Y ASIGNACIÓN DE TRABAJADORES (/cuadrillas)
+ * ============================================================================
+ */
+const CUADRILLAS_CACHE_KEY = 'minesafe_saved_cuadrillas_v1';
+
+function normalizeCrewMember(raw: any, idx: number): CrewMember {
+  return {
+    id: String(raw?.id || `mbr-${Date.now()}-${idx}`),
+    userId: raw?.userId ? String(raw.userId) : undefined,
+    assignmentId: raw?.assignmentId ? String(raw.assignmentId) : undefined,
+    name: String(raw?.name || 'Trabajador').trim(),
+    rut: String(raw?.rut || 'Sin RUT').trim(),
+    role: String(raw?.role || 'Operador de Faena').trim(),
+    email: raw?.email ? String(raw.email).trim() : undefined,
+    assignedDeviceCode: raw?.assignedDeviceCode ? String(raw.assignedDeviceCode).trim() : undefined,
+    emergencyContact: raw?.emergencyContact ? String(raw.emergencyContact).trim() : undefined,
+    isLeader: Boolean(raw?.isLeader),
+    addedAt: typeof raw?.addedAt === 'number' ? raw.addedAt : Date.now(),
+  };
+}
+
+export function normalizeMiningCrew(raw: any, fallbackId?: string): MiningCrew {
+  const rawMembers = raw?.members;
+  const membersArr: any[] = Array.isArray(rawMembers)
+    ? rawMembers
+    : rawMembers && typeof rawMembers === 'object'
+    ? Object.values(rawMembers)
+    : [];
+  const members = membersArr.map((m, idx) => normalizeCrewMember(m, idx));
+  const leader = members.find((m) => m.isLeader);
+
+  return {
+    id: String(raw?.id || fallbackId || `crew-${Date.now()}`).replace(/[^a-zA-Z0-9_-]/g, '_'),
+    organizationId: String(raw?.organizationId || DEFAULT_ORGANIZATION.id),
+    name: String(raw?.name || 'Cuadrilla Operativa').trim(),
+    code: String(raw?.code || 'CUA-01').trim(),
+    shift: String(raw?.shift || 'Turno Mañana (07:00 - 15:30)').trim(),
+    leaderName: raw?.leaderName || leader?.name || undefined,
+    leaderUserId: raw?.leaderUserId || leader?.userId || undefined,
+    siteId: raw?.siteId || undefined,
+    siteName: raw?.siteName || undefined,
+    sectorId: raw?.sectorId || undefined,
+    sectorName: raw?.sectorName || undefined,
+    notes: raw?.notes ? String(raw.notes).trim() : undefined,
+    status:
+      raw?.status === 'inactiva' || raw?.status === 'en_descanso'
+        ? raw.status
+        : 'activa',
+    members,
+    createdBy: raw?.createdBy || undefined,
+    createdAt: typeof raw?.createdAt === 'number' ? raw.createdAt : Date.now(),
+    updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : Date.now(),
+  };
+}
+
+export function loadCachedCrews(): MiningCrew[] {
+  try {
+    const raw = localStorage.getItem(CUADRILLAS_CACHE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.map((c) => normalizeMiningCrew(c));
+  } catch {
+    return [];
+  }
+}
+
+export function saveCachedCrews(crews: MiningCrew[]): void {
+  try {
+    localStorage.setItem(CUADRILLAS_CACHE_KEY, JSON.stringify(crews));
+  } catch {
+    // ignore storage quota errors
+  }
+}
+
+export function mergeMiningCrews(baseCrews: MiningCrew[], incomingCrews: MiningCrew[]): MiningCrew[] {
+  const map = new Map<string, MiningCrew>();
+  baseCrews.forEach((c) => map.set(c.id, normalizeMiningCrew(c, c.id)));
+  incomingCrews.forEach((c) => map.set(c.id, normalizeMiningCrew(c, c.id)));
+  return Array.from(map.values()).sort((a, b) => b.updatedAt - a.updatedAt);
+}
+
+export function subscribeToRTDBCrews(
+  callback: (crews: MiningCrew[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
+  const crewsRef = buildOrgScopedQuery('cuadrillas', scope);
+  return onValue(
+    crewsRef,
+    (snapshot) => {
+      if (snapshot.exists()) {
+        const val = snapshot.val() || {};
+        const list = Object.keys(val).map((k) => normalizeMiningCrew(val[k], k));
+        list.sort((a, b) => b.updatedAt - a.updatedAt);
+        callback(list);
+      } else {
+        callback([]);
+      }
+    },
+    (err) => {
+      console.warn('Error subscribing to RTDB /cuadrillas:', err?.message || err);
+      callback([]);
+    }
+  );
+}
+
+export async function saveCrewToRTDB(
+  crew: MiningCrew,
+  actingUser: UserProfile | null | undefined,
+  organizations?: Organization[]
+): Promise<{ savedToRTDB: boolean; crew: MiningCrew; error?: string }> {
+  assertActiveSession(actingUser);
+  const targetOrg = crew.organizationId || DEFAULT_ORGANIZATION.id;
+  const check = canManageCrews(actingUser, targetOrg, organizations);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Permisos insuficientes para gestionar cuadrillas.');
+  }
+
+  const normalized = normalizeMiningCrew(
+    {
+      ...crew,
+      organizationId: targetOrg,
+      createdBy: crew.createdBy || actingUser!.name || actingUser!.email,
+      updatedAt: Date.now(),
+    },
+    crew.id
+  );
+  const cleanPayload: MiningCrew = JSON.parse(JSON.stringify(normalized));
+
+  const cached = loadCachedCrews();
+  saveCachedCrews(mergeMiningCrews(cached, [cleanPayload]));
+
+  try {
+    await set(ref(rtdb, `cuadrillas/${cleanPayload.id}`), cleanPayload);
+    return { savedToRTDB: true, crew: cleanPayload };
+  } catch (err: any) {
+    console.warn('Error saving crew to RTDB (/cuadrillas):', err);
+    return {
+      savedToRTDB: false,
+      crew: cleanPayload,
+      error: err?.message || 'Guardado en respaldo local (sin permisos en /cuadrillas de RTDB).',
+    };
+  }
+}
+
+export async function deleteCrewFromRTDB(
+  crewId: string,
+  targetOrgId: string,
+  actingUser: UserProfile | null | undefined,
+  organizations?: Organization[]
+): Promise<{ deletedFromRTDB: boolean; error?: string }> {
+  assertActiveSession(actingUser);
+  const check = canManageCrews(actingUser, targetOrgId, organizations);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Permisos insuficientes para eliminar esta cuadrilla.');
+  }
+
+  const cleanId = crewId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cached = loadCachedCrews().filter((c) => c.id !== cleanId && c.id !== crewId);
+  saveCachedCrews(cached);
+
+  try {
+    await remove(ref(rtdb, `cuadrillas/${cleanId}`));
+    return { deletedFromRTDB: true };
+  } catch (err: any) {
+    console.warn('Error removing crew from RTDB (/cuadrillas):', err);
+    return {
+      deletedFromRTDB: false,
+      error: err?.message || 'Eliminado localmente (error al eliminar en /cuadrillas de RTDB).',
+    };
+  }
 }
 
 /**
@@ -4423,7 +4687,7 @@ export async function executeBulkCompanyImport(params: {
   onProgress?: (completed: number, total: number, currentLabel: string) => void;
 }): Promise<BulkImportExecutionResult> {
   assertActiveSession(params.actingUser);
-  if (params.actingUser.role !== 'superadmin' && params.actingUser.role !== 'admin') {
+  if (!isAnyAdminRole(params.actingUser.role)) {
     throw new Error('Solo Administradores o SuperAdministrador pueden ejecutar cargas masivas.');
   }
 

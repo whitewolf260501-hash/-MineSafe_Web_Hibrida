@@ -24,6 +24,8 @@ import {
   NavigationTab,
   UserProfile,
   WorkerAssignment,
+  MiningCrew,
+  Organization,
 } from '../types';
 import { EXTERNAL_WEATHER } from '../data/mockData';
 import {
@@ -33,16 +35,23 @@ import {
 } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION } from '../services/firebase';
+import { isAnyAdminRole } from '../utils/accessControl';
+import { CrewManagementSection } from './CrewManagementSection';
 
 interface MiningSectorsViewProps {
   currentSite: MiningSite;
   allSites: MiningSite[];
   assignments?: WorkerAssignment[];
+  crews?: MiningCrew[];
+  usersList?: UserProfile[];
+  organizations?: Organization[];
   currentUser?: UserProfile | null;
   activeOrganizationId?: string;
   onSelectSite: (siteId: string) => void;
   onAddSite: (newSite: MiningSite) => void;
   onUpdateSite?: (updatedSite: MiningSite) => void;
+  onSaveCrew?: (crew: MiningCrew) => Promise<void> | void;
+  onDeleteCrew?: (crewId: string, organizationId: string) => Promise<void> | void;
   onNavigateTab: (tab: NavigationTab) => void;
 }
 
@@ -86,15 +95,19 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
   currentSite,
   allSites,
   assignments = [],
+  crews = [],
+  usersList = [],
+  organizations = [],
   currentUser,
   activeOrganizationId,
   onSelectSite,
   onAddSite,
   onUpdateSite,
+  onSaveCrew,
+  onDeleteCrew,
   onNavigateTab,
 }) => {
-  const canManageSites =
-    currentUser?.role === 'superadmin' || currentUser?.role === 'admin';
+  const canManageSites = isAnyAdminRole(currentUser?.role);
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
@@ -123,9 +136,13 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
     }, 4500);
   };
 
-  // All available crews (from Equipos assignments + already assigned in sites + preloaded Chilean mining crews)
+  // All available crews (persisted org crews + Equipos assignments + already assigned in sites + preloaded Chilean mining crews)
   const availableCrews = useMemo(() => {
-    const set = new Set<string>(PRELOADED_CREWS);
+    const set = new Set<string>();
+    crews.forEach((c) => {
+      if (c.name?.trim()) set.add(c.name.trim());
+    });
+    PRELOADED_CREWS.forEach((c) => set.add(c));
     assignments.forEach((a) => {
       if (a.crew?.trim()) set.add(a.crew.trim());
     });
@@ -137,7 +154,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
       });
     });
     return Array.from(set);
-  }, [assignments, allSites]);
+  }, [crews, assignments, allSites]);
 
   // Preset templates not yet registered in allSites
   const availablePresetsToQuickLoad = useMemo(() => {
@@ -454,6 +471,33 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
       ...currentSite,
       activeSectors: updatedSectors,
     });
+
+    if (
+      onSaveCrew &&
+      !crews.some((c) => c.name.trim().toLowerCase() === finalCrew.toLowerCase())
+    ) {
+      const firstSector = currentSite.activeSectors.find((s) => targetSectorIds.includes(s.id));
+      const now = Date.now();
+      Promise.resolve(
+        onSaveCrew({
+          id: `crew-${now}-${Math.random().toString(36).slice(2, 6)}`,
+          organizationId: currentSite.organizationId || effectiveOrgId,
+          name: finalCrew,
+          code: `CUA-${String(crews.length + 1).padStart(2, '0')}`,
+          shift: 'Turno Mañana (07:00 - 15:30)',
+          status: 'activa',
+          siteId: currentSite.id,
+          siteName: currentSite.name,
+          sectorId: firstSector?.id,
+          sectorName: firstSector?.name,
+          members: [],
+          createdBy: currentUser?.name || currentUser?.email,
+          createdAt: now,
+          updatedAt: now,
+        })
+      ).catch(() => {});
+    }
+
     soundAlert.playFeedbackBeep();
     setShowAssignCrewModal(false);
     showToast(
@@ -900,27 +944,47 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
 
                     {(selectedSector.assignedCrews || []).length > 0 ? (
                       <div className="space-y-1.5">
-                        {(selectedSector.assignedCrews || []).map((crew) => (
-                          <div
-                            key={crew}
-                            className="flex items-center justify-between gap-2 px-2.5 py-1.5 rounded-lg bg-emerald-950/50 border border-emerald-800/70 text-emerald-200"
-                          >
-                            <span className="flex items-center gap-1.5 font-medium">
-                              <HardHat className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
-                              {crew}
-                            </span>
-                            {canManageSites && (
-                              <button
-                                type="button"
-                                onClick={() => handleRemoveCrewFromSector(selectedSector.id, crew)}
-                                title="Quitar cuadrilla de este sector"
-                                className="text-slate-400 hover:text-red-400 transition-colors"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            )}
-                          </div>
-                        ))}
+                        {(selectedSector.assignedCrews || []).map((crewName) => {
+                          const matchedCrew = crews.find(
+                            (c) => c.name.trim().toLowerCase() === crewName.trim().toLowerCase()
+                          );
+                          const membersCount = matchedCrew?.members?.length || 0;
+                          return (
+                            <div
+                              key={crewName}
+                              className="px-2.5 py-1.5 rounded-lg bg-emerald-950/50 border border-emerald-800/70 text-emerald-200 space-y-1"
+                            >
+                              <div className="flex items-center justify-between gap-2">
+                                <span className="flex items-center gap-1.5 font-medium">
+                                  <HardHat className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                  {crewName}
+                                </span>
+                                <div className="flex items-center gap-1.5">
+                                  {matchedCrew && (
+                                    <span className="text-[10px] font-mono px-1.5 py-0.2 rounded bg-cyan-950/80 text-cyan-300 border border-cyan-800/70">
+                                      {membersCount} trab.
+                                    </span>
+                                  )}
+                                  {canManageSites && (
+                                    <button
+                                      type="button"
+                                      onClick={() => handleRemoveCrewFromSector(selectedSector.id, crewName)}
+                                      title="Quitar cuadrilla de este sector"
+                                      className="text-slate-400 hover:text-red-400 transition-colors"
+                                    >
+                                      <X className="w-3.5 h-3.5" />
+                                    </button>
+                                  )}
+                                </div>
+                              </div>
+                              {matchedCrew && membersCount > 0 && (
+                                <p className="text-[10px] text-slate-300/90 pl-5 truncate">
+                                  {(matchedCrew.members || []).map((m) => m.name).join(', ')}
+                                </p>
+                              )}
+                            </div>
+                          );
+                        })}
                       </div>
                     ) : (
                       <p className="text-slate-500 text-[11px] italic">
@@ -958,6 +1022,25 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
           )}
         </div>
       </div>
+
+      {/* ===================================================================== */}
+      {/* DIRECTORIO DE CUADRILLAS Y ASIGNACIÓN DE TRABAJADORES */}
+      {/* ===================================================================== */}
+      {onSaveCrew && onDeleteCrew && (
+        <CrewManagementSection
+          crews={crews}
+          usersList={usersList}
+          assignments={assignments}
+          allSites={allSites}
+          devices={[]}
+          organizations={organizations}
+          currentUser={currentUser || null}
+          activeOrganizationId={activeOrganizationId}
+          onSaveCrew={onSaveCrew}
+          onDeleteCrew={onDeleteCrew}
+          compactHeader
+        />
+      )}
 
       {/* ===================================================================== */}
       {/* MODAL 1: REGISTRAR NUEVA FAENA MINERA (CON PRECARGA, REGIONES, COMUNAS Y MULTI-SECTOR) */}

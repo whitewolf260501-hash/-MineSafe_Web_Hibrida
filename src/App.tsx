@@ -35,7 +35,8 @@ import {
   PlatformConfig,
   Organization,
   TelemetryHistoryPoint,
-  AlertEventRecord
+  AlertEventRecord,
+  MiningCrew
 } from './types';
 import {
   TelemetryRangeWindow,
@@ -54,9 +55,12 @@ import {
   canModifyTargetUser,
   canProvisionUserInOrganization,
   canManageContractsAndPayments,
+  canManageCrews,
   createEmptyTelemetryVariables,
   filterScopedUsers,
   getAuthorizedOrganizationIds,
+  isAnyAdminRole,
+  isGlobalMineSafeAdmin,
   isOrgAuthorizedForUser,
   resolveEffectiveOrgId,
   resolveScopedCurrentSite,
@@ -106,6 +110,11 @@ import {
   mergeMiningSites,
   saveSiteToRTDB,
   subscribeToRTDBSites,
+  loadCachedCrews,
+  mergeMiningCrews,
+  saveCrewToRTDB,
+  deleteCrewFromRTDB,
+  subscribeToRTDBCrews,
   RTDBSubscriptionScope,
   BulkImportExecutionResult
 } from './services/firebase';
@@ -158,11 +167,11 @@ export default function App({
   onToggleTheme,
 }: MineSafePanelProps) {
   const initialUserOrgId =
-    authenticatedUser.role === 'superadmin'
+    isGlobalMineSafeAdmin(authenticatedUser.role)
       ? 'all'
       : authenticatedUser.organizationId || DEFAULT_ORGANIZATION_ID;
   const allowInitialPrincipalDefaults =
-    authenticatedUser.role === 'superadmin' ||
+    isGlobalMineSafeAdmin(authenticatedUser.role) ||
     initialUserOrgId === DEFAULT_ORGANIZATION.id;
 
   const [currentTab, setCurrentTab] = useState<NavigationTab>(() =>
@@ -199,6 +208,13 @@ export default function App({
       sites,
       undefined,
       initialUserOrgId === 'all' ? DEFAULT_ORGANIZATION.id : initialUserOrgId
+    )
+  );
+  const [crews, setCrews] = useState<MiningCrew[]>(() =>
+    loadCachedCrews().filter((c) =>
+      allowInitialPrincipalDefaults
+        ? true
+        : (c.organizationId || DEFAULT_ORGANIZATION.id) === initialUserOrgId
     )
   );
   const [usersList, setUsersList] = useState<UserProfile[]>([]);
@@ -461,6 +477,23 @@ export default function App({
       });
     }, subscriptionScope);
 
+    const unsubCrews = subscribeToRTDBCrews((remoteCrews) => {
+      const targetOrgId = subscriptionScope.organizationId || DEFAULT_ORGANIZATION.id;
+      const cachedForScope = loadCachedCrews().filter((c) =>
+        targetOrgId === 'all'
+          ? true
+          : (c.organizationId || DEFAULT_ORGANIZATION.id) === targetOrgId
+      );
+      setCrews((prev) => {
+        const otherOrgCrews =
+          targetOrgId === 'all'
+            ? []
+            : prev.filter((c) => (c.organizationId || DEFAULT_ORGANIZATION.id) !== targetOrgId);
+        const mergedCurrent = mergeMiningCrews(cachedForScope, remoteCrews);
+        return [...otherOrgCrews, ...mergedCurrent];
+      });
+    }, subscriptionScope);
+
     return () => {
       unsubDevices();
       unsubAlertEvents();
@@ -470,6 +503,7 @@ export default function App({
       unsubRentals();
       unsubAlerts();
       unsubSites();
+      unsubCrews();
     };
   }, [subscriptionScope, recomputeDevicesFromRaw, onLogoutRequest]);
 
@@ -975,7 +1009,7 @@ export default function App({
 
 
   const handleTriggerForcedVentilation = useCallback((sectorName: string) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Solo Administrador o SuperAdmin puede activar ventilación forzada en sectores.', 'error');
       return;
     }
@@ -999,7 +1033,7 @@ export default function App({
   }, [currentSite, currentUser, effectiveOrgId, organizations, showAlarmFeedback]);
 
   const handleSimulateGasSpike = useCallback(async (sensorId: string) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden simular alzas de gas.', 'error');
       return;
     }
@@ -1062,7 +1096,7 @@ export default function App({
   }, [currentUser, visibleDevices, effectiveOrgId, showAlarmFeedback]);
 
   const handleResetSensor = useCallback(async (sensorId: string) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden restablecer nodos en RTDB.', 'error');
       return;
     }
@@ -1147,7 +1181,7 @@ export default function App({
   }, [currentUser, isDrillActive, activeTelemetryDeviceId, effectiveOrgId, showAlarmFeedback]);
 
   const handleResetPageLevels = useCallback(async () => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden resetear niveles de página en RTDB.', 'error');
       return;
     }
@@ -1183,7 +1217,7 @@ export default function App({
   }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, isDrillActive, currentUser, showAlarmFeedback]);
 
   const handleTriggerSimulationEmergency = useCallback(async (type: DrillType) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Solo Administrador o SuperAdmin puede iniciar simulacros de emergencia.', 'error');
       return;
     }
@@ -1321,7 +1355,7 @@ export default function App({
       return;
     }
 
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden activar alarmas manuales de hardware.', 'error');
       return;
     }
@@ -1343,7 +1377,7 @@ export default function App({
   }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, currentUser, showAlarmFeedback, handleShutdownAlarmCompletely]);
 
   const handleToggleLight = useCallback(async () => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden controlar actuadores de luz/baliza.', 'error');
       return;
     }
@@ -1442,7 +1476,7 @@ export default function App({
   }, [rentals, effectiveOrgId, currentUser, organizations, showAlarmFeedback]);
 
   const handleAddSite = useCallback((newSite: MiningSite) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden registrar faenas mineras.', 'error');
       return;
     }
@@ -1464,7 +1498,7 @@ export default function App({
   }, [currentUser, effectiveOrgId, organizations, showAlarmFeedback]);
 
   const handleUpdateSite = useCallback((updatedSite: MiningSite) => {
-    if (!currentUser || (currentUser.role !== 'superadmin' && currentUser.role !== 'admin')) {
+    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
       showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden modificar sectores ni cuadrillas.', 'error');
       return;
     }
@@ -1482,13 +1516,86 @@ export default function App({
     });
   }, [currentUser, effectiveOrgId, organizations, showAlarmFeedback]);
 
+  const handleSaveCrew = useCallback(async (crewPayload: MiningCrew) => {
+    const fallbackOrg = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
+    const targetOrg = crewPayload.organizationId || fallbackOrg;
+    const access = canManageCrews(currentUser, targetOrg, organizations);
+    if (!access.allowed) {
+      const msg = access.reason || 'Permisos insuficientes para crear o editar cuadrillas.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const res = await saveCrewToRTDB(
+      { ...crewPayload, organizationId: targetOrg },
+      currentUser,
+      organizations
+    );
+    setCrews((prev) => mergeMiningCrews(prev, [res.crew]));
+
+    // Sincronizar automáticamente la cuadrilla con el sector elegido si aplica
+    if (res.crew.siteId && res.crew.sectorId) {
+      const targetSite = sites.find((s) => s.id === res.crew.siteId);
+      if (targetSite) {
+        const targetSector = targetSite.activeSectors.find((sec) => sec.id === res.crew.sectorId);
+        if (targetSector && !(targetSector.assignedCrews || []).includes(res.crew.name)) {
+          const updatedSite: MiningSite = {
+            ...targetSite,
+            activeSectors: targetSite.activeSectors.map((sec) =>
+              sec.id === res.crew.sectorId
+                ? {
+                    ...sec,
+                    assignedCrews: [...(sec.assignedCrews || []), res.crew.name],
+                    activeWorkers:
+                      sec.activeWorkers === 0 && res.crew.members.length > 0
+                        ? res.crew.members.length
+                        : sec.activeWorkers,
+                  }
+                : sec
+            ),
+          };
+          setSites((prev) => prev.map((s) => (s.id === updatedSite.id ? updatedSite : s)));
+          setCurrentSite((prev) => (prev.id === updatedSite.id ? updatedSite : prev));
+          saveSiteToRTDB(updatedSite).catch(() => {});
+        }
+      }
+    }
+
+    showAlarmFeedback(
+      res.savedToRTDB
+        ? `Cuadrilla "${res.crew.name}" guardada en Firebase RTDB.`
+        : `Cuadrilla "${res.crew.name}" guardada en respaldo local.`,
+      'success'
+    );
+  }, [currentUser, effectiveOrgId, organizations, sites, showAlarmFeedback]);
+
+  const handleDeleteCrew = useCallback(async (crewId: string, organizationId: string) => {
+    const targetOrg =
+      organizationId || (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId);
+    const access = canManageCrews(currentUser, targetOrg, organizations);
+    if (!access.allowed) {
+      const msg = access.reason || 'Permisos insuficientes para eliminar cuadrillas.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    await deleteCrewFromRTDB(crewId, targetOrg, currentUser, organizations);
+    setCrews((prev) => prev.filter((c) => c.id !== crewId));
+    showAlarmFeedback('Cuadrilla eliminada correctamente.', 'success');
+  }, [currentUser, effectiveOrgId, organizations, showAlarmFeedback]);
+
   // User Management Handlers
   const handleAddUser = useCallback(async (newUser: UserProfile) => {
-    // Regla: Solo existe un único SuperAdmin en toda la plataforma y respeta el ámbito de organización
-    const safeRole: UserRole = newUser.role === 'superadmin' ? 'admin' : newUser.role;
+    // Regla: Solo existe un único SuperAdmin en toda la plataforma y solo él puede crear/otorgar Admin Corporativo MineSafe.
+    const safeRole: UserRole =
+      newUser.role === 'superadmin'
+        ? 'admin'
+        : newUser.role === 'admin_minesafe' && currentUser.role !== 'superadmin'
+        ? 'admin'
+        : newUser.role;
     const requestedOrgId = newUser.organizationId;
     const targetOrgId =
-      currentUser.role === 'superadmin'
+      isGlobalMineSafeAdmin(currentUser.role)
         ? requestedOrgId || DEFAULT_ORGANIZATION.id
         : requestedOrgId && isOrgAuthorizedForUser(currentUser, requestedOrgId, organizations)
         ? requestedOrgId
@@ -1511,7 +1618,9 @@ export default function App({
       organizationId: targetOrgId,
       role: safeRole,
       roleLabel:
-        safeRole === 'admin'
+        safeRole === 'admin_minesafe'
+          ? 'Admin Corporativo MineSafe'
+          : safeRole === 'admin'
           ? 'Administrador / Prevencionista Sernageomin'
           : safeRole === 'monotoriador'
           ? 'Monotoriador Ambiental'
@@ -1544,6 +1653,7 @@ export default function App({
     soundAlert.playFeedbackBeep();
     const roleLabels: Record<UserRole, string> = {
       superadmin: 'Super Administrador de Seguridad Minera',
+      admin_minesafe: 'Admin Corporativo MineSafe',
       admin: 'Administrador / Prevencionista Sernageomin',
       monotoriador: 'Monotoriador Ambiental',
       operador: 'Usuario Normal / Operador de Faena',
@@ -1675,6 +1785,7 @@ export default function App({
     setRentals([]);
     setAssignments([]);
     setSites([]);
+    setCrews([]);
     setSelectedSensorId(null);
     setActiveTelemetryDeviceId('');
     setVariables(createEmptyTelemetryVariables());
@@ -1690,7 +1801,7 @@ export default function App({
     [currentUser, organizations]
   );
   const scopedOrganizations = useMemo(() => {
-    if (currentUser?.role === 'superadmin') return organizations;
+    if (isGlobalMineSafeAdmin(currentUser?.role)) return organizations;
     const allowedSet = new Set(authorizedOrgIds);
     return organizations.filter((o) => allowedSet.has(o.id));
   }, [currentUser?.role, organizations, authorizedOrgIds]);
@@ -1719,6 +1830,10 @@ export default function App({
   const scopedAssignments = useMemo(
     () => assignments.filter((a) => matchesOrg(a.organizationId)),
     [assignments, matchesOrg]
+  );
+  const scopedCrews = useMemo(
+    () => crews.filter((c) => matchesOrg(c.organizationId)),
+    [crews, matchesOrg]
   );
   const scopedAlerts = useMemo(
     () => alerts.filter((a) => matchesOrg(a.organizationId)),
@@ -2050,6 +2165,10 @@ export default function App({
                 rentals={scopedRentals}
                 assignments={scopedAssignments}
                 devices={visibleDevices}
+                crews={scopedCrews}
+                usersList={scopedUsers}
+                allSites={scopedSites}
+                organizations={scopedOrganizations}
                 currentUser={currentUser}
                 platformConfig={platformConfig}
                 activeOrganizationId={effectiveOrgId}
@@ -2057,6 +2176,8 @@ export default function App({
                 onAddRentalContract={handleAddRentalContract}
                 onUpdateRentalContract={handleUpdateRentalContract}
                 onRecordPayment={handleRecordPayment}
+                onSaveCrew={handleSaveCrew}
+                onDeleteCrew={handleDeleteCrew}
               />
             )}
 
@@ -2081,6 +2202,9 @@ export default function App({
                 currentSite={scopedCurrentSite}
                 allSites={scopedSites}
                 assignments={scopedAssignments}
+                crews={scopedCrews}
+                usersList={scopedUsers}
+                organizations={scopedOrganizations}
                 currentUser={currentUser}
                 activeOrganizationId={effectiveOrgId}
                 onSelectSite={(siteId) => {
@@ -2089,6 +2213,8 @@ export default function App({
                 }}
                 onAddSite={handleAddSite}
                 onUpdateSite={handleUpdateSite}
+                onSaveCrew={handleSaveCrew}
+                onDeleteCrew={handleDeleteCrew}
                 onNavigateTab={handleSelectTab}
               />
             )}

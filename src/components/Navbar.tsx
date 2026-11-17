@@ -32,12 +32,17 @@ import {
   Box,
   Router,
   BookOpen,
-  Eye
+  Eye,
+  ShieldCheck
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import { isTabVisibleForUser } from '../services/firebase';
-import { DEFAULT_ORGANIZATION_ID } from '../utils/accessControl';
+import {
+  DEFAULT_ORGANIZATION_ID,
+  isAnyAdminRole,
+  isGlobalMineSafeAdmin,
+} from '../utils/accessControl';
 
 interface NavbarProps {
   currentTab: NavigationTab;
@@ -96,6 +101,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   const [isMuted, setIsMuted] = useState(soundAlert.getMutedState());
 
   const isSuperAdmin = currentUser.role === 'superadmin';
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
 
   const handleToggleSound = () => {
     if (isAlarmActive && !isMuted && !isSuperAdmin) {
@@ -106,10 +112,10 @@ export const Navbar: React.FC<NavbarProps> = ({
     if (!muted) soundAlert.playFeedbackBeep();
   };
   const isOperador = currentUser.role === 'operador';
-  const isSuperOrAdmin = currentUser.role === 'superadmin' || currentUser.role === 'admin';
+  const isSuperOrAdmin = isAnyAdminRole(currentUser.role);
   const showHardwareControls =
     isSuperAdmin ||
-    (currentUser.role === 'admin' &&
+    ((currentUser.role === 'admin' || currentUser.role === 'admin_minesafe') &&
       (platformConfig?.appearance?.allowHardwareControlsForNonSuperAdmin ?? true));
   const showEmergencyButton =
     !isOperador &&
@@ -183,6 +189,13 @@ export const Navbar: React.FC<NavbarProps> = ({
           avatarBg: 'bg-purple-900 text-purple-200 border-purple-700',
           badgeText: 'SuperAdmin',
           icon: <Crown className="w-3 h-3 text-purple-400" />
+        };
+      case 'admin_minesafe':
+        return {
+          bg: 'bg-indigo-950/80 border-indigo-700 text-indigo-200',
+          avatarBg: 'bg-indigo-900 text-indigo-200 border-indigo-600',
+          badgeText: 'Admin MineSafe',
+          icon: <ShieldCheck className="w-3 h-3 text-indigo-400" />
         };
       case 'admin':
         return {
@@ -372,8 +385,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {/* Organization Switcher for SuperAdmin or Multi-Org Admin */}
-            {(isSuperAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+            {/* Organization Switcher for SuperAdmin, Admin MineSafe or Multi-Org Admin */}
+            {(isGlobalAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
               organizations.length > 0 &&
               onSelectOrganization && (
                 <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-800 bg-slate-900/90 text-xs shrink-0">
@@ -384,7 +397,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     aria-label="Seleccionar Organización"
                     className="bg-transparent text-slate-200 text-[11px] font-semibold focus:outline-none max-w-[140px]"
                   >
-                    {isSuperAdmin && (
+                    {isGlobalAdmin && (
                       <option value="all" className="bg-slate-950 text-white">Todas las Org.</option>
                     )}
                     {organizations.map((org) => (
@@ -445,7 +458,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                 <span>
                   {isDrillActive 
                     ? 'Simulacro Activo' 
-                    : (currentUser?.role === 'superadmin' || currentUser?.role === 'admin' ? 'Simulacro / Evacuación' : 'Evacuación')}
+                    : (isSuperOrAdmin ? 'Simulacro / Evacuación' : 'Evacuación')}
                 </span>
               </button>
             )}
@@ -572,7 +585,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <div className="pt-3 border-t border-slate-800 flex flex-col gap-2">
-            {(isSuperAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+            {(isGlobalAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
               organizations.length > 0 &&
               onSelectOrganization && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
@@ -583,7 +596,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     aria-label="Organización activa"
                     className="w-full bg-transparent text-slate-200 font-semibold focus:outline-none"
                   >
-                    {isSuperAdmin && (
+                    {isGlobalAdmin && (
                       <option value="all" className="bg-slate-950 text-white">Todas las Organizaciones</option>
                     )}
                     {organizations.map((org) => (
@@ -615,7 +628,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     isDrillActive ? 'bg-amber-600 animate-pulse' : 'bg-rose-600'
                   }`}
                 >
-                  {isDrillActive ? 'Simulacro Activo' : (currentUser?.role === 'superadmin' || currentUser?.role === 'admin' ? 'Simulacro / Evacuación' : 'Evacuación')}
+                  {isDrillActive ? 'Simulacro Activo' : (isSuperOrAdmin ? 'Simulacro / Evacuación' : 'Evacuación')}
                 </button>
               )}
             </div>

@@ -79,6 +79,16 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           icon: <Crown className="w-4 h-4 text-purple-400" />,
           description: 'Control Total de Faena, Parámetros y Auditoría Sernageomin'
         };
+      case 'admin_minesafe':
+        return {
+          label: 'Admin Corporativo MineSafe',
+          typeText: '(Admin MineSafe)',
+          bg: 'bg-indigo-950/70 border-indigo-600/70 text-indigo-300 shadow-indigo-950/40',
+          badgeBg: 'bg-indigo-900/60 border-indigo-500/80 text-indigo-200',
+          avatarBg: 'bg-gradient-to-br from-indigo-600 to-violet-800 text-white border-indigo-400',
+          icon: <ShieldCheck className="w-4 h-4 text-indigo-400" />,
+          description: 'Gestión Corporativa Multi-Empresa MineSafe'
+        };
       case 'admin':
         return {
           label: 'Administrador / Prevencionista',
@@ -975,7 +985,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
 
             {/* Quick role pills */}
             <div className="flex items-center gap-1 overflow-x-auto pb-1 text-[11px]">
-              {(['todos', 'superadmin', 'admin', 'monotoriador', 'operador'] as const).map((role) => {
+              {(['todos', 'superadmin', 'admin_minesafe', 'admin', 'monotoriador', 'operador'] as const).map((role) => {
                 const isActive = selectedRoleFilter === role;
                 return (
                   <button
@@ -991,6 +1001,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                       ? 'Todos'
                       : role === 'superadmin'
                       ? 'Superadmin'
+                      : role === 'admin_minesafe'
+                      ? 'Admin MineSafe'
                       : role === 'admin'
                       ? 'Admin'
                       : role === 'monotoriador'

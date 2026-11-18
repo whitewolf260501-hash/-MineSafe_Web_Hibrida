@@ -5,12 +5,14 @@ import {
   buildAtomicAlertResolutionUpdates,
   buildAtomicPaymentUpdates,
   buildOrgScopedAttachmentPath,
+  clampTextScalePct,
   DEFAULT_PLATFORM_CONFIG,
   evaluateWatchedUserStatusSnapshots,
   fetchPaginatedTelemetryHistory,
   isEquiposSubTabVisibleForUser,
   isTabVisibleForUser,
   mapRTDBContractToRental,
+  normalizeHeroTitleScale,
   validateRentalDatesAndCost,
 } from '../src/services/firebase';
 import {
@@ -34,6 +36,7 @@ import {
   canManageCrews,
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  canViewSystemUsersPanel,
   createEmptyTelemetryVariables,
   DEFAULT_ORGANIZATION_ID,
   filterScopedEntities,
@@ -56,6 +59,12 @@ import {
   createZipArchiveUint8Array,
   parseMarkdownBlocks,
 } from '../src/utils/superAdminDocs';
+import {
+  computeRutVerifierDigit,
+  formatChileanRut,
+  isPlaceholderRut,
+  validateChileanRut,
+} from '../src/utils/rut';
 import { ROOT_MARKDOWN_FILES } from '../src/data/generatedDocs';
 import { MiningCrew, Organization, PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
 
@@ -753,10 +762,10 @@ async function runTests() {
   // Bulk CSV parsing (comma + semicolon + UTF-8 BOM + quotes + superadmin rejection)
   const usersCsvWithBomAndSuperAdmin = [
     '\uFEFFnombre;email;rut;rol;turno',
-    '"Juan Pérez, Jr.";jperez@gamma.cl;16.111.222-3;operador;Turno A',
-    'Ana Silva;asilva@gamma.cl;17.222.333-4;monotoriador;Turno B',
-    'Intento Escalado;hacker@gamma.cl;19.333.444-5;superadmin;Turno C',
-    'Duplicado;jperez@gamma.cl;16.111.222-3;admin;Turno A',
+    '"Juan Pérez, Jr.";jperez@gamma.cl;16.111.222-4;operador;Turno A',
+    'Ana Silva;asilva@gamma.cl;17.222.333-8;monotoriador;Turno B',
+    'Intento Escalado;hacker@gamma.cl;19.333.444-K;superadmin;Turno C',
+    'Duplicado;jperez@gamma.cl;16.111.222-4;admin;Turno A',
   ].join('\n');
   const parsedUsers = parseBulkInput('users', usersCsvWithBomAndSuperAdmin, {
     organizationId: 'org-gamma',
@@ -1354,8 +1363,8 @@ async function runTests() {
     'users',
     [
       'nombre,email,rut,rol,turno',
-      'Operador Valido,opvalido@gamma.cl,16.111.222-3,operador,Turno A',
-      'Escalada Corporativa,corp@gamma.cl,17.222.333-4,admin_minesafe,Turno A',
+      'Operador Valido,opvalido@gamma.cl,16.111.222-4,operador,Turno A',
+      'Escalada Corporativa,corp@gamma.cl,17.222.333-8,admin_minesafe,Turno A',
     ].join('\n'),
     { organizationId: 'org-gamma' }
   );
@@ -1516,6 +1525,186 @@ async function runTests() {
   );
 
   console.log('✅ 19. Crew creation & worker assignment (cuadrillas) + role-change confirmation passed');
+
+  // ---------------------------------------------------------------------------
+  // 20. Dashboard layout order & Usuarios del Sistema role restriction
+  // ---------------------------------------------------------------------------
+  assert.equal(canViewSystemUsersPanel(sa), true, 'Superadmin can view system users panel');
+  assert.equal(canViewSystemUsersPanel(admMs), true, 'admin_minesafe can view system users panel');
+  assert.equal(canViewSystemUsersPanel(admG), true, 'admin can view system users panel');
+  assert.equal(canViewSystemUsersPanel(monG), false, 'monotoriador cannot view system users panel');
+  assert.equal(canViewSystemUsersPanel(opG), false, 'operador cannot view system users panel');
+  assert.equal(canViewSystemUsersPanel(inactiveAdm), false, 'inactive user cannot view system users panel');
+  assert.equal(canViewSystemUsersPanel(null), false, 'null user cannot view system users panel');
+
+  const dashboardViewSrc = readRepoFile('src/components/DashboardView.tsx');
+  const chartAndUsersSrc = readRepoFile('src/components/InteractiveDeviceChartAndUsers.tsx');
+
+  assert.ok(
+    chartAndUsersSrc.includes('showSystemUsers') &&
+      chartAndUsersSrc.includes("showSystemUsers ? 'lg:col-span-7' : 'lg:col-span-12'") &&
+      chartAndUsersSrc.includes('{betweenWelcomeAndChart}') &&
+      dashboardViewSrc.includes('betweenWelcomeAndChart={atmosphericAndMetricCards}') &&
+      dashboardViewSrc.includes('canViewSystemUsers={canSeeUsuarios}'),
+    'DashboardView and InteractiveDeviceChartAndUsers enforce non-admin user-panel hiding and atmospheric cards before chart'
+  );
+
+  console.log('✅ 20. Dashboard layout order & Usuarios del Sistema role restriction passed');
+
+  // ---------------------------------------------------------------------------
+  // 21. Validación RUT chileno mediante Módulo 11
+  // ---------------------------------------------------------------------------
+  // Verificación matemática exacta (casos: 0, K y 1-9)
+  assert.equal(computeRutVerifierDigit('19333444'), 'K', 'DV K when 11 - remainder === 10');
+  assert.equal(computeRutVerifierDigit('11111111'), '1', 'DV 1 for 11.111.111');
+  assert.equal(computeRutVerifierDigit('76543210'), '3', 'DV 3 for 76.543.210');
+  assert.equal(computeRutVerifierDigit('18901234'), '9', 'DV 9 for 18.901.234');
+  // 12.345.678 -> 8*2+7*3+6*4+5*5+4*6+3*7+2*2+1*3 = 16+21+24+25+24+21+4+3 = 138; 138%11 = 6; 11-6 = 5
+  assert.equal(computeRutVerifierDigit('12345678'), '5');
+  // 10.000.013 -> 3*2+1*3+0+0+0+0+0+1*3 = 12 -> 12%11=1 -> K; wait: find body with remainder 0 -> DV '0':
+  // 20.000.001 -> 1*2 + 2*3 = 8 (DV 3). 11.111.112 -> 57+2=59? 59%11=4. Let's test 12.345.685 -> ...
+  // 10.000.000 -> 1*3 = 3 -> DV 8; 11.000.004 -> 4*2 + 1*2 + 1*3 = 13 (rem 2); 11.000.003 -> 3*2+1*2+1*3 = 11 -> 11%11=0 -> 11-0=11 -> '0'
+  assert.equal(computeRutVerifierDigit('11000003'), '0', 'DV 0 when remainder === 0 (11 - 0 = 11)');
+
+  const validLowerK = validateChileanRut('19333444k');
+  assert.equal(validLowerK.valid, true);
+  assert.equal(validLowerK.formatted, '19.333.444-K');
+
+  const validCompactZero = validateChileanRut('11000003-0');
+  assert.equal(validCompactZero.valid, true);
+  assert.equal(validCompactZero.formatted, '11.000.003-0');
+
+  assert.equal(formatChileanRut('0174567891'), '17.456.789-1');
+  assert.equal(isPlaceholderRut('No registrado'), true);
+  assert.equal(isPlaceholderRut('17.456.789-1'), false);
+
+  const badCheckDigit = validateChileanRut('17.456.789-2');
+  assert.equal(badCheckDigit.valid, false);
+  assert.equal(badCheckDigit.expectedVerifierDigit, '1');
+  assert.ok(badCheckDigit.error?.includes('Módulo 11'));
+
+  assert.equal(validateChileanRut('12345').valid, false, 'Rejects too-short RUT');
+  assert.equal(validateChileanRut('17.456.K89-1').valid, false, 'Rejects K in body');
+  assert.equal(validateChileanRut('00.000.000-0').valid, false, 'Rejects all-zero RUT');
+
+  // Bulk import rejects invalid Módulo 11 RUTs in users, assignments, and org bundles
+  const bulkInvalidRutUsers = parseBulkInput(
+    'users',
+    [
+      'nombre,email,rut,rol',
+      'Usuario Valido,valido@gamma.cl,174567891,operador',
+      'Usuario Mal DV,maldv@gamma.cl,17.456.789-2,operador',
+    ].join('\n'),
+    { organizationId: 'org-gamma' }
+  );
+  assert.equal(bulkInvalidRutUsers.validRows.length, 1);
+  assert.equal(bulkInvalidRutUsers.validRows[0].data.rut, '17.456.789-1');
+  assert.equal(bulkInvalidRutUsers.invalidRows.length, 1);
+  assert.ok(bulkInvalidRutUsers.invalidRows[0].errors[0].includes('Módulo 11'));
+
+  const bulkInvalidRutAssign = parseBulkInput(
+    'assignments',
+    [
+      'rutTrabajador,trabajador,cuadrilla,sector,codigoDispositivo',
+      '18901234-9,Trabajador OK,Cuadrilla A,Sector 1,DEV-1',
+      '18.901.234-5,Trabajador Mal DV,Cuadrilla A,Sector 1,DEV-2',
+    ].join('\n'),
+    { organizationId: 'org-gamma' }
+  );
+  assert.equal(bulkInvalidRutAssign.validRows.length, 1);
+  assert.equal(bulkInvalidRutAssign.validRows[0].data.assignment.workerRut, '18.901.234-9');
+  assert.equal(bulkInvalidRutAssign.invalidRows.length, 1);
+
+  const badOrgBundle = parseBulkCompanyBundle(
+    JSON.stringify({
+      organization: { name: 'Empresa Inválida SpA', rut: '76.543.210-8' },
+      users: [],
+    }),
+    'org-gamma'
+  );
+  assert.equal(badOrgBundle.organization?.valid, false);
+  assert.ok(badOrgBundle.organization?.errors[0].includes('Módulo 11'));
+
+  // Static audit of UI & service RUT validation integration
+  assert.ok(
+    firebaseSvcSrc.includes('validateChileanRut') &&
+      usersViewSrc.includes('validateChileanRut') &&
+      bulkViewSrc.includes('validateChileanRut') &&
+      controlViewSrc.includes('validateChileanRut') &&
+      crewMgmtSrc.includes('validateChileanRut') &&
+      devicesViewSrc.includes('validateChileanRut'),
+    'All RUT inputs across UI forms and firebase.ts enforce Módulo 11 validation'
+  );
+
+  console.log('✅ 21. Chilean RUT Módulo 11 validation & formatting passed');
+
+  // ---------------------------------------------------------------------------
+  // 22. Política de contraseña mínima (8 caracteres) y correo oficial minesafe99@gmail.com
+  // ---------------------------------------------------------------------------
+  const bulkShortPassword = parseBulkInput(
+    'users',
+    [
+      'nombre,email,rut,rol,password',
+      'Clave Corta,corta@gamma.cl,17.456.789-1,operador,1234567',
+      'Clave Valida,ok8@gamma.cl,18.901.234-9,operador,Clave123',
+    ].join('\n'),
+    { organizationId: 'org-gamma' }
+  );
+  assert.equal(bulkShortPassword.validRows.length, 1);
+  assert.equal(bulkShortPassword.invalidRows.length, 1);
+  assert.ok(bulkShortPassword.invalidRows[0].errors[0].includes('8 caracteres'));
+
+  const landingPageSrc = readRepoFile('src/components/PublicLanding.tsx');
+  const envExampleSrc = readRepoFile('.env.example');
+  assert.ok(
+    firebaseSvcSrc.includes('params.password.length < 8') &&
+      firebaseSvcSrc.includes('params.newPassword.length < 8') &&
+      usersViewSrc.includes('newPassword.length < 8') &&
+      bulkViewSrc.includes('defaultAuthPassword.length < 8') &&
+      loginViewSrc.includes('newPassword.length < 8') &&
+      loginModalSrc.includes('newPassword.length < 8'),
+    'All password creation/reset/bulk-import paths require minimum 8 characters'
+  );
+  assert.ok(
+    landingPageSrc.includes('minesafe99@gmail.com') &&
+      envExampleSrc.includes('VITE_PUBLIC_CONTACT_EMAIL="minesafe99@gmail.com"'),
+    'Public contact email configured as minesafe99@gmail.com'
+  );
+
+  console.log('✅ 22. 8-character password policy & minesafe99@gmail.com contact email passed');
+
+  // ---------------------------------------------------------------------------
+  // 23. Control de tamaño de textos desde Control Maestro
+  // ---------------------------------------------------------------------------
+  assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.textScalePct, 100);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.heroTitleScale, 'normal');
+  assert.equal(clampTextScalePct(undefined), 100);
+  assert.equal(clampTextScalePct(0), 100);
+  assert.equal(clampTextScalePct(50), 85);
+  assert.equal(clampTextScalePct(112.4), 112);
+  assert.equal(clampTextScalePct(180), 130);
+  assert.equal(normalizeHeroTitleScale('large'), 'large');
+  assert.equal(normalizeHeroTitleScale('xlarge'), 'xlarge');
+  assert.equal(normalizeHeroTitleScale('invalid-scale'), 'normal');
+
+  const appSrcForTypography = readRepoFile('src/App.tsx');
+  const dashboardSrcForTypography = readRepoFile('src/components/DashboardView.tsx');
+  const cssSrcForTypography = readRepoFile('src/index.css');
+  assert.ok(
+    controlViewSrc.includes('commitTextTypographyChange') &&
+      controlViewSrc.includes('Tamaño de Textos de la Plataforma') &&
+      controlViewSrc.includes('heroTitleScale'),
+    'Control Maestro exposes global text scale and dashboard title size controls'
+  );
+  assert.ok(
+    appSrcForTypography.includes('effectiveTextScalePct') &&
+      appSrcForTypography.includes('data-text-scaled') &&
+      dashboardSrcForTypography.includes('heroTitleScale') &&
+      cssSrcForTypography.includes('html[data-text-scaled="true"]'),
+    'Global text scale and hero title scale are wired across App, DashboardView, and index.css'
+  );
+
+  console.log('✅ 23. Control Maestro global text scale & hero title scale passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

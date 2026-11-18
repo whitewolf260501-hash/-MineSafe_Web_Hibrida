@@ -102,8 +102,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setErrorMessage('Ingresa tu contraseña anterior para validar tu identidad.');
       return;
     }
-    if (newPassword.length < 6) {
-      setErrorMessage('La nueva contraseña debe tener al menos 6 caracteres.');
+    if (newPassword.length < 8) {
+      setErrorMessage('La nueva contraseña debe tener al menos 8 caracteres.');
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -405,7 +405,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
 
                 <div>
                   <label htmlFor="recreate-new-password" className="block text-xs font-semibold text-[#334155] mb-1">
-                    Nueva contraseña para esta empresa (mín. 6 caracteres)
+                    Nueva contraseña para esta empresa (mín. 8 caracteres)
                   </label>
                   <div className="relative">
                     <Lock className="w-4 h-4 text-[#64748B] absolute left-3.5 top-3" />
@@ -414,7 +414,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       type={showNewPassword ? 'text' : 'password'}
                       autoComplete="new-password"
                       required
-                      minLength={6}
+                      minLength={8}
                       placeholder="Define una nueva contraseña"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
@@ -440,7 +440,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     type={showNewPassword ? 'text' : 'password'}
                     autoComplete="new-password"
                     required
-                    minLength={6}
+                    minLength={8}
                     placeholder="Repite tu nueva contraseña"
                     value={confirmNewPassword}
                     onChange={(e) => setConfirmNewPassword(e.target.value)}

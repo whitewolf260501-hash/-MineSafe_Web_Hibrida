@@ -100,6 +100,7 @@ import {
   BulkUserImportItem,
   buildCompanyUserProfile,
 } from '../utils/bulkCompanyImport';
+import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
 
 const DEFAULT_RTDB_URL = "https://minefase-fc5f5-default-rtdb.firebaseio.com/";
 
@@ -364,7 +365,7 @@ function mapFirebaseAuthError(err: any): FirebaseAuthActionError {
     case 'auth/email-already-in-use':
       return new FirebaseAuthActionError('Este correo electrónico ya está registrado en Firebase Authentication.', code);
     case 'auth/weak-password':
-      return new FirebaseAuthActionError('La contraseña debe tener al menos 6 caracteres.', code);
+      return new FirebaseAuthActionError('La contraseña debe tener al menos 8 caracteres.', code);
     case 'auth/operation-not-allowed':
       return new FirebaseAuthActionError(
         'El método de inicio de sesión con correo y contraseña no está habilitado en el proveedor de autenticación.',
@@ -676,8 +677,17 @@ export async function createUserAccountByAdmin(params: {
 }): Promise<UserProfile> {
   const cleanEmail = params.email.trim().toLowerCase();
   const cleanName = params.name.trim();
-  if (!cleanName || !cleanEmail || params.password.length < 6) {
-    throw new Error('Nombre, correo válido y contraseña inicial (mínimo 6 caracteres) son obligatorios.');
+  if (!cleanName || !cleanEmail || params.password.length < 8) {
+    throw new Error('Nombre, correo válido y contraseña inicial (mínimo 8 caracteres) son obligatorios.');
+  }
+
+  let normalizedRut = 'No registrado';
+  if (!isPlaceholderRut(params.rut)) {
+    const rutCheck = validateChileanRut(params.rut);
+    if (!rutCheck.valid) {
+      throw new Error(rutCheck.error || 'El RUT ingresado no es válido según Módulo 11.');
+    }
+    normalizedRut = rutCheck.formatted!;
   }
 
   const safeRole: UserRole =
@@ -773,7 +783,7 @@ export async function createUserAccountByAdmin(params: {
       email: cleanEmail,
       role: safeRole,
       roleLabel,
-      rut: params.rut.trim() || 'No registrado',
+      rut: normalizedRut,
       shift: params.shift.trim() || 'Turno Continuo A',
       status: 'activo',
       pendingActivation: false,
@@ -799,7 +809,7 @@ export async function createUserAccountByAdmin(params: {
         email: cleanEmail,
         role: safeRole,
         roleLabel,
-        rut: params.rut.trim() || 'No registrado',
+        rut: normalizedRut,
         shift: params.shift.trim() || 'Turno Continuo A',
         status: 'activo',
         pendingActivation: true,
@@ -833,9 +843,9 @@ export async function createNewCompanyAccountWithPreviousEmail(params: {
   rememberMe?: boolean;
 }): Promise<UserProfile> {
   const cleanEmail = params.email.trim().toLowerCase();
-  if (!cleanEmail || !params.previousPassword || params.newPassword.length < 6) {
+  if (!cleanEmail || !params.previousPassword || params.newPassword.length < 8) {
     throw new FirebaseAuthActionError(
-      'Debes ingresar tu correo anterior, tu contraseña anterior y una nueva contraseña (mínimo 6 caracteres).',
+      'Debes ingresar tu correo anterior, tu contraseña anterior y una nueva contraseña (mínimo 8 caracteres).',
       'auth/invalid-input'
     );
   }
@@ -3389,6 +3399,8 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     platformSubtitle: 'Supervisión ambiental subterránea continua, control de gases críticos, ventilación de galerías y respuesta temprana ante incidentes.',
     siteBadgeText: 'Faena El Teniente · Nivel -510m',
     footerText: 'Cumplimiento Normativo DS 132 / Sernageomin · Plataforma Industrial',
+    textScalePct: 100,
+    heroTitleScale: 'normal',
     announcementEnabled: false,
     announcementText: '',
     announcementTone: 'info',
@@ -3570,6 +3582,8 @@ function mergePlatformConfig(raw: any): PlatformConfig {
     appearance: {
       ...DEFAULT_PLATFORM_CONFIG.appearance,
       ...(raw?.appearance || {}),
+      textScalePct: clampTextScalePct(raw?.appearance?.textScalePct),
+      heroTitleScale: normalizeHeroTitleScale(raw?.appearance?.heroTitleScale),
     },
     registeredDevices: Array.isArray(raw?.registeredDevices)
       ? raw.registeredDevices
@@ -3581,6 +3595,20 @@ function mergePlatformConfig(raw: any): PlatformConfig {
     actualizado_en: raw?.actualizado_en || Date.now(),
     actualizado_por: raw?.actualizado_por || 'SuperAdmin',
   };
+}
+
+export function clampTextScalePct(val?: number | null): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 100;
+  return Math.min(130, Math.max(85, Math.round(n)));
+}
+
+export function normalizeHeroTitleScale(
+  val?: unknown
+): 'compact' | 'normal' | 'large' | 'xlarge' {
+  return val === 'compact' || val === 'normal' || val === 'large' || val === 'xlarge'
+    ? val
+    : 'normal';
 }
 
 export async function initializeRegisteredDeviceInRTDB(
@@ -3670,6 +3698,12 @@ export async function savePlatformConfig(
   const payload: PlatformConfig = JSON.parse(
     JSON.stringify({
       ...config,
+      appearance: {
+        ...DEFAULT_PLATFORM_CONFIG.appearance,
+        ...(config.appearance || {}),
+        textScalePct: clampTextScalePct(config.appearance?.textScalePct),
+        heroTitleScale: normalizeHeroTitleScale(config.appearance?.heroTitleScale),
+      },
       actualizado_en: Date.now(),
       actualizado_por: `${actingUser.name} (SuperAdmin)`,
     })
@@ -4057,10 +4091,19 @@ export async function saveOrganizationToRTDB(
   const ownerEmail =
     existingOrg?.ownerEmail || org.ownerEmail || actingUser.email || '';
 
+  let formattedOrgRut = '';
+  if (!isPlaceholderRut(org.rut)) {
+    const rutCheck = validateChileanRut(org.rut || '');
+    if (!rutCheck.valid) {
+      throw new Error(rutCheck.error || 'El RUT de la empresa no es válido según Módulo 11.');
+    }
+    formattedOrgRut = rutCheck.formatted!;
+  }
+
   const payload: Organization & { ownerUid: string } = {
     id: cleanId,
     name: cleanName,
-    rut: org.rut?.trim() || '',
+    rut: formattedOrgRut,
     industry: org.industry?.trim() || 'Minería',
     status: org.status || 'activa',
     createdAt: existingOrg?.createdAt || org.createdAt || Date.now(),

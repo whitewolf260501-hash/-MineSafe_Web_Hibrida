@@ -58,7 +58,7 @@ interface PublicLandingProps {
   authenticatedUserName?: string;
 }
 
-const OFFICIAL_CONTACT_EMAIL = (import.meta.env.VITE_PUBLIC_CONTACT_EMAIL || '').trim();
+const OFFICIAL_CONTACT_EMAIL = (import.meta.env.VITE_PUBLIC_CONTACT_EMAIL || 'minesafe99@gmail.com').trim();
 const OFFICIAL_CONTACT_ENDPOINT = (import.meta.env.VITE_PUBLIC_CONTACT_ENDPOINT || '').trim();
 
 const NAV_ITEMS = [

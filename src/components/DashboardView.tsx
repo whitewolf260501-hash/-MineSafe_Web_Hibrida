@@ -174,18 +174,39 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         <div className="tech-radial-glow absolute inset-0 pointer-events-none" />
         
         {/* Header Title & Subtitle */}
-        <div className="relative z-10 max-w-3xl mb-8">
-          <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/60 border border-cyan-800/60 text-cyan-300 text-xs font-semibold uppercase tracking-wider mb-3">
-            <Activity className="w-3.5 h-3.5 text-cyan-400" />
-            Control Operacional en Tiempo Real · {currentSite.name}
-          </div>
-          <h1 className="text-2xl sm:text-4xl font-extrabold tracking-tight text-white">
-            {appCfg?.platformTitle || 'MineSafe: Monitoreo IoT y Seguridad Minera'}
-          </h1>
-          <p className="mt-2 text-sm sm:text-base text-slate-300 max-w-2xl leading-relaxed">
-            {appCfg?.platformSubtitle || 'Supervisión ambiental subterránea continua, control de gases críticos, ventilación de galerías y respuesta temprana ante incidentes.'}
-          </p>
-        </div>
+        {(() => {
+          const heroScale = appCfg?.heroTitleScale || 'normal';
+          const titleSizeClass =
+            heroScale === 'compact'
+              ? 'text-xl sm:text-2xl'
+              : heroScale === 'large'
+              ? 'text-3xl sm:text-5xl'
+              : heroScale === 'xlarge'
+              ? 'text-4xl sm:text-6xl'
+              : 'text-2xl sm:text-4xl';
+          const subtitleSizeClass =
+            heroScale === 'compact'
+              ? 'text-xs sm:text-sm'
+              : heroScale === 'large'
+              ? 'text-base sm:text-lg'
+              : heroScale === 'xlarge'
+              ? 'text-lg sm:text-xl'
+              : 'text-sm sm:text-base';
+          return (
+            <div className="relative z-10 max-w-3xl mb-8">
+              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-cyan-950/60 border border-cyan-800/60 text-cyan-300 text-xs font-semibold uppercase tracking-wider mb-3">
+                <Activity className="w-3.5 h-3.5 text-cyan-400" />
+                Control Operacional en Tiempo Real · {currentSite.name}
+              </div>
+              <h1 className={`${titleSizeClass} font-extrabold tracking-tight text-white`}>
+                {appCfg?.platformTitle || 'MineSafe: Monitoreo IoT y Seguridad Minera'}
+              </h1>
+              <p className={`mt-2 ${subtitleSizeClass} text-slate-300 max-w-2xl leading-relaxed`}>
+                {appCfg?.platformSubtitle || 'Supervisión ambiental subterránea continua, control de gases críticos, ventilación de galerías y respuesta temprana ante incidentes.'}
+              </p>
+            </div>
+          );
+        })()}
 
         {/* Quick Operational Telemetry Summary */}
         <div className="relative z-10 grid grid-cols-2 sm:grid-cols-4 gap-3 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400">
@@ -212,26 +233,216 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         </div>
 
         {/* ==============================================================
-            MODERN DASHBOARD UI: BIENVENIDA, GRÁFICO CON SELECTOR DE DISPOSITIVO
-            Y RECUADRO DE USUARIOS CON SCROLL
+            MODERN DASHBOARD UI: BIENVENIDA, MONITOREO ATMOSFÉRICO + MÉTRICAS,
+            GRÁFICO CON SELECTOR DE DISPOSITIVO Y RECUADRO DE USUARIOS
            ============================================================== */}
-        {(appCfg?.showChartsAndUsers ?? true) && (
-          <div className="relative z-10 mb-10">
-            <InteractiveDeviceChartAndUsers
-              currentUser={currentUser}
-              usersList={usersList}
-              devices={devices}
-              activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
-              onSelectDevice={(id) => onSelectTelemetryDevice?.(id)}
-              onSelectUser={() => canSeeUsuarios ? safeNavigate('usuarios') : (onChangeUserModal ? onChangeUserModal() : undefined)}
-              onChangeUserModal={onChangeUserModal}
-              activeAlertCount={activeAlerts.length}
-              platformConfig={platformConfig}
-              telemetryHistory={telemetryHistory}
-              siteName={currentSite.name}
-            />
-          </div>
-        )}
+        {(() => {
+          const showDual = (appCfg?.showDualSensorCards ?? true) && Boolean(activeDevice);
+          const showHero = appCfg?.showHeroMetricCards ?? true;
+          const atmosphericAndMetricCards = (showDual || showHero) ? (
+            <div className="relative z-10">
+              {/* VISUALIZACIÓN AMIGABLE VS. MEDICIÓN TÉCNICA (Sensores) */}
+              {showDual && activeDevice && (
+                <DualReadingSensorCards device={activeDevice} />
+              )}
+
+              {/* THE 6 PRIMARY METRIC CARDS */}
+              {showHero && (
+                <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
+                  {/* Card 1: TEMPERATURA AMBIENTE */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {tempVar.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <Thermometer className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {tempVar.value} <span className="text-base font-semibold text-cyan-300">{tempVar.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(tempVar.trend)}
+                        <span className="capitalize">{tempVar.trend}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {tempVar.lastUpdateSeconds}s</span>
+                      <span className="text-emerald-400 font-medium">Estable</span>
+                    </div>
+                  </div>
+
+                  {/* Card 2: HUMEDAD RELATIVA */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {humVar.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <Droplets className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {humVar.value} <span className="text-base font-semibold text-cyan-300">{humVar.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(humVar.trend)}
+                        <span className="capitalize">{humVar.trend}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {humVar.lastUpdateSeconds}s</span>
+                      <span className="text-emerald-400 font-medium">Normal</span>
+                    </div>
+                  </div>
+
+                  {/* Card 3: NIVEL DE CO2 / GASES */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {co2Var.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <CloudRain className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {co2Var.value} <span className="text-base font-semibold text-cyan-300">{co2Var.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(co2Var.trend)}
+                        <span className="capitalize">{co2Var.trend}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {co2Var.lastUpdateSeconds}s</span>
+                      <span className="text-emerald-400 font-medium">Seguro</span>
+                    </div>
+                  </div>
+
+                  {/* Card 4: ILUMINACIÓN */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {luxVar.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <Sun className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {luxVar.value} <span className="text-base font-semibold text-cyan-300">{luxVar.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(luxVar.trend)}
+                        <span className="capitalize">{luxVar.trend}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {luxVar.lastUpdateSeconds}s</span>
+                      <span className="text-emerald-400 font-medium">Adecuado</span>
+                    </div>
+                  </div>
+
+                  {/* Card 5: CONSUMO ENERGÉTICO (VENTILACIÓN) */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {kwhVar.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <Zap className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {kwhVar.value} <span className="text-base font-semibold text-cyan-300">{kwhVar.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(kwhVar.trend)}
+                        <span className="capitalize">{kwhVar.statusLabel}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {kwhVar.lastUpdateSeconds}s</span>
+                      <span className="text-cyan-400 font-medium">Eficiente</span>
+                    </div>
+                  </div>
+
+                  {/* Card 6: FLUJO DE AIRE */}
+                  <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
+                    <div className="flex items-center justify-between">
+                      <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
+                        {airVar.name}
+                      </span>
+                      <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
+                        <Wind className="w-4 h-4 text-cyan-300" />
+                      </div>
+                    </div>
+
+                    <div className="my-2">
+                      <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
+                        {airVar.value} <span className="text-base font-semibold text-cyan-300">{airVar.unit}</span>
+                      </div>
+                      <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
+                        {renderTrendIcon(airVar.trend)}
+                        <span className="capitalize">{airVar.trend}</span>
+                      </div>
+                    </div>
+
+                    <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
+                      <span>Última act.: {airVar.lastUpdateSeconds}s</span>
+                      <span className="text-emerald-400 font-medium">Circulación OK</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+          ) : null;
+
+          return (
+            <>
+              {(appCfg?.showChartsAndUsers ?? true) ? (
+                <div className="relative z-10 mb-10">
+                  <InteractiveDeviceChartAndUsers
+                    currentUser={currentUser}
+                    usersList={usersList}
+                    devices={devices}
+                    activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
+                    onSelectDevice={(id) => onSelectTelemetryDevice?.(id)}
+                    onSelectUser={() => canSeeUsuarios ? safeNavigate('usuarios') : (onChangeUserModal ? onChangeUserModal() : undefined)}
+                    onChangeUserModal={onChangeUserModal}
+                    activeAlertCount={activeAlerts.length}
+                    platformConfig={platformConfig}
+                    telemetryHistory={telemetryHistory}
+                    siteName={currentSite.name}
+                    betweenWelcomeAndChart={atmosphericAndMetricCards}
+                    canViewSystemUsers={canSeeUsuarios}
+                  />
+                </div>
+              ) : (
+                atmosphericAndMetricCards && (
+                  <div className="mb-10">{atmosphericAndMetricCards}</div>
+                )
+              )}
+            </>
+          );
+        })()}
 
         {/* ==============================================================
             SECCIÓN DE ESTADO DEL GATEWAY (ESP32 Central de Enlace) - Req 2 & 1
@@ -251,184 +462,6 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             currentUser={currentUser}
             timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
           />
-        )}
-
-        {/* ==============================================================
-            VISUALIZACIÓN AMIGABLE VS. MEDICIÓN TÉCNICA (Sensores) - Req 3
-           ============================================================== */}
-        {(appCfg?.showDualSensorCards ?? true) && activeDevice && (
-          <DualReadingSensorCards device={activeDevice} />
-        )}
-
-        {/* ==============================================================
-            THE 6 PRIMARY METRIC CARDS (Exact styling inspired by reference image)
-           ============================================================== */}
-        {(appCfg?.showHeroMetricCards ?? true) && (
-        <div className="relative z-10 grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-4">
-          
-          {/* Card 1: TEMPERATURA AMBIENTE */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {tempVar.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <Thermometer className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {tempVar.value} <span className="text-base font-semibold text-cyan-300">{tempVar.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(tempVar.trend)}
-                <span className="capitalize">{tempVar.trend}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {tempVar.lastUpdateSeconds}s</span>
-              <span className="text-emerald-400 font-medium">Estable</span>
-            </div>
-          </div>
-
-          {/* Card 2: HUMEDAD RELATIVA */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {humVar.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <Droplets className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {humVar.value} <span className="text-base font-semibold text-cyan-300">{humVar.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(humVar.trend)}
-                <span className="capitalize">{humVar.trend}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {humVar.lastUpdateSeconds}s</span>
-              <span className="text-emerald-400 font-medium">Normal</span>
-            </div>
-          </div>
-
-          {/* Card 3: NIVEL DE CO2 / GASES */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {co2Var.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <CloudRain className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {co2Var.value} <span className="text-base font-semibold text-cyan-300">{co2Var.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(co2Var.trend)}
-                <span className="capitalize">{co2Var.trend}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {co2Var.lastUpdateSeconds}s</span>
-              <span className="text-emerald-400 font-medium">Seguro</span>
-            </div>
-          </div>
-
-          {/* Card 4: ILUMINACIÓN */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {luxVar.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <Sun className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {luxVar.value} <span className="text-base font-semibold text-cyan-300">{luxVar.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(luxVar.trend)}
-                <span className="capitalize">{luxVar.trend}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {luxVar.lastUpdateSeconds}s</span>
-              <span className="text-emerald-400 font-medium">Adecuado</span>
-            </div>
-          </div>
-
-          {/* Card 5: CONSUMO ENERGÉTICO (VENTILACIÓN) */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {kwhVar.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <Zap className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {kwhVar.value} <span className="text-base font-semibold text-cyan-300">{kwhVar.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(kwhVar.trend)}
-                <span className="capitalize">{kwhVar.statusLabel}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {kwhVar.lastUpdateSeconds}s</span>
-              <span className="text-cyan-400 font-medium">Eficiente</span>
-            </div>
-          </div>
-
-          {/* Card 6: FLUJO DE AIRE */}
-          <div className="hero-card-gradient rounded-xl p-4 transition-all duration-200 flex flex-col justify-between min-h-[175px]">
-            <div className="flex items-center justify-between">
-              <span className="text-[11px] font-bold tracking-wider uppercase text-cyan-200/90 truncate">
-                {airVar.name}
-              </span>
-              <div className="w-7 h-7 rounded-lg bg-cyan-900/50 border border-cyan-700/60 flex items-center justify-center text-cyan-300">
-                <Wind className="w-4 h-4 text-cyan-300" />
-              </div>
-            </div>
-            
-            <div className="my-2">
-              <div className="text-3xl font-extrabold text-white tabular-nums tracking-tight">
-                {airVar.value} <span className="text-base font-semibold text-cyan-300">{airVar.unit}</span>
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs text-cyan-200">
-                {renderTrendIcon(airVar.trend)}
-                <span className="capitalize">{airVar.trend}</span>
-              </div>
-            </div>
-
-            <div className="pt-2 border-t border-cyan-800/40 text-[10px] text-cyan-200/70 flex items-center justify-between">
-              <span>Última act.: {airVar.lastUpdateSeconds}s</span>
-              <span className="text-emerald-400 font-medium">Circulación OK</span>
-            </div>
-          </div>
-
-        </div>
         )}
       </section>
 

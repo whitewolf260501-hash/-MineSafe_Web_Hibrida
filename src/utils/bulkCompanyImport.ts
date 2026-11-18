@@ -7,6 +7,7 @@ import {
   UserRole,
   WorkerAssignment,
 } from '../types';
+import { isPlaceholderRut, validateChileanRut } from './rut';
 
 export type BulkEntityType = 'users' | 'sites' | 'rentals' | 'assignments' | 'bundle';
 
@@ -236,7 +237,16 @@ export function validateBulkUsersRecords(records: Record<string, any>[]): BulkPa
     const errors: string[] = [];
     const name = pickField(rec, ['nombre', 'name', 'nombre_completo', 'full_name']);
     const email = pickField(rec, ['email', 'correo', 'correo_electronico', 'mail']).toLowerCase();
-    const rut = pickField(rec, ['rut', 'codigoId', 'dni']) || 'No registrado';
+    const rawRut = pickField(rec, ['rut', 'codigoId', 'dni']);
+    let rut = 'No registrado';
+    if (!isPlaceholderRut(rawRut)) {
+      const rutCheck = validateChileanRut(rawRut);
+      if (!rutCheck.valid) {
+        errors.push(rutCheck.error || `RUT inválido (${rawRut})`);
+      } else {
+        rut = rutCheck.formatted!;
+      }
+    }
     const rawRole = pickField(rec, ['rol', 'role', 'tipoUsuario', 'tipo_usuario']);
     const shift = pickField(rec, ['turno', 'shift', 'cargo']) || 'Turno Mañana (07:00 - 15:30)';
     const assignedSector = pickField(rec, ['sector', 'assignedSector', 'geoMina', 'faena']) || 'Faena Minera Central';
@@ -261,8 +271,8 @@ export function validateBulkUsersRecords(records: Record<string, any>[]): BulkPa
     const status: 'activo' | 'inactivo' =
       rawStatus === 'inactivo' || rawStatus === 'false' || rawStatus === '0' ? 'inactivo' : 'activo';
 
-    if (password && password.length < 6) {
-      errors.push('Si indicas clave, debe tener mínimo 6 caracteres');
+    if (password && password.length < 8) {
+      errors.push('Si indicas clave, debe tener mínimo 8 caracteres');
     }
 
     const valid = errors.length === 0;
@@ -531,7 +541,16 @@ export function validateBulkAssignmentsRecords(
     const rowNumber = idx + 2;
     const errors: string[] = [];
     const workerName = pickField(rec, ['trabajador', 'workerName', 'nombre', 'operador']);
-    const workerRut = pickField(rec, ['rut_trabajador', 'rutTrabajador', 'workerRut', 'rut']) || 'No registrado';
+    const rawWorkerRut = pickField(rec, ['rut_trabajador', 'rutTrabajador', 'workerRut', 'rut']);
+    let workerRut = 'No registrado';
+    if (!isPlaceholderRut(rawWorkerRut)) {
+      const rutCheck = validateChileanRut(rawWorkerRut);
+      if (!rutCheck.valid) {
+        errors.push(rutCheck.error || `RUT trabajador inválido (${rawWorkerRut})`);
+      } else {
+        workerRut = rutCheck.formatted!;
+      }
+    }
     const role = pickField(rec, ['cargo', 'role', 'rol']) || 'Operador Subterráneo';
     const crew = pickField(rec, ['cuadrilla', 'crew']) || 'Cuadrilla Alfa - Turno A';
     const sectorName = pickField(rec, ['sector', 'sectorName']) || 'Faena Central';
@@ -647,6 +666,16 @@ export function parseBulkCompanyBundle(
       if (name.length < 2) {
         orgErrors.push('El nombre de la empresa debe tener al menos 2 caracteres.');
       }
+      const rawOrgRut = String(parsed.organization.rut || '').trim();
+      let formattedOrgRut = '';
+      if (!isPlaceholderRut(rawOrgRut)) {
+        const orgRutCheck = validateChileanRut(rawOrgRut);
+        if (!orgRutCheck.valid) {
+          orgErrors.push(orgRutCheck.error || `RUT de empresa inválido (${rawOrgRut}).`);
+        } else {
+          formattedOrgRut = orgRutCheck.formatted!;
+        }
+      }
       const cleanId =
         parsed.organization.id?.trim() ||
         `org-${name
@@ -662,7 +691,7 @@ export function parseBulkCompanyBundle(
           data: {
             id: cleanId,
             name,
-            rut: String(parsed.organization.rut || '').trim(),
+            rut: formattedOrgRut,
             industry: String(parsed.organization.industry || 'Minería Subterránea & Rajo').trim(),
             status: parsed.organization.status === 'suspendida' ? 'suspendida' : 'activa',
           },
@@ -701,9 +730,9 @@ export function getBulkCsvTemplate(entityType: Exclude<BulkEntityType, 'bundle'>
     case 'users':
       return [
         'nombre,email,rut,rol,turno,sector,dispositivo,estado',
-        'Carlos Araya Soto,caraya@empresa.cl,17.456.789-2,operador,Turno Mañana (07:00 - 15:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
-        'Lucía Muñoz Vera,lmunoz@empresa.cl,18.901.234-5,monotoriador,Turno Tarde (15:30 - 23:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
-        'Rodrigo Fuentes Díaz,rfuentes@empresa.cl,15.222.333-4,admin,Turno Administrativo,Faena Principal,,activo',
+        'Carlos Araya Soto,caraya@empresa.cl,17.456.789-1,operador,Turno Mañana (07:00 - 15:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
+        'Lucía Muñoz Vera,lmunoz@empresa.cl,18.901.234-9,monotoriador,Turno Tarde (15:30 - 23:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
+        'Rodrigo Fuentes Díaz,rfuentes@empresa.cl,15.222.333-1,admin,Turno Administrativo,Faena Principal,,activo',
       ].join('\n');
     case 'sites':
       return [
@@ -720,8 +749,8 @@ export function getBulkCsvTemplate(entityType: Exclude<BulkEntityType, 'bundle'>
     case 'assignments':
       return [
         'rutTrabajador,trabajador,cargo,cuadrilla,sector,codigoDispositivo,fechaAsignacion,bateria,contactoEmergencia',
-        '17.456.789-2,Carlos Araya Soto,Operador Perforación,Cuadrilla Alfa - Turno A,Socavón Principal Nivel -320,device_38A839E81F84,2026-11-15,96,+56 9 8111 2233',
-        '18.901.234-5,Lucía Muñoz Vera,Monotoriador Ambiental,Cuadrilla Seguridad,Galería Ventilación Sur,MS-PORT-204,2026-11-15,92,+56 9 7222 3344',
+        '17.456.789-1,Carlos Araya Soto,Operador Perforación,Cuadrilla Alfa - Turno A,Socavón Principal Nivel -320,device_38A839E81F84,2026-11-15,96,+56 9 8111 2233',
+        '18.901.234-9,Lucía Muñoz Vera,Monotoriador Ambiental,Cuadrilla Seguridad,Galería Ventilación Sur,MS-PORT-204,2026-11-15,92,+56 9 7222 3344',
       ].join('\n');
   }
 }
@@ -730,7 +759,7 @@ export function getBulkJsonBundleTemplate(): string {
   const sample: BulkCompanyBundleInput = {
     organization: {
       name: 'Minera Andes Sur SpA',
-      rut: '76.543.210-8',
+      rut: '76.543.210-3',
       industry: 'Minería Subterránea Cobre',
       status: 'activa',
     },
@@ -738,7 +767,7 @@ export function getBulkJsonBundleTemplate(): string {
       {
         nombre: 'Carlos Araya Soto',
         email: 'caraya@andes-sur.cl',
-        rut: '17.456.789-2',
+        rut: '17.456.789-1',
         rol: 'operador',
         turno: 'Turno Mañana (07:00 - 15:30)',
         sector: 'Socavón Principal Nivel -320',
@@ -747,7 +776,7 @@ export function getBulkJsonBundleTemplate(): string {
       {
         nombre: 'Lucía Muñoz Vera',
         email: 'lmunoz@andes-sur.cl',
-        rut: '18.901.234-5',
+        rut: '18.901.234-9',
         rol: 'monotoriador',
         turno: 'Turno Tarde (15:30 - 23:30)',
         sector: 'Galería Ventilación Sur',
@@ -787,7 +816,7 @@ export function getBulkJsonBundleTemplate(): string {
     ],
     assignments: [
       {
-        rutTrabajador: '17.456.789-2',
+        rutTrabajador: '17.456.789-1',
         trabajador: 'Carlos Araya Soto',
         cargo: 'Operador Subterráneo',
         cuadrilla: 'Cuadrilla Alfa',

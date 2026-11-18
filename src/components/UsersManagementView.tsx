@@ -36,6 +36,7 @@ import {
   isGlobalMineSafeAdmin,
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
+import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
 
 interface UsersManagementViewProps {
   currentUser: UserProfile;
@@ -251,9 +252,19 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       return;
     }
 
+    let normalizedNewRut = 'No registrado';
+    if (!isPlaceholderRut(newRut)) {
+      const rutCheck = validateChileanRut(newRut);
+      if (!rutCheck.valid) {
+        setCreateError(rutCheck.error || 'El RUT ingresado no es válido según Módulo 11.');
+        return;
+      }
+      normalizedNewRut = rutCheck.formatted!;
+    }
+
     if (createRealAuth) {
-      if (newPassword.length < 6) {
-        setCreateError('La contraseña inicial debe tener al menos 6 caracteres.');
+      if (newPassword.length < 8) {
+        setCreateError('La contraseña inicial debe tener al menos 8 caracteres.');
         return;
       }
       setIsCreating(true);
@@ -263,7 +274,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           email: newEmail,
           password: newPassword,
           role: safeRole,
-          rut: newRut,
+          rut: normalizedNewRut,
           shift: newShift,
           assignedSector: 'Faena Minera Central',
           organizationId: targetOrgId,
@@ -313,7 +324,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       email: newEmail.trim().toLowerCase(),
       role: safeRole,
       roleLabel: roleLabels[safeRole],
-      rut: newRut.trim() || 'No registrado',
+      rut: normalizedNewRut,
       shift: newShift,
       status: 'activo',
       pendingActivation: true,
@@ -733,14 +744,36 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-slate-300 block mb-1">RUT</label>
+                  <label className="text-slate-300 block mb-1">RUT (Módulo 11)</label>
                   <input
                     type="text"
-                    placeholder="18.321.654-3"
+                    placeholder="18.321.654-K"
                     value={newRut}
                     onChange={(e) => setNewRut(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                    onBlur={() => {
+                      const res = validateChileanRut(newRut);
+                      if (res.valid && res.formatted) setNewRut(res.formatted);
+                    }}
+                    className={`w-full px-3 py-2 bg-slate-950 border rounded-lg text-white font-mono ${
+                      newRut.trim() && !isPlaceholderRut(newRut)
+                        ? validateChileanRut(newRut).valid
+                          ? 'border-emerald-500/70 focus:border-emerald-400'
+                          : 'border-rose-500/80 focus:border-rose-400'
+                        : 'border-slate-800'
+                    }`}
                   />
+                  {newRut.trim() && !isPlaceholderRut(newRut) && (() => {
+                    const res = validateChileanRut(newRut);
+                    return (
+                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {res.valid
+                          ? `✓ RUT válido (${res.formatted})`
+                          : res.expectedVerifierDigit
+                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
+                          : `✗ ${res.error}`}
+                      </p>
+                    );
+                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 block mb-1">Rol en Faena</label>
@@ -816,11 +849,11 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 {createRealAuth ? (
                   <div className="space-y-2 pt-1">
                     <div>
-                      <label className="text-slate-300 block mb-1">Contraseña Inicial (mín. 6 caracteres)</label>
+                      <label className="text-slate-300 block mb-1">Contraseña Inicial (mín. 8 caracteres)</label>
                       <input
                         type="password"
                         required
-                        minLength={6}
+                        minLength={8}
                         placeholder="••••••••"
                         value={newPassword}
                         onChange={(e) => setNewPassword(e.target.value)}

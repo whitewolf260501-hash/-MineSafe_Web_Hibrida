@@ -33,6 +33,7 @@ import {
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 import { soundAlert } from '../services/audioAlert';
+import { validateChileanRut } from '../utils/rut';
 
 interface CrewCandidateWorker {
   key: string;
@@ -483,11 +484,18 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
     e.preventDefault();
     if (!assigningCrew) return;
     const cleanName = manualName.trim();
-    const cleanRut = manualRut.trim();
-    if (!cleanName || !cleanRut) {
+    const rawManualRut = manualRut.trim();
+    if (!cleanName || !rawManualRut) {
       setWorkersModalError('El nombre y RUT del trabajador son obligatorios.');
       return;
     }
+
+    const rutCheck = validateChileanRut(rawManualRut);
+    if (!rutCheck.valid) {
+      setWorkersModalError(rutCheck.error || 'El RUT del trabajador no es válido según Módulo 11.');
+      return;
+    }
+    const cleanRut = rutCheck.formatted!;
 
     const key = buildCandidateKey({ rut: cleanRut, name: cleanName });
     if (draftMembers.some((m) => buildCandidateKey(m) === key)) {
@@ -1131,15 +1139,37 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                       />
                     </div>
                     <div>
-                      <label className="text-slate-300 block mb-1">RUT Trabajador *</label>
+                      <label className="text-slate-300 block mb-1">RUT Trabajador * (Módulo 11)</label>
                       <input
                         type="text"
                         required
-                        placeholder="Ej: 18.234.567-8"
+                        placeholder="Ej: 17.456.789-1"
                         value={manualRut}
                         onChange={(e) => setManualRut(e.target.value)}
-                        className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white"
+                        onBlur={() => {
+                          const res = validateChileanRut(manualRut);
+                          if (res.valid && res.formatted) setManualRut(res.formatted);
+                        }}
+                        className={`w-full px-3 py-1.5 bg-slate-900 border rounded-lg text-white font-mono ${
+                          manualRut.trim()
+                            ? validateChileanRut(manualRut).valid
+                              ? 'border-emerald-500/70 focus:border-emerald-400'
+                              : 'border-rose-500/80 focus:border-rose-400'
+                            : 'border-slate-800'
+                        }`}
                       />
+                      {manualRut.trim() && (() => {
+                        const res = validateChileanRut(manualRut);
+                        return (
+                          <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                            {res.valid
+                              ? `✓ RUT válido (${res.formatted})`
+                              : res.expectedVerifierDigit
+                              ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
+                              : `✗ ${res.error}`}
+                          </p>
+                        );
+                      })()}
                     </div>
                     <div>
                       <label className="text-slate-300 block mb-1">Cargo / Especialidad</label>

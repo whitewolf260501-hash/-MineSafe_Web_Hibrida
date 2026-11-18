@@ -10,6 +10,13 @@ export function isAnyAdminRole(role?: UserRole | null): boolean {
   return role === 'superadmin' || role === 'admin_minesafe' || role === 'admin';
 }
 
+export function canViewSystemUsersPanel(
+  user?: Pick<UserProfile, 'role' | 'status'> | null
+): boolean {
+  if (!user || user.status !== 'activo') return false;
+  return isAnyAdminRole(user.role);
+}
+
 export function isOrganizationOwner(
   actingUser: UserProfile | null | undefined,
   org: Pick<Organization, 'id' | 'ownerId' | 'ownerUid' | 'ownerEmail'> | null | undefined

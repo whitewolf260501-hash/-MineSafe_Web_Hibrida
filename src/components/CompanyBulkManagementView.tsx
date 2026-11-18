@@ -48,6 +48,7 @@ import {
   parseBulkCompanyBundle,
   parseBulkInput,
 } from '../utils/bulkCompanyImport';
+import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
 import { soundAlert } from '../services/audioAlert';
 
 interface CompanyBulkManagementViewProps {
@@ -208,6 +209,16 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       return;
     }
 
+    let formattedOrgRut = '';
+    if (!isPlaceholderRut(orgRut)) {
+      const rutCheck = validateChileanRut(orgRut);
+      if (!rutCheck.valid) {
+        showNotice('error', rutCheck.error || 'El RUT de empresa no es válido según Módulo 11.');
+        return;
+      }
+      formattedOrgRut = rutCheck.formatted!;
+    }
+
     setIsSavingOrg(true);
     try {
       const cleanId =
@@ -222,7 +233,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
         {
           id: cleanId,
           name: orgName.trim(),
-          rut: orgRut.trim(),
+          rut: formattedOrgRut,
           industry: orgIndustry.trim() || 'Minería Subterránea & Rajo',
           status: orgStatus,
           createdAt: existing?.createdAt || Date.now(),
@@ -348,11 +359,11 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       (entityType === 'users' ||
         (entityType === 'bundle' && (bundleParsePreview?.users.validRows.length || 0) > 0)) &&
       createAuthAccounts &&
-      defaultAuthPassword.length < 6
+      defaultAuthPassword.length < 8
     ) {
       showNotice(
         'error',
-        'Si activas la creación en Firebase Auth, la contraseña inicial por defecto debe tener mínimo 6 caracteres.'
+        'Si activas la creación en Firebase Auth, la contraseña inicial por defecto debe tener mínimo 8 caracteres.'
       );
       return;
     }
@@ -572,14 +583,36 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
 
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa</label>
+                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa (Módulo 11)</label>
                   <input
                     type="text"
                     value={orgRut}
                     onChange={(e) => setOrgRut(e.target.value)}
-                    placeholder="76.543.210-8"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                    onBlur={() => {
+                      const res = validateChileanRut(orgRut);
+                      if (res.valid && res.formatted) setOrgRut(res.formatted);
+                    }}
+                    placeholder="76.543.210-3"
+                    className={`w-full px-3 py-2 rounded-lg bg-slate-950 border text-white font-mono ${
+                      orgRut.trim() && !isPlaceholderRut(orgRut)
+                        ? validateChileanRut(orgRut).valid
+                          ? 'border-emerald-500/70 focus:border-emerald-400'
+                          : 'border-rose-500/80 focus:border-rose-400'
+                        : 'border-slate-700'
+                    }`}
                   />
+                  {orgRut.trim() && !isPlaceholderRut(orgRut) && (() => {
+                    const res = validateChileanRut(orgRut);
+                    return (
+                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {res.valid
+                          ? `✓ RUT válido (${res.formatted})`
+                          : res.expectedVerifierDigit
+                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
+                          : `✗ ${res.error}`}
+                      </p>
+                    );
+                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 font-semibold block mb-1">Estado Operativo</label>
@@ -847,10 +880,11 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                       <div className="space-y-2 pl-1">
                         <div>
                           <label className="text-slate-400 block mb-1 text-[11px]">
-                            Contraseña inicial por defecto (si falta columna password)
+                            Contraseña inicial por defecto (mín. 8 caracteres, si falta columna password)
                           </label>
                           <input
                             type="text"
+                            minLength={8}
                             value={defaultAuthPassword}
                             onChange={(e) => setDefaultAuthPassword(e.target.value)}
                             className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"

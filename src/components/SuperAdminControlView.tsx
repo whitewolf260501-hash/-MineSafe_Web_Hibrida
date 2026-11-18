@@ -37,12 +37,14 @@ import {
   Building2,
   ShieldCheck,
   X,
-  ArrowRight
+  ArrowRight,
+  Type
 } from 'lucide-react';
 import {
   ControllableTab,
   EquiposSubTab,
   DeviceCategory,
+  HeroTitleScale,
   Organization,
   PlatformConfig,
   RegisteredDeviceConfig,
@@ -54,6 +56,8 @@ import {
 import {
   DEFAULT_PLATFORM_CONFIG,
   DEFAULT_ORGANIZATION,
+  clampTextScalePct,
+  normalizeHeroTitleScale,
   savePlatformConfig,
   resetPlatformConfigToDefault,
   initializeRegisteredDeviceInRTDB,
@@ -62,6 +66,7 @@ import {
   deleteOrganizationFromRTDB
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
+import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
 
 interface SuperAdminControlViewProps {
   currentUser: UserProfile;
@@ -73,6 +78,7 @@ interface SuperAdminControlViewProps {
   onSelectOrganization?: (orgId: string) => void;
   onUpdateUserRole?: (userId: string, newRole: UserRole) => Promise<void> | void;
   onToggleUserStatus?: (userId: string) => void;
+  onPreviewTextScale?: (pct: number | null) => void;
 }
 
 const CONTROLLABLE_WINDOWS: Array<{
@@ -174,6 +180,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   onSelectOrganization,
   onUpdateUserRole,
   onToggleUserStatus,
+  onPreviewTextScale,
 }) => {
   const [subTab, setSubTab] = useState<'windows' | 'metrics' | 'page' | 'devices' | 'organizations'>('windows');
   const [draftConfig, setDraftConfig] = useState<PlatformConfig>(platformConfig);
@@ -220,6 +227,12 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     draftConfigRef.current = cloned;
     setDraftConfig(cloned);
   }, [platformConfig]);
+
+  useEffect(() => {
+    return () => {
+      onPreviewTextScale?.(null);
+    };
+  }, [onPreviewTextScale]);
 
   // Seguridad estricta: solo el único SuperAdmin puede ver/usar este panel
   if (currentUser.role !== 'superadmin') {
@@ -551,11 +564,39 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     key: K,
     value: PlatformConfig['appearance'][K]
   ) => {
-    setDraftConfig((prev) => ({
+    setDraftConfig((prev) => {
+      const next: PlatformConfig = {
+        ...prev,
+        appearance: {
+          ...prev.appearance,
+          [key]: value,
+        },
+      };
+      draftConfigRef.current = next;
+      return next;
+    });
+  };
+
+  const commitTextTypographyChange = (updates: {
+    textScalePct?: number;
+    heroTitleScale?: HeroTitleScale;
+  }) => {
+    const nextPct =
+      updates.textScalePct !== undefined
+        ? clampTextScalePct(updates.textScalePct)
+        : clampTextScalePct(draftConfigRef.current.appearance.textScalePct);
+    const nextHeroScale =
+      updates.heroTitleScale !== undefined
+        ? normalizeHeroTitleScale(updates.heroTitleScale)
+        : normalizeHeroTitleScale(draftConfigRef.current.appearance.heroTitleScale);
+
+    onPreviewTextScale?.(nextPct);
+    commitVisibilityChange((prev) => ({
       ...prev,
       appearance: {
         ...prev.appearance,
-        [key]: value,
+        textScalePct: nextPct,
+        heroTitleScale: nextHeroScale,
       },
     }));
   };
@@ -705,6 +746,15 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       showNotice('error', 'El nombre de la organización es obligatorio.');
       return;
     }
+    let formattedOrgRut = '';
+    if (!isPlaceholderRut(orgRut)) {
+      const rutCheck = validateChileanRut(orgRut);
+      if (!rutCheck.valid) {
+        showNotice('error', rutCheck.error || 'El RUT de empresa no es válido según Módulo 11.');
+        return;
+      }
+      formattedOrgRut = rutCheck.formatted!;
+    }
     setIsSaving(true);
     try {
       const existing = editingOrgId ? organizations.find((o) => o.id === editingOrgId) : undefined;
@@ -719,7 +769,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
         {
           id: cleanId,
           name: orgName.trim(),
-          rut: orgRut.trim(),
+          rut: formattedOrgRut,
           industry: orgIndustry.trim() || 'Minería',
           status: orgStatus,
           createdAt: existing?.createdAt || Date.now(),
@@ -782,9 +832,11 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     setIsResetting(true);
     try {
       const restored = await resetPlatformConfigToDefault(currentUser);
+      draftConfigRef.current = restored;
       setDraftConfig(restored);
+      onPreviewTextScale?.(null);
       soundAlert.playFeedbackBeep();
-      showNotice('success', 'Se restauraron todas las métricas, bloqueos y ajustes de página a los valores predeterminados.');
+      showNotice('success', 'Se restauraron todas las métricas, tipografía, bloqueos y ajustes de página a los valores predeterminados.');
     } catch (err: any) {
       showNotice('error', err?.message || 'Error al restaurar valores.');
     } finally {
@@ -2329,6 +2381,173 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 ))}
               </div>
             </div>
+
+            {/* Tamaño de Textos y Tipografía Global */}
+            {(() => {
+              const currentPct = clampTextScalePct(draftConfig.appearance.textScalePct);
+              const currentHeroScale = normalizeHeroTitleScale(draftConfig.appearance.heroTitleScale);
+              const basePxLabel = (16 * (currentPct / 100)).toFixed(1);
+              const presets: Array<{ label: string; pct: number }> = [
+                { label: 'Compacto', pct: 90 },
+                { label: 'Normal', pct: 100 },
+                { label: 'Grande', pct: 112 },
+                { label: 'Muy Grande', pct: 125 },
+              ];
+              const heroOptions: Array<{ id: HeroTitleScale; label: string }> = [
+                { id: 'compact', label: 'Compacto' },
+                { id: 'normal', label: 'Normal' },
+                { id: 'large', label: 'Grande' },
+                { id: 'xlarge', label: 'Extra Grande' },
+              ];
+
+              return (
+                <div className="p-4 rounded-xl bg-slate-950/70 border border-emerald-800/50 space-y-3.5">
+                  <div className="flex flex-wrap items-center justify-between gap-2">
+                    <span className="font-bold text-white flex items-center gap-2">
+                      <Type className="w-4 h-4 text-emerald-400" />
+                      Tamaño de Textos de la Plataforma
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span className="px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-700/70 text-emerald-300 font-mono text-[11px] font-bold">
+                        {currentPct}% ({basePxLabel}px)
+                      </span>
+                      {visibilitySyncState === 'saving' ? (
+                        <span className="text-[10px] text-amber-300 font-semibold">Guardando...</span>
+                      ) : visibilitySyncState === 'saved' ? (
+                        <span className="text-[10px] text-emerald-400 font-semibold">Sincronizado</span>
+                      ) : null}
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400">
+                    Ajusta en tiempo real el tamaño general de todos los textos (menús, tarjetas, tablas, alertas y lecturas) para toda la plataforma. Se guarda automáticamente en Firebase.
+                  </p>
+
+                  {/* Presets rápidos */}
+                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                    {presets.map((preset) => {
+                      const active = currentPct === preset.pct;
+                      return (
+                        <button
+                          key={preset.pct}
+                          type="button"
+                          onClick={() => {
+                            soundAlert.playFeedbackBeep();
+                            commitTextTypographyChange({ textScalePct: preset.pct });
+                          }}
+                          className={`px-2.5 py-2 rounded-lg border text-[11px] font-bold transition-colors flex flex-col items-center ${
+                            active
+                              ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
+                              : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-emerald-700 hover:text-white'
+                          }`}
+                        >
+                          <span>{preset.label}</span>
+                          <span className="text-[10px] font-mono opacity-80">{preset.pct}%</span>
+                        </button>
+                      );
+                    })}
+                  </div>
+
+                  {/* Control fino con slider + botones A- / A+ */}
+                  <div className="flex items-center gap-2.5 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundAlert.playFeedbackBeep();
+                        commitTextTypographyChange({ textScalePct: currentPct - 2 });
+                      }}
+                      disabled={currentPct <= 85}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0"
+                      title="Reducir tamaño de texto (-2%)"
+                    >
+                      A-
+                    </button>
+                    <input
+                      type="range"
+                      min={85}
+                      max={130}
+                      step={1}
+                      aria-label="Escala global de textos de la plataforma"
+                      value={currentPct}
+                      onChange={(e) => {
+                        const val = clampTextScalePct(Number(e.target.value));
+                        handleAppearanceChange('textScalePct', val);
+                        onPreviewTextScale?.(val);
+                      }}
+                      onMouseUp={() =>
+                        commitTextTypographyChange({
+                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
+                        })
+                      }
+                      onTouchEnd={() =>
+                        commitTextTypographyChange({
+                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
+                        })
+                      }
+                      onKeyUp={() =>
+                        commitTextTypographyChange({
+                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
+                        })
+                      }
+                      className="w-full accent-emerald-500 cursor-pointer"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        soundAlert.playFeedbackBeep();
+                        commitTextTypographyChange({ textScalePct: currentPct + 2 });
+                      }}
+                      disabled={currentPct >= 130}
+                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0"
+                      title="Aumentar tamaño de texto (+2%)"
+                    >
+                      A+
+                    </button>
+                    {currentPct !== 100 && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          soundAlert.playFeedbackBeep();
+                          commitTextTypographyChange({ textScalePct: 100 });
+                        }}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 hover:bg-slate-800 text-[11px] font-semibold shrink-0"
+                      >
+                        100%
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Tamaño específico del Título y Subtítulo del Dashboard */}
+                  <div className="pt-2 border-t border-slate-800/80 space-y-2">
+                    <span className="text-[11px] font-semibold text-slate-300 block">
+                      Tamaño de Título y Subtítulo Principal (Dashboard)
+                    </span>
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                      {heroOptions.map((opt) => {
+                        const active = currentHeroScale === opt.id;
+                        return (
+                          <button
+                            key={opt.id}
+                            type="button"
+                            onClick={() => {
+                              soundAlert.playFeedbackBeep();
+                              commitTextTypographyChange({ heroTitleScale: opt.id });
+                            }}
+                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors ${
+                              active
+                                ? 'bg-cyan-600 text-white border-cyan-400'
+                                : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-cyan-700'
+                            }`}
+                          >
+                            {opt.label}
+                          </button>
+                        );
+                      })}
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
           </div>
 
           {/* Dashboard Modules & Operational Controls */}
@@ -2843,14 +3062,36 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa</label>
+                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa (Módulo 11)</label>
                   <input
                     type="text"
                     value={orgRut}
                     onChange={(e) => setOrgRut(e.target.value)}
-                    placeholder="76.123.456-7"
-                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                    onBlur={() => {
+                      const res = validateChileanRut(orgRut);
+                      if (res.valid && res.formatted) setOrgRut(res.formatted);
+                    }}
+                    placeholder="76.543.210-3"
+                    className={`w-full px-3 py-2 rounded-lg bg-slate-950 border text-white font-mono ${
+                      orgRut.trim() && !isPlaceholderRut(orgRut)
+                        ? validateChileanRut(orgRut).valid
+                          ? 'border-emerald-500/70 focus:border-emerald-400'
+                          : 'border-rose-500/80 focus:border-rose-400'
+                        : 'border-slate-700'
+                    }`}
                   />
+                  {orgRut.trim() && !isPlaceholderRut(orgRut) && (() => {
+                    const res = validateChileanRut(orgRut);
+                    return (
+                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {res.valid
+                          ? `✓ RUT válido (${res.formatted})`
+                          : res.expectedVerifierDigit
+                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
+                          : `✗ ${res.error}`}
+                      </p>
+                    );
+                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 font-semibold block mb-1">Estado Operativo</label>

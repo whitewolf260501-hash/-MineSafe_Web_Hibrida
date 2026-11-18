@@ -196,6 +196,7 @@ assert.ok(rootAppSrc.includes("routeState.route === 'login' || !currentUser"), '
 assert.ok(!landingSrc.includes('firebase'), 'PublicLanding has zero Firebase imports/calls');
 assert.ok(!landingSrc.includes('mockData'), 'PublicLanding has zero internal mockData imports');
 assert.ok(!landingSrc.includes('manuelcrisostomovega@gmail.com'), 'PublicLanding leaks no internal personal emails');
+assert.ok(landingSrc.includes('minesafe99@gmail.com'), 'PublicLanding configures official contact email minesafe99@gmail.com');
 assert.ok(!landingSrc.includes('192.168.'), 'PublicLanding exposes no internal IP addresses');
 assert.ok(landingSrc.includes('device-node-sensors.jpg'), 'PublicLanding embeds device sensor photo');
 assert.ok(landingSrc.includes('device-gateway.jpg'), 'PublicLanding embeds gateway device photo');

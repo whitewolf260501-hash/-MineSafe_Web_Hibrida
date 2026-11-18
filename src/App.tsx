@@ -103,6 +103,7 @@ import {
   resolveActiveAlertsInRTDB,
   saveDrillDebriefInRTDB,
   DEFAULT_PLATFORM_CONFIG,
+  clampTextScalePct,
   subscribeToPlatformConfig,
   isTabVisibleForUser,
   verifySuperAdminPrivileges,
@@ -238,6 +239,7 @@ export default function App({
   const [isDrillActive, setIsDrillActive] = useState<boolean>(false);
   const [drillType, setDrillType] = useState<DrillType | null>(null);
   const [platformConfig, setPlatformConfig] = useState<PlatformConfig>(DEFAULT_PLATFORM_CONFIG);
+  const [previewTextScalePct, setPreviewTextScalePct] = useState<number | null>(null);
   const [alarmFeedback, setAlarmFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
 
   useEffect(() => {
@@ -255,6 +257,30 @@ export default function App({
 
   // Keep timeout ref synchronized with SuperAdmin platform metrics
   timeoutSecondsRef.current = platformConfig.metrics.gatewayTimeoutSeconds || 20;
+
+  // Escala tipográfica global controlada desde Control Maestro (aplica a todo el panel autenticado)
+  const effectiveTextScalePct =
+    previewTextScalePct !== null
+      ? clampTextScalePct(previewTextScalePct)
+      : clampTextScalePct(platformConfig.appearance?.textScalePct);
+
+  useEffect(() => {
+    const root = document.documentElement;
+    if (effectiveTextScalePct === 100) {
+      root.style.fontSize = '';
+      root.style.removeProperty('--ms-text-scale');
+      root.removeAttribute('data-text-scaled');
+    } else {
+      root.style.fontSize = `${effectiveTextScalePct}%`;
+      root.style.setProperty('--ms-text-scale', (effectiveTextScalePct / 100).toFixed(3));
+      root.setAttribute('data-text-scaled', 'true');
+    }
+    return () => {
+      root.style.fontSize = '';
+      root.style.removeProperty('--ms-text-scale');
+      root.removeAttribute('data-text-scaled');
+    };
+  }, [effectiveTextScalePct]);
 
   // Multi-organization scoping: SuperAdmin can switch any org or inspect all ('all');
   // Admins can switch between their primary org and organizations they created/own.
@@ -2318,6 +2344,7 @@ export default function App({
                 onSelectOrganization={setActiveOrganizationId}
                 onUpdateUserRole={handleUpdateUserRole}
                 onToggleUserStatus={handleToggleUserStatus}
+                onPreviewTextScale={setPreviewTextScalePct}
               />
             )}
 

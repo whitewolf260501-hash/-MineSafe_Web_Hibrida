@@ -38,6 +38,7 @@ import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION, isEquiposSubTabVisibleForUser } from '../services/firebase';
 import { assignWorkersToCrew, canManageContractsAndPayments } from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
+import { validateChileanRut } from '../utils/rut';
 
 interface DevicesAndRentalsViewProps {
   rentals: DeviceRental[];
@@ -197,6 +198,13 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
     try {
       setIsSubmitting(true);
       setModalError(null);
+      const rutCheck = validateChileanRut(newWorkerRut);
+      if (!rutCheck.valid) {
+        setModalError(rutCheck.error || 'El RUT del operador no es válido según Módulo 11.');
+        return;
+      }
+      const formattedWorkerRut = rutCheck.formatted!;
+
       const chosenCrewName =
         (newCrewSelectMode === '__custom__' ? newCrew : newCrewSelectMode).trim() ||
         'Cuadrilla General';
@@ -208,7 +216,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
         organizationId: effectiveOrgId,
         crewId: matchedCrew?.id,
         workerName: newWorkerName.trim(),
-        workerRut: newWorkerRut.trim(),
+        workerRut: formattedWorkerRut,
         role: newRole.trim(),
         crew: chosenCrewName,
         sectorName: matchedCrew?.sectorName || newSector.trim(),
@@ -220,7 +228,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       });
 
       if (matchedCrew && onSaveCrew) {
-        const cleanRut = newWorkerRut.trim().toLowerCase();
+        const cleanRut = formattedWorkerRut.toLowerCase();
         const alreadyMember = (matchedCrew.members || []).some(
           (m) =>
             (cleanRut && (m.rut || '').trim().toLowerCase() === cleanRut) ||
@@ -230,7 +238,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
           const newMember: CrewMember = {
             id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
             name: newWorkerName.trim(),
-            rut: newWorkerRut.trim(),
+            rut: formattedWorkerRut,
             role: newRole.trim() || 'Operador Subterráneo',
             assignedDeviceCode: selectedDev.code,
             emergencyContact: newEmergencyContact.trim() || undefined,
@@ -869,15 +877,37 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
               </div>
 
               <div>
-                <label className="text-slate-300 block mb-1">RUT Operador</label>
+                <label className="text-slate-300 block mb-1">RUT Operador * (Módulo 11)</label>
                 <input
                   type="text"
                   required
-                  placeholder="Ej: 16.782.341-9"
+                  placeholder="Ej: 17.456.789-1"
                   value={newWorkerRut}
                   onChange={(e) => setNewWorkerRut(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  onBlur={() => {
+                    const res = validateChileanRut(newWorkerRut);
+                    if (res.valid && res.formatted) setNewWorkerRut(res.formatted);
+                  }}
+                  className={`w-full px-3 py-2 bg-slate-950 border rounded-lg text-white font-mono ${
+                    newWorkerRut.trim()
+                      ? validateChileanRut(newWorkerRut).valid
+                        ? 'border-emerald-500/70 focus:border-emerald-400'
+                        : 'border-rose-500/80 focus:border-rose-400'
+                      : 'border-slate-800'
+                  }`}
                 />
+                {newWorkerRut.trim() && (() => {
+                  const res = validateChileanRut(newWorkerRut);
+                  return (
+                    <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                      {res.valid
+                        ? `✓ RUT válido (${res.formatted})`
+                        : res.expectedVerifierDigit
+                        ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
+                        : `✗ ${res.error}`}
+                    </p>
+                  );
+                })()}
               </div>
 
               <div className="grid grid-cols-2 gap-2">

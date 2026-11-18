@@ -107,8 +107,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
       setErrorMessage('Ingresa tu contraseña anterior.');
       return;
     }
-    if (newPassword.length < 6) {
-      setErrorMessage('La nueva contraseña debe tener mínimo 6 caracteres.');
+    if (newPassword.length < 8) {
+      setErrorMessage('La nueva contraseña debe tener mínimo 8 caracteres.');
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -411,8 +411,8 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <input
                       type="password"
                       required
-                      minLength={6}
-                      placeholder="Mín. 6 caracteres"
+                      minLength={8}
+                      placeholder="Mín. 8 caracteres"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
                       className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
@@ -423,7 +423,7 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                     <input
                       type="password"
                       required
-                      minLength={6}
+                      minLength={8}
                       placeholder="Repite nueva clave"
                       value={confirmNewPassword}
                       onChange={(e) => setConfirmNewPassword(e.target.value)}

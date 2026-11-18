@@ -22,13 +22,13 @@ import {
   Wifi,
   Layers,
   ArrowUpDown,
-  Volume2,
   Zap,
   Gauge,
   ShieldCheck,
   Eye
 } from 'lucide-react';
 import { PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile, UserRole } from '../types';
+import { canViewSystemUsersPanel } from '../utils/accessControl';
 
 interface InteractiveDeviceChartAndUsersProps {
   currentUser?: UserProfile | null;
@@ -42,6 +42,8 @@ interface InteractiveDeviceChartAndUsersProps {
   platformConfig?: PlatformConfig;
   telemetryHistory?: TelemetryHistoryPoint[];
   siteName?: string;
+  betweenWelcomeAndChart?: React.ReactNode;
+  canViewSystemUsers?: boolean;
 }
 
 export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndUsersProps> = ({
@@ -56,7 +58,10 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   platformConfig,
   telemetryHistory = [],
   siteName,
+  betweenWelcomeAndChart,
+  canViewSystemUsers,
 }) => {
+  const showSystemUsers = canViewSystemUsers ?? canViewSystemUsersPanel(currentUser);
   const [userSearchTerm, setUserSearchTerm] = useState('');
   const [selectedRoleFilter, setSelectedRoleFilter] = useState<'todos' | UserRole>('todos');
   const [chartViewMode, setChartViewMode] = useState<'all_bars' | 'levels' | 'timeline'>('all_bars');
@@ -158,10 +163,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   const tempValue = tempFault ? 0 : (currentDevice?.rawTemp !== undefined ? currentDevice.rawTemp : (currentDevice?.metrics?.temperatura ?? 0));
   const humValue = humFault ? 0 : (currentDevice?.rawHum !== undefined ? currentDevice.rawHum : (currentDevice?.metrics?.humedad ?? 0));
   const co2Value = currentDevice?.metrics?.co2 ?? 0;
-  const airFlowValue = currentDevice?.metrics?.flujoAire ?? 0;
   const ch4Value = currentDevice?.metrics?.ch4 ?? 0;
-  const noiseValue = currentDevice?.metrics?.ruido ?? 0;
-  const o2Value = currentDevice?.metrics?.o2 ?? 0;
   const batteryPct = currentDevice?.batteryPct ?? 0;
 
   const pm = platformConfig?.metrics;
@@ -177,13 +179,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   const pm25Crit = isRawPM25 ? (pm?.pm25Critico ?? 1200) : pm25Safe * 3;
   const ch4Safe = pm?.ch4SafeMax ?? 1.5;
   const ch4Crit = pm?.ch4CriticalMax ?? 5.0;
-  const airMin = pm?.airFlowMin ?? 0.5;
-  const airMax = pm?.airFlowMax ?? 3.0;
-  const noiseSafe = pm?.noiseSafeMax ?? 82;
-  const noiseCrit = pm?.noiseCriticalMax ?? 90;
-  const o2Min = pm?.o2MinSafe ?? 19.5;
 
-  // Complete list of ALL 9 sensors with precise units, limits, and color themes
+  // Complete list of active sensors with precise units, limits, and color themes
   const allSensorBars = [
     {
       id: 'temp',
@@ -286,57 +283,6 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
       textColor: ch4Value > ch4Safe ? 'text-rose-400' : 'text-purple-400',
       status: ch4Value > ch4Safe ? 'Crítico' : 'Seguro',
       norm: `DS 132: Máx ${ch4Safe}% LEL`
-    },
-    {
-      id: 'airFlow',
-      name: 'Flujo de Ventilación',
-      shortName: 'Ventilación',
-      unit: 'm/s',
-      value: Number(airFlowValue.toFixed(2)),
-      safeMax: airMax,
-      criticalMax: airMin,
-      scaleMax: Math.max(3.0, airMax),
-      icon: <Wind className="w-4 h-4 text-teal-400" />,
-      gradient: airFlowValue < airMin ? 'from-rose-600 to-red-500' : 'from-teal-500 to-emerald-500',
-      glowColor: 'shadow-teal-500/30',
-      badgeColor: airFlowValue < airMin ? 'bg-rose-950 text-rose-300 border-rose-800' : 'bg-teal-950 text-teal-300 border-teal-800',
-      textColor: airFlowValue < airMin ? 'text-rose-400' : 'text-teal-400',
-      status: airFlowValue < airMin ? 'Bajo' : 'Óptimo',
-      norm: `DS 132: Mínimo ${airMin} m/s`
-    },
-    {
-      id: 'noise',
-      name: 'Ruido Acústico',
-      shortName: 'Ruido',
-      unit: 'dB',
-      value: Number(noiseValue.toFixed(0)),
-      safeMax: noiseSafe,
-      criticalMax: noiseCrit,
-      scaleMax: Math.max(110, noiseCrit + 15),
-      icon: <Volume2 className="w-4 h-4 text-rose-400" />,
-      gradient: noiseValue > noiseSafe ? 'from-rose-600 to-red-600' : 'from-rose-500 to-amber-500',
-      glowColor: 'shadow-rose-500/30',
-      badgeColor: noiseValue > noiseSafe ? 'bg-rose-950 text-rose-300 border-rose-800' : 'bg-slate-900 text-slate-300 border-slate-700',
-      textColor: noiseValue > noiseSafe ? 'text-rose-400' : 'text-slate-300',
-      status: noiseValue > noiseSafe ? 'Elevado' : 'Aceptable',
-      norm: `DS 132: LPP ≤ ${noiseSafe} dB(A)`
-    },
-    {
-      id: 'o2',
-      name: 'Oxígeno (O2)',
-      shortName: 'Oxígeno',
-      unit: '%',
-      value: Number(o2Value.toFixed(1)),
-      safeMax: 21.0,
-      criticalMax: o2Min,
-      scaleMax: 25.0,
-      icon: <Activity className="w-4 h-4 text-emerald-400" />,
-      gradient: o2Value < o2Min ? 'from-rose-600 to-red-600' : 'from-emerald-400 to-teal-500',
-      glowColor: 'shadow-emerald-500/30',
-      badgeColor: o2Value < o2Min ? 'bg-rose-950 text-rose-300 border-rose-800 animate-pulse' : 'bg-emerald-950 text-emerald-300 border-emerald-800',
-      textColor: o2Value < o2Min ? 'text-rose-400' : 'text-emerald-400',
-      status: o2Value < o2Min ? 'Deficiente' : 'Normal',
-      norm: `DS 132: Mínimo ${o2Min}% O2`
     }
   ];
 
@@ -358,9 +304,6 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           co2: co2Value,
           pm25: typeof pt.pm25 === 'number' ? pt.pm25 : pm25Value,
           ch4: ch4Value,
-          airFlow: airFlowValue,
-          noise: noiseValue,
-          o2: o2Value,
         }))
       : [
           {
@@ -371,9 +314,6 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             co2: co2Value,
             pm25: pm25Value,
             ch4: ch4Value,
-            airFlow: airFlowValue,
-            noise: noiseValue,
-            o2: o2Value,
           },
         ];
 
@@ -431,26 +371,28 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
         </div>
 
-        {/* 4 Quick Stat Cards */}
-        <div className="grid grid-cols-2 lg:grid-cols-4 gap-3 sm:gap-4 mt-6 pt-5 border-t border-slate-800/80">
+        {/* Quick Stat Cards */}
+        <div className={`grid ${showSystemUsers ? 'grid-cols-2 lg:grid-cols-4' : 'grid-cols-1 sm:grid-cols-3'} gap-3 sm:gap-4 mt-6 pt-5 border-t border-slate-800/80`}>
           
-          {/* Card 1: Total Users */}
-          <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 hover:border-slate-700 transition-colors">
-            <div className="flex items-center justify-between">
-              <span className="text-xs text-slate-400 font-medium">Total Usuarios</span>
-              <div className="w-7 h-7 rounded-lg bg-blue-950/60 border border-blue-800/60 flex items-center justify-center text-blue-400">
-                <Users className="w-3.5 h-3.5" />
+          {/* Card 1: Total Users (Solo roles administrativos) */}
+          {showSystemUsers && (
+            <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 hover:border-slate-700 transition-colors">
+              <div className="flex items-center justify-between">
+                <span className="text-xs text-slate-400 font-medium">Total Usuarios</span>
+                <div className="w-7 h-7 rounded-lg bg-blue-950/60 border border-blue-800/60 flex items-center justify-center text-blue-400">
+                  <Users className="w-3.5 h-3.5" />
+                </div>
+              </div>
+              <div className="mt-2 text-2xl font-black text-white tabular-nums">
+                {totalUsersCount}
+              </div>
+              <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 truncate">
+                <span className="text-purple-400 font-semibold">{superadminCount} Super</span> • 
+                <span className="text-cyan-400 font-semibold">{adminCount} Adm</span> • 
+                <span className="text-amber-400 font-semibold">{operadorCount} Op</span>
               </div>
             </div>
-            <div className="mt-2 text-2xl font-black text-white tabular-nums">
-              {totalUsersCount}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5 flex items-center gap-1.5 truncate">
-              <span className="text-purple-400 font-semibold">{superadminCount} Super</span> • 
-              <span className="text-cyan-400 font-semibold">{adminCount} Adm</span> • 
-              <span className="text-amber-400 font-semibold">{operadorCount} Op</span>
-            </div>
-          </div>
+          )}
 
           {/* Card 2: Sensores IoT Online */}
           <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 hover:border-slate-700 transition-colors">
@@ -504,6 +446,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
         </div>
       </div>
 
+      {betweenWelcomeAndChart}
+
       {/* ==============================================================
           2. TWO-COLUMN INTERACTIVE SECTION:
              - LEFT: SENSOR LEVELS BAR CHART WITH ALL SENSORS & DEVICE SELECTOR
@@ -512,9 +456,9 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
         
         {/* ============================================================
-            COL 1: SENSOR LEVELS BAR CHART (7 / 12 cols)
+            COL 1: SENSOR LEVELS BAR CHART (7 / 12 cols, or 12 / 12 when users panel is hidden)
            ============================================================ */}
-        <div className="lg:col-span-7 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col justify-between">
+        <div className={`${showSystemUsers ? 'lg:col-span-7' : 'lg:col-span-12'} bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col justify-between`}>
           
           <div>
             {/* Header with Title and Mode Switcher */}
@@ -531,7 +475,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                     </span>
                   </h3>
                   <p className="text-xs text-slate-400">
-                    Mediciones de todos los sensores (Temperatura, Humedad, CO, CO2, PM2.5, Metano, Flujo, Ruido, O2)
+                    Mediciones de sensores (Temperatura, Humedad, CO, CO2, PM2.5, Metano)
                   </p>
                 </div>
               </div>
@@ -631,8 +575,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             </div>
 
             {/* ========================================================
-                CHART MODE 1: VERTICAL SENSOR BARS CHART (TODOS LOS SENSORES)
-                (Temperatura, Humedad, CO, CO2, PM2.5, Metano, Flujo, Ruido, O2)
+                CHART MODE 1: VERTICAL SENSOR BARS CHART (6 SENSORES)
+                (Temperatura, Humedad, CO, CO2, PM2.5, Metano)
                ======================================================== */}
             {chartViewMode === 'all_bars' && (
               <div className="mt-3 bg-slate-950/80 border border-slate-800/90 rounded-2xl p-4 sm:p-5">
@@ -647,8 +591,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                   </span>
                 </div>
 
-                {/* THE 9 VERTICAL SENSOR BARS */}
-                <div className="grid grid-cols-3 sm:grid-cols-9 gap-2 sm:gap-2.5 items-end pt-6 pb-2 min-h-[260px]">
+                {/* VERTICAL SENSOR BARS */}
+                <div className="grid grid-cols-3 sm:grid-cols-6 gap-2 sm:gap-3 items-end pt-6 pb-2 min-h-[260px]">
                   {allSensorBars.map((sensor) => {
                     // Normalize bar height percentage for clear visual comparison
                     const pct = Math.min(100, Math.max(14, (sensor.value / sensor.scaleMax) * 100));
@@ -813,7 +757,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                         timelineGroup === 'seguridad' ? 'bg-cyan-600 text-white' : 'bg-slate-900 text-slate-400 hover:text-white border border-slate-800'
                       }`}
                     >
-                      CO2, Metano & Ruido
+                      CO2 & Metano
                     </button>
                     <button
                       onClick={() => setTimelineGroup('todos')}
@@ -844,7 +788,6 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                     <>
                       <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-emerald-400" /> CO2 (ppm/10)</span>
                       <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-purple-400" /> Metano CH4 (%)</span>
-                      <span className="flex items-center gap-1.5"><span className="w-2.5 h-2.5 rounded-full bg-rose-400" /> Ruido (dB)</span>
                     </>
                   )}
                 </div>
@@ -915,15 +858,6 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                               title={`CH4: ${reading.ch4.toFixed(1)} %`}
                             />
                           )}
-
-                          {/* Ruido Bar */}
-                          {(timelineGroup === 'seguridad') && (
-                            <div 
-                              className="flex-1 max-w-[14px] bg-gradient-to-t from-rose-600 to-rose-400 rounded-t-sm transition-all duration-300 group-hover:brightness-125"
-                              style={{ height: `${Math.min(100, Math.max(12, (reading.noise / 100) * 100))}%` }}
-                              title={`Ruido: ${reading.noise} dB`}
-                            />
-                          )}
                         </div>
                         <span className="text-[10px] font-mono text-slate-400 text-center">{reading.hour}</span>
                       </div>
@@ -948,8 +882,9 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
         </div>
 
         {/* ============================================================
-            COL 2: SCROLLABLE SYSTEM USERS LIST BOX (5 / 12 cols)
+            COL 2: SCROLLABLE SYSTEM USERS LIST BOX (5 / 12 cols) - Solo roles administrativos
            ============================================================ */}
+        {showSystemUsers && (
         <div className="lg:col-span-5 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl flex flex-col">
           
           {/* Header of Users Box */}
@@ -1103,6 +1038,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
 
         </div>
+        )}
 
       </div>
 

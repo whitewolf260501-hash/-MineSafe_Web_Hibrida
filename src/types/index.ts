@@ -381,11 +381,15 @@ export interface PlatformMetricsConfig {
   emergencyDustThreshold: number;
 }
 
+export type HeroTitleScale = 'compact' | 'normal' | 'large' | 'xlarge';
+
 export interface PlatformAppearanceConfig {
   platformTitle: string;
   platformSubtitle: string;
   siteBadgeText: string;
   footerText: string;
+  textScalePct?: number;
+  heroTitleScale?: HeroTitleScale;
   announcementEnabled: boolean;
   announcementText: string;
   announcementTone: 'info' | 'warning' | 'critical';

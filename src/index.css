@@ -32,6 +32,22 @@
   }
 }
 
+html[data-text-scaled="true"] .text-\[9px\] {
+  font-size: calc(9px * var(--ms-text-scale, 1));
+}
+
+html[data-text-scaled="true"] .text-\[10px\] {
+  font-size: calc(10px * var(--ms-text-scale, 1));
+}
+
+html[data-text-scaled="true"] .text-\[11px\] {
+  font-size: calc(11px * var(--ms-text-scale, 1));
+}
+
+html[data-text-scaled="true"] .text-\[12px\] {
+  font-size: calc(12px * var(--ms-text-scale, 1));
+}
+
 .ms-boot-loader {
   background-color: #020617;
   color: #38bdf8;

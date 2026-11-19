@@ -33,6 +33,7 @@ import {
   AlertResolutionDetails,
   DrillDebriefRecord,
   PlatformConfig,
+  RegisteredDeviceConfig,
   Organization,
   TelemetryHistoryPoint,
   AlertEventRecord,
@@ -63,9 +64,11 @@ import {
   isAnyAdminRole,
   isGlobalMineSafeAdmin,
   isOrgAuthorizedForUser,
+  isUnassignedDeviceOrg,
   resolveEffectiveOrgId,
   resolveScopedCurrentSite,
   DEFAULT_ORGANIZATION_ID,
+  UNASSIGNED_DEVICE_ORG_ID,
 } from './utils/accessControl';
 
 export { createEmptyTelemetryVariables, resolveScopedCurrentSite };
@@ -73,6 +76,7 @@ export { createEmptyTelemetryVariables, resolveScopedCurrentSite };
 import { 
   testConnection, 
   subscribeToRTDBDevicesRaw,
+  subscribeToDeviceCatalog,
   forceRefreshDevicesFromRTDB,
   mapRTDBDeviceToSensorDevice,
   subscribeToRTDBUsers, 
@@ -241,6 +245,7 @@ export default function App({
   const [isDrillActive, setIsDrillActive] = useState<boolean>(false);
   const [drillType, setDrillType] = useState<DrillType | null>(null);
   const [platformConfig, setPlatformConfig] = useState<PlatformConfig>(DEFAULT_PLATFORM_CONFIG);
+  const [catalogDevices, setCatalogDevices] = useState<RegisteredDeviceConfig[]>([]);
   const [previewTextScalePct, setPreviewTextScalePct] = useState<number | null>(null);
   const [alarmFeedback, setAlarmFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
 
@@ -289,13 +294,24 @@ export default function App({
   const effectiveOrgId = resolveEffectiveOrgId(currentUser, activeOrganizationId, organizations);
 
   const matchesOrg = useCallback(
-    (orgId?: string) =>
-      effectiveOrgId === 'all' || (orgId || DEFAULT_ORGANIZATION.id) === effectiveOrgId,
+    (orgId?: string) => {
+      if (orgId === UNASSIGNED_DEVICE_ORG_ID) return false;
+      return effectiveOrgId === 'all' || (orgId || DEFAULT_ORGANIZATION.id) === effectiveOrgId;
+    },
     [effectiveOrgId]
   );
 
+  const mergedRegisteredDevices = useMemo<RegisteredDeviceConfig[]>(() => {
+    const byId = new Map<string, RegisteredDeviceConfig>();
+    (platformConfig.registeredDevices || DEFAULT_PLATFORM_CONFIG.registeredDevices).forEach((d) =>
+      byId.set(d.id, d)
+    );
+    catalogDevices.forEach((d) => byId.set(d.id, d));
+    return Array.from(byId.values());
+  }, [platformConfig.registeredDevices, catalogDevices]);
+
   const scopedDeviceIdsKey = useMemo(() => {
-    const regList = platformConfig.registeredDevices || DEFAULT_PLATFORM_CONFIG.registeredDevices;
+    const regList = mergedRegisteredDevices;
     const ids = regList
       .filter((r) => r.enabled !== false && matchesOrg(r.organizationId))
       .map((r) => r.id);
@@ -303,7 +319,7 @@ export default function App({
       ids.push('device_38A839E81F84');
     }
     return Array.from(new Set(ids)).sort().join(',');
-  }, [platformConfig.registeredDevices, matchesOrg, effectiveOrgId]);
+  }, [mergedRegisteredDevices, matchesOrg, effectiveOrgId]);
 
   const subscriptionScope = useMemo<RTDBSubscriptionScope>(
     () => ({
@@ -522,8 +538,13 @@ export default function App({
       });
     }, subscriptionScope);
 
+    const unsubCatalog = subscribeToDeviceCatalog((remoteCatalog) => {
+      setCatalogDevices(remoteCatalog);
+    }, subscriptionScope);
+
     return () => {
       unsubDevices();
+      unsubCatalog();
       unsubAlertEvents();
       unsubOrgs();
       unsubAssignments();
@@ -535,17 +556,22 @@ export default function App({
     };
   }, [subscriptionScope, recomputeDevicesFromRaw, onLogoutRequest]);
 
-  // Lista controlada de dispositivos visibles (filtrada además por organización activa)
+  // Lista controlada de dispositivos visibles (filtrada además por organización activa y excluyendo inventario sin asignar)
   const visibleDevices = useMemo<SensorDevice[]>(() => {
     const rtdbMap = new Map<string, SensorDevice>(devices.map((d) => [d.id, d]));
-    const regList = platformConfig.registeredDevices || DEFAULT_PLATFORM_CONFIG.registeredDevices;
+    const regList = mergedRegisteredDevices;
 
     const buildFromRegistry = (reg: typeof regList[number]): SensorDevice => {
       const existing = rtdbMap.get(reg.id);
+      const resolvedOrg = isUnassignedDeviceOrg(reg.organizationId)
+        ? UNASSIGNED_DEVICE_ORG_ID
+        : reg.organizationId || existing?.organizationId || DEFAULT_ORGANIZATION.id;
       if (existing) {
         return {
           ...existing,
-          organizationId: reg.organizationId || existing.organizationId || DEFAULT_ORGANIZATION.id,
+          organizationId: resolvedOrg,
+          organizationName: reg.organizationName || existing.organizationName,
+          assignmentStatus: reg.assignmentStatus || existing.assignmentStatus,
           name: reg.name || existing.name,
           siteId: reg.siteId || existing.siteId,
           siteName: reg.siteName || existing.siteName,
@@ -556,15 +582,17 @@ export default function App({
           deviceCategory: reg.category,
           parentGatewayId: reg.parentGatewayId || existing.parentGatewayId,
           localIp: reg.localIp || existing.localIp,
-          type: reg.category === 'sensor' ? 'multigas_portatil' : 'estacion_fija',
+          type: reg.category === 'sensor' || reg.category === 'nodo' ? 'multigas_portatil' : 'estacion_fija',
         };
       }
       return {
         id: reg.id,
         code: reg.id,
-        organizationId: reg.organizationId || DEFAULT_ORGANIZATION.id,
+        organizationId: resolvedOrg,
+        organizationName: reg.organizationName,
+        assignmentStatus: reg.assignmentStatus,
         name: reg.name,
-        type: reg.category === 'sensor' ? 'multigas_portatil' : 'estacion_fija',
+        type: reg.category === 'sensor' || reg.category === 'nodo' ? 'multigas_portatil' : 'estacion_fija',
         siteId: reg.siteId,
         siteName: reg.siteName,
         crewId: reg.crewId,
@@ -598,12 +626,14 @@ export default function App({
     };
 
     if (platformConfig.onlyShowRegisteredDevices) {
-      const enabledRegs = regList.filter((r) => r.enabled !== false && matchesOrg(r.organizationId));
+      const enabledRegs = regList.filter(
+        (r) => r.enabled !== false && !isUnassignedDeviceOrg(r.organizationId) && matchesOrg(r.organizationId)
+      );
       const effectiveRegs =
         enabledRegs.length > 0
           ? enabledRegs
           : effectiveOrgId === 'all'
-          ? regList.slice(0, 1)
+          ? regList.filter((r) => !isUnassignedDeviceOrg(r.organizationId)).slice(0, 1)
           : [];
       const mapped = effectiveRegs.map(buildFromRegistry);
       if (mapped.length > 0) return mapped;
@@ -616,9 +646,14 @@ export default function App({
     const enrichedRTDB = devices.map((d) => {
       const reg = regMap.get(d.id);
       if (!reg) return d;
+      const resolvedOrg = isUnassignedDeviceOrg(reg.organizationId)
+        ? UNASSIGNED_DEVICE_ORG_ID
+        : reg.organizationId || d.organizationId || DEFAULT_ORGANIZATION.id;
       return {
         ...d,
-        organizationId: reg.organizationId || d.organizationId || DEFAULT_ORGANIZATION.id,
+        organizationId: resolvedOrg,
+        organizationName: reg.organizationName || d.organizationName,
+        assignmentStatus: reg.assignmentStatus || d.assignmentStatus,
         name: reg.name || d.name,
         siteId: reg.siteId || d.siteId,
         siteName: reg.siteName || d.siteName,
@@ -632,14 +667,16 @@ export default function App({
       };
     });
     const missingEnabled = regList
-      .filter((r) => r.enabled !== false && !rtdbMap.has(r.id))
+      .filter((r) => r.enabled !== false && !isUnassignedDeviceOrg(r.organizationId) && !rtdbMap.has(r.id))
       .map(buildFromRegistry);
-    const combined = [...enrichedRTDB, ...missingEnabled].filter((d) => matchesOrg(d.organizationId));
+    const combined = [...enrichedRTDB, ...missingEnabled].filter(
+      (d) => !isUnassignedDeviceOrg(d.organizationId) && matchesOrg(d.organizationId)
+    );
     if (combined.length > 0) return combined;
     return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
       ? [INITIAL_SINGLE_DEVICE]
       : [];
-  }, [devices, platformConfig, matchesOrg, effectiveOrgId]);
+  }, [devices, mergedRegisteredDevices, platformConfig.onlyShowRegisteredDevices, matchesOrg, effectiveOrgId]);
 
   // Mantener siempre un dispositivo activo válido dentro de los dispositivos visibles
   useEffect(() => {
@@ -2435,6 +2472,8 @@ export default function App({
                 sites={scopedSites}
                 crews={scopedCrews}
                 devices={visibleDevices}
+                catalogDevices={mergedRegisteredDevices}
+                rtdbDevices={devices}
                 activeOrganizationId={effectiveOrgId}
                 platformConfig={platformConfig}
                 onSelectOrganization={setActiveOrganizationId}
@@ -2457,6 +2496,12 @@ export default function App({
                   setCrews((prev) => mergeMiningCrews(prev, [savedCrew]));
                 }}
                 onDeviceHierarchySaved={(savedReg) => {
+                  setCatalogDevices((prev) => {
+                    const exists = prev.some((d) => d.id === savedReg.id);
+                    return exists
+                      ? prev.map((d) => (d.id === savedReg.id ? savedReg : d))
+                      : [savedReg, ...prev];
+                  });
                   setPlatformConfig((prev) => {
                     const list = prev.registeredDevices || [];
                     const exists = list.some((d) => d.id === savedReg.id);
@@ -2467,6 +2512,13 @@ export default function App({
                         : [...list, savedReg],
                     };
                   });
+                }}
+                onDeviceDeleted={(devId) => {
+                  setCatalogDevices((prev) => prev.filter((d) => d.id !== devId));
+                  setPlatformConfig((prev) => ({
+                    ...prev,
+                    registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== devId),
+                  }));
                 }}
                 onBulkImportCompleted={(result: BulkImportExecutionResult) => {
                   if (result.createdUsers.length > 0) {
@@ -2545,12 +2597,25 @@ export default function App({
                 usersList={scopedUsers}
                 platformConfig={platformConfig}
                 rtdbDevices={devices}
+                catalogDevices={mergedRegisteredDevices}
                 organizations={organizations}
+                sites={sites}
                 activeOrganizationId={activeOrganizationId}
                 onSelectOrganization={setActiveOrganizationId}
                 onUpdateUserRole={handleUpdateUserRole}
                 onToggleUserStatus={handleToggleUserStatus}
                 onPreviewTextScale={setPreviewTextScalePct}
+                onCatalogDeviceUpdated={(savedReg) => {
+                  setCatalogDevices((prev) => {
+                    const exists = prev.some((d) => d.id === savedReg.id);
+                    return exists
+                      ? prev.map((d) => (d.id === savedReg.id ? savedReg : d))
+                      : [savedReg, ...prev];
+                  });
+                }}
+                onCatalogDeviceDeleted={(devId) => {
+                  setCatalogDevices((prev) => prev.filter((d) => d.id !== devId));
+                }}
               />
             )}
 

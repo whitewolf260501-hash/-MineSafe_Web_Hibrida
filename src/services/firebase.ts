@@ -63,11 +63,15 @@ import {
   AlertEventRecord,
   AlarmAuditRecord,
   ControllableTab,
+  ControllableRoleKey,
   EquiposSubTab,
   NavigationTab,
   PlatformConfig,
   WindowOverrideValue,
   RegisteredDeviceConfig,
+  DeviceCategory,
+  DeviceAssignmentStatus,
+  DeviceAssignmentAuditEntry,
   MiningSite,
   MiningSector,
   Organization,
@@ -83,18 +87,23 @@ import {
   canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
+  canDistributeDeviceInsideOrg,
   canManageContractsAndPayments,
   canManageCrews,
   canManageOrganizationHierarchy,
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  canRegisterAndAssignIoTDevices,
   DEFAULT_ORGANIZATION_ID,
   EmailProfileEntry,
   findUserEmailConflictInOrg,
   isAnyAdminRole,
   isGlobalMineSafeAdmin,
   isOrgAuthorizedForUser,
+  isUnassignedDeviceOrg,
+  resolveDeviceAssignmentStatus,
   selectBestLoginProfileForEmail,
+  UNASSIGNED_DEVICE_ORG_ID,
 } from '../utils/accessControl';
 import {
   BulkAssignmentImportItem,
@@ -307,12 +316,39 @@ export function mapRTDBDeviceToSensorDevice(
 
   const hasReportedBattery = typeof data?.bateria === 'number' && !Number.isNaN(data.bateria);
 
+  const resolvedOrgId =
+    data?.organizationId === UNASSIGNED_DEVICE_ORG_ID
+      ? UNASSIGNED_DEVICE_ORG_ID
+      : data?.organizationId || DEFAULT_ORGANIZATION.id;
+
+  const mappedAssignmentStatus: DeviceAssignmentStatus =
+    data?.assignmentStatus &&
+    ['en_inventario', 'asignado_empresa', 'asignado_faena', 'asignado_sector'].includes(
+      data.assignmentStatus
+    )
+      ? data.assignmentStatus
+      : resolveDeviceAssignmentStatus({
+          organizationId: resolvedOrgId,
+          siteId: data?.siteId || undefined,
+          siteName: siteName || undefined,
+          crewId: data?.crewId || undefined,
+          sectorId: data?.sectorId || undefined,
+          sectorName,
+        });
+
+  const historyList: DeviceAssignmentAuditEntry[] | undefined = Array.isArray(data?.assignmentHistory)
+    ? data.assignmentHistory
+    : data?.assignmentHistory && typeof data.assignmentHistory === 'object'
+    ? Object.values(data.assignmentHistory)
+    : undefined;
+
   return {
     id: key,
     code: key,
     name: deviceName,
     type: key.startsWith('NODO') || data?.deviceCategory === 'nodo' ? 'estacion_fija' : 'multigas_portatil',
-    organizationId: data?.organizationId || DEFAULT_ORGANIZATION.id,
+    organizationId: resolvedOrgId,
+    organizationName: data?.organizationName || undefined,
     siteId: data?.siteId || undefined,
     siteName: siteName || undefined,
     crewId: data?.crewId || undefined,
@@ -345,6 +381,10 @@ export function mapRTDBDeviceToSensorDevice(
     deviceCategory: data?.deviceCategory || (key.startsWith('NODO') ? 'nodo' : 'gateway'),
     parentGatewayId: data?.parentGatewayId || undefined,
     registroAlarmas: data?.registro_alarmas,
+    assignmentStatus: mappedAssignmentStatus,
+    assignedBy: data?.assignedBy || undefined,
+    assignedAt: typeof data?.assignedAt === 'number' ? data.assignedAt : undefined,
+    assignmentHistory: historyList,
     metrics: {
       temperatura: tempVal === null ? 0 : Number(tempVal.toFixed(1)),
       humedad: humVal === null ? 0 : Number(humVal.toFixed(0)),
@@ -3494,6 +3534,11 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     },
     equiposSubTabUserOverrides: {},
     equiposSubTabUserOverridesByEmail: {},
+    policyLocks: {
+      operadorStrictPolicy: true,
+      adminMineSafe3DPolicy: true,
+      roleWindowPolicyLocks: {},
+    },
   },
   metrics: {
     coPreventivo: 300,
@@ -3567,6 +3612,28 @@ export function normalizeEmailOverrideKey(email?: string | null): string {
   return email.trim().toLowerCase().replace(/[.#$/[\]]/g, '_');
 }
 
+export function isWindowPolicyLockedForRole(
+  role: ControllableRoleKey,
+  tab: ControllableTab,
+  config?: PlatformConfig | null
+): boolean {
+  const policyLocks = config?.visibility?.policyLocks;
+  const explicit = policyLocks?.roleWindowPolicyLocks?.[role]?.[tab];
+  if (explicit === true) return true;
+  if (explicit === false) return false;
+
+  if ((role === 'supervisor' || role === 'operador') && (tab === 'empresas' || tab === 'usuarios')) {
+    return true;
+  }
+  if (role === 'admin_minesafe' && (tab === 'visor_3d' || tab === 'gateway_3d')) {
+    return policyLocks?.adminMineSafe3DPolicy ?? true;
+  }
+  if (role === 'operador' && tab !== 'alertas') {
+    return policyLocks?.operadorStrictPolicy ?? true;
+  }
+  return false;
+}
+
 export function isTabVisibleForUser(
   tab: NavigationTab,
   user: UserProfile | null,
@@ -3576,20 +3643,44 @@ export function isTabVisibleForUser(
   if (tab === 'superadmin_panel' || tab === 'superadmin_docs') {
     return user.role === 'superadmin';
   }
-  if (user.role === 'admin_minesafe' && (tab === 'visor_3d' || tab === 'gateway_3d')) {
-    return false;
-  }
-  if (tab === 'empresas' || tab === 'usuarios') {
-    return isAnyAdminRole(user.role);
-  }
   if (user.role === 'superadmin') {
     return true;
   }
-  if (user.role === 'operador') {
-    return tab === 'alertas';
-  }
 
   const controllableTab = tab as ControllableTab;
+  const roleKey: ControllableRoleKey =
+    user.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : user.role === 'admin'
+      ? 'admin'
+      : user.role === 'supervisor'
+      ? 'supervisor'
+      : 'operador';
+
+  // Policy lock check (blocks rolePermissions and userOverrides until SuperAdmin unlocks by policy)
+  if (isWindowPolicyLockedForRole(roleKey, controllableTab, config)) {
+    return false;
+  }
+
+  if (tab === 'empresas' || tab === 'usuarios') {
+    if (!isAnyAdminRole(user.role)) {
+      const explicitlyUnlocked =
+        config?.visibility?.policyLocks?.roleWindowPolicyLocks?.[roleKey]?.[controllableTab] === false;
+      if (!explicitlyUnlocked) {
+        return false;
+      }
+    }
+  }
+
+  // When Operador strict policy is active and Alertas was not individually overridden by policy, keep Alertas fixed read-only
+  if (roleKey === 'operador' && controllableTab === 'alertas') {
+    const strictActive = config?.visibility?.policyLocks?.operadorStrictPolicy ?? true;
+    const explicitAlertas = config?.visibility?.policyLocks?.roleWindowPolicyLocks?.operador?.alertas;
+    if (strictActive && explicitAlertas === undefined) {
+      return true;
+    }
+  }
+
   const emailKey = normalizeEmailOverrideKey(user.email);
   const byIdOverride: WindowOverrideValue | undefined =
     config?.visibility?.userOverrides?.[user.id]?.[controllableTab];
@@ -3604,14 +3695,6 @@ export function isTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
-    user.role === 'admin_minesafe'
-      ? 'admin_minesafe'
-      : user.role === 'admin'
-      ? 'admin'
-      : user.role === 'supervisor'
-      ? 'supervisor'
-      : 'operador';
   const configuredRoleVal = config?.visibility?.rolePermissions?.[roleKey]?.[controllableTab];
   if (typeof configuredRoleVal === 'boolean') {
     return configuredRoleVal;
@@ -3629,7 +3712,17 @@ export function isEquiposSubTabVisibleForUser(
   if (user.role === 'superadmin') {
     return true;
   }
-  if (user.role === 'operador') {
+
+  const roleKey: ControllableRoleKey =
+    user.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : user.role === 'admin'
+      ? 'admin'
+      : user.role === 'supervisor'
+      ? 'supervisor'
+      : 'operador';
+
+  if (isWindowPolicyLockedForRole(roleKey, 'equipos', config)) {
     return false;
   }
 
@@ -3647,14 +3740,6 @@ export function isEquiposSubTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
-    user.role === 'admin_minesafe'
-      ? 'admin_minesafe'
-      : user.role === 'admin'
-      ? 'admin'
-      : user.role === 'supervisor'
-      ? 'supervisor'
-      : 'operador';
   const configuredRoleVal = config?.visibility?.equiposSubTabRolePermissions?.[roleKey]?.[subTab];
   if (typeof configuredRoleVal === 'boolean') {
     return configuredRoleVal;
@@ -3664,14 +3749,13 @@ export function isEquiposSubTabVisibleForUser(
 }
 
 function mergePlatformConfig(raw: any): PlatformConfig {
+  const rawPolicyLocks = raw?.visibility?.policyLocks;
   return {
     visibility: {
       rolePermissions: {
         admin_minesafe: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe!,
           ...(raw?.visibility?.rolePermissions?.admin_minesafe || {}),
-          visor_3d: false,
-          gateway_3d: false,
         },
         admin: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin,
@@ -3679,6 +3763,7 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         },
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
+          ...(raw?.visibility?.rolePermissions?.operador || {}),
         },
         supervisor: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor,
@@ -3699,6 +3784,7 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         },
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.operador,
+          ...(raw?.visibility?.equiposSubTabRolePermissions?.operador || {}),
         },
         supervisor: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.supervisor,
@@ -3708,6 +3794,17 @@ function mergePlatformConfig(raw: any): PlatformConfig {
       },
       equiposSubTabUserOverrides: raw?.visibility?.equiposSubTabUserOverrides || {},
       equiposSubTabUserOverridesByEmail: raw?.visibility?.equiposSubTabUserOverridesByEmail || {},
+      policyLocks: {
+        operadorStrictPolicy:
+          typeof rawPolicyLocks?.operadorStrictPolicy === 'boolean'
+            ? rawPolicyLocks.operadorStrictPolicy
+            : true,
+        adminMineSafe3DPolicy:
+          typeof rawPolicyLocks?.adminMineSafe3DPolicy === 'boolean'
+            ? rawPolicyLocks.adminMineSafe3DPolicy
+            : true,
+        roleWindowPolicyLocks: rawPolicyLocks?.roleWindowPolicyLocks || {},
+      },
     },
     metrics: {
       ...DEFAULT_PLATFORM_CONFIG.metrics,
@@ -3749,19 +3846,36 @@ export async function initializeRegisteredDeviceInRTDB(
   device: RegisteredDeviceConfig,
   actingUser: UserProfile
 ): Promise<void> {
-  if (actingUser.role !== 'superadmin') {
-    throw new Error('Acceso denegado: Solo el SuperAdministrador puede inicializar dispositivos en Firebase.');
+  const perm = canRegisterAndAssignIoTDevices(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason || 'Acceso denegado: Solo SuperAdmin o Admin MineSafe pueden inicializar dispositivos en Firebase.');
   }
-  const cleanId = device.id.trim().replace(/[.#$/[\]]/g, '_');
+  const cleanId = sanitizeDeviceHardwareId(device.id);
   const devRef = ref(rtdb, `dispositivos/${cleanId}`);
   const snap = await get(devRef).catch(() => null);
-  const now = Date.now();
+  const normalizedOrgId = isUnassignedDeviceOrg(device.organizationId)
+    ? UNASSIGNED_DEVICE_ORG_ID
+    : device.organizationId!;
+  const assignmentStatus = resolveDeviceAssignmentStatus({
+    ...device,
+    organizationId: normalizedOrgId,
+  });
   const baseMetadata = {
     name: device.name,
-    sectorName: device.sectorName,
+    organizationId: normalizedOrgId,
+    organizationName: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.organizationName || null,
+    siteId: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.siteId || null,
+    siteName: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.siteName || null,
+    crewId: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.crewId || null,
+    crewName: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.crewName || null,
+    sectorId: isUnassignedDeviceOrg(normalizedOrgId) ? null : device.sectorId || null,
+    sectorName: isUnassignedDeviceOrg(normalizedOrgId) ? 'En inventario' : device.sectorName || 'Pendiente de asignación',
     deviceCategory: device.category,
-    parentGatewayId: device.parentGatewayId || '',
+    assignmentStatus,
+    parentGatewayId: device.parentGatewayId || null,
     localIp: device.localIp || '192.168.4.1',
+    assignedBy: device.assignedBy || actingUser.name,
+    assignedAt: device.assignedAt || Date.now(),
   };
 
   if (snap && snap.exists()) {
@@ -3769,20 +3883,20 @@ export async function initializeRegisteredDeviceInRTDB(
   } else {
     await set(devRef, {
       ...baseMetadata,
-      CO: 45,
-      PM2_5: 25,
-      temperatura: 22.0,
-      humedad: 48,
+      CO: 0,
+      PM2_5: 0,
+      temperatura: 0,
+      humedad: 0,
       alarma_activa: false,
       alarma: false,
       buzzer: false,
       luz: false,
       iluminacion_led: false,
-      estado_adquisicion: 'activo',
+      estado_adquisicion: 'pendiente_hardware',
       origen_alarma: 'NINGUNO',
-      descripcion_monitoreo: `Nodo ${device.name} inicializado por SuperAdmin, en espera de telemetría ESP32.`,
-      via: device.category === 'sensor' && device.parentGatewayId ? 'ESP_NOW_GATEWAY' : 'WIFI_DIRECTO',
-      last_update_server: now,
+      descripcion_monitoreo: `Dispositivo ${device.name} registrado por ${actingUser.name}, en espera de telemetría ESP32.`,
+      via: (device.category === 'nodo' || device.category === 'sensor') && device.parentGatewayId ? 'ESP_NOW_GATEWAY' : 'WIFI_DIRECTO',
+      last_update_server: 0,
     });
   }
 }
@@ -4831,6 +4945,530 @@ export async function deleteAlertAttachment(attachment: AlertAttachment): Promis
   await remove(ref(rtdb, `adjuntos/${attachment.id}`));
 }
 
+/**
+ * ============================================================================
+ * REGISTRO, CLASIFICACIÓN Y ASIGNACIÓN DE DISPOSITIVOS IoT (GATEWAY / NODO)
+ * ============================================================================
+ */
+export function sanitizeDeviceHardwareId(rawId: string): string {
+  const cleaned = String(rawId || '')
+    .trim()
+    .replace(/\s+/g, '_')
+    .replace(/[.#$/[\]]/g, '_');
+  if (!cleaned || cleaned.length < 3) {
+    throw new Error('Ingresa un ID de hardware válido de al menos 3 caracteres (ej. device_38A839E81F84 o NODO_U-01).');
+  }
+  return cleaned;
+}
+
+function normalizeDeviceCatalogCategory(category?: string): 'gateway' | 'nodo' {
+  const val = String(category || '').trim().toLowerCase();
+  if (val === 'gateway' || val === 'gateway_sensor') return 'gateway';
+  if (val === 'nodo' || val === 'sensor') return 'nodo';
+  throw new Error('Debes seleccionar un tipo de dispositivo válido: Gateway o Nodo.');
+}
+
+function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
+  const orgId = isUnassignedDeviceOrg(raw?.organizationId)
+    ? UNASSIGNED_DEVICE_ORG_ID
+    : String(raw.organizationId);
+  const category: DeviceCategory =
+    raw?.category === 'gateway' ||
+    raw?.category === 'nodo' ||
+    raw?.category === 'sensor' ||
+    raw?.category === 'gateway_sensor'
+      ? raw.category
+      : key.startsWith('NODO')
+      ? 'nodo'
+      : 'gateway';
+  const history: DeviceAssignmentAuditEntry[] = Array.isArray(raw?.assignmentHistory)
+    ? raw.assignmentHistory
+    : raw?.assignmentHistory && typeof raw.assignmentHistory === 'object'
+    ? Object.values(raw.assignmentHistory)
+    : [];
+
+  const base: RegisteredDeviceConfig = {
+    id: raw?.id || key,
+    name: raw?.name || key,
+    category,
+    organizationId: orgId,
+    organizationName: isUnassignedDeviceOrg(orgId) ? undefined : raw?.organizationName || undefined,
+    siteId: isUnassignedDeviceOrg(orgId) ? undefined : raw?.siteId || undefined,
+    siteName: isUnassignedDeviceOrg(orgId) ? undefined : raw?.siteName || undefined,
+    crewId: isUnassignedDeviceOrg(orgId) ? undefined : raw?.crewId || undefined,
+    crewName: isUnassignedDeviceOrg(orgId) ? undefined : raw?.crewName || undefined,
+    sectorId: isUnassignedDeviceOrg(orgId) ? undefined : raw?.sectorId || undefined,
+    sectorName: isUnassignedDeviceOrg(orgId)
+      ? 'En inventario'
+      : raw?.sectorName || 'Pendiente de asignación',
+    parentGatewayId: raw?.parentGatewayId || undefined,
+    localIp: raw?.localIp || undefined,
+    enabled: raw?.enabled !== false && raw?.active !== false,
+    active: raw?.active !== false && raw?.enabled !== false,
+    createdAt: typeof raw?.createdAt === 'number' ? raw.createdAt : Date.now(),
+    assignedBy: raw?.assignedBy || undefined,
+    assignedAt: typeof raw?.assignedAt === 'number' ? raw.assignedAt : undefined,
+    assignmentHistory: history,
+  };
+  base.assignmentStatus = resolveDeviceAssignmentStatus(base);
+  return base;
+}
+
+export function subscribeToDeviceCatalog(
+  callback: (devices: RegisteredDeviceConfig[]) => void,
+  scope?: RTDBSubscriptionScope
+): () => void {
+  const targetRef =
+    scope?.role && !isGlobalMineSafeAdmin(scope.role)
+      ? query(
+          ref(rtdb, 'catalogo_dispositivos'),
+          orderByChild('organizationId'),
+          equalTo(
+            scope.organizationId && scope.organizationId !== 'all'
+              ? scope.organizationId
+              : DEFAULT_ORGANIZATION_ID
+          )
+        )
+      : ref(rtdb, 'catalogo_dispositivos');
+
+  return onValue(
+    targetRef,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        callback([]);
+        return;
+      }
+      const raw = snapshot.val() || {};
+      const list: RegisteredDeviceConfig[] = Object.entries(raw)
+        .filter(([, val]) => val && typeof val === 'object')
+        .map(([key, val]) => normalizeCatalogRecord(val, key))
+        .sort((a, b) => (b.createdAt || 0) - (a.createdAt || 0));
+      callback(list);
+    },
+    (err) => {
+      console.warn('Error subscribing to RTDB /catalogo_dispositivos:', err?.message || err);
+      callback([]);
+    }
+  );
+}
+
+async function syncPlatformRegisteredDevicesIfSuperAdmin(
+  record: RegisteredDeviceConfig,
+  actingUser: UserProfile,
+  removeId?: string
+): Promise<void> {
+  if (actingUser.role !== 'superadmin') return;
+  try {
+    const snap = await get(ref(rtdb, 'configuracion_plataforma/registeredDevices'));
+    const existing: RegisteredDeviceConfig[] =
+      snap.exists() && Array.isArray(snap.val()) ? snap.val() : [];
+    const filtered = existing.filter((d) => d.id !== (removeId || record.id));
+    const nextList = removeId ? filtered : [...filtered, JSON.parse(JSON.stringify(record))];
+    await set(ref(rtdb, 'configuracion_plataforma/registeredDevices'), nextList);
+  } catch {
+    // Best-effort sync with legacy SuperAdmin platformConfig list
+  }
+}
+
+export interface RegisterIoTDeviceParams {
+  id: string;
+  name: string;
+  category: 'gateway' | 'nodo';
+  parentGatewayId?: string;
+  localIp?: string;
+  organizationId?: string | null;
+  organizationName?: string;
+  siteId?: string | null;
+  siteName?: string;
+  sectorId?: string | null;
+  sectorName?: string;
+  crewId?: string | null;
+  crewName?: string;
+  note?: string;
+  isEdit?: boolean;
+  allowAttachExistingRTDB?: boolean;
+}
+
+export async function registerIoTDeviceInRTDB(
+  params: RegisterIoTDeviceParams,
+  actingUser: UserProfile | null | undefined
+): Promise<RegisteredDeviceConfig> {
+  assertActiveSession(actingUser);
+  const perm = canRegisterAndAssignIoTDevices(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+
+  const cleanId = sanitizeDeviceHardwareId(params.id);
+  const cleanCategory = normalizeDeviceCatalogCategory(params.category);
+  const cleanName = (params.name || '').trim() || cleanId;
+
+  const catalogRef = ref(rtdb, `catalogo_dispositivos/${cleanId}`);
+  const devRef = ref(rtdb, `dispositivos/${cleanId}`);
+  const [catalogSnap, devSnap, cfgSnap] = await Promise.all([
+    get(catalogRef).catch(() => null),
+    get(devRef).catch(() => null),
+    get(ref(rtdb, 'configuracion_plataforma/registeredDevices')).catch(() => null),
+  ]);
+
+  const existingCatalog = catalogSnap && catalogSnap.exists() ? normalizeCatalogRecord(catalogSnap.val(), cleanId) : null;
+  const legacyList: RegisteredDeviceConfig[] =
+    cfgSnap && cfgSnap.exists() && Array.isArray(cfgSnap.val()) ? cfgSnap.val() : [];
+  const existsInLegacy = legacyList.some((d) => d.id === cleanId);
+
+  if (!params.isEdit) {
+    if (existingCatalog || existsInLegacy) {
+      throw new Error(
+        `El ID de dispositivo "${cleanId}" ya está registrado en la plataforma. Usa la opción Editar o Reasignar para evitar duplicados.`
+      );
+    }
+    if (devSnap && devSnap.exists() && !params.allowAttachExistingRTDB) {
+      throw new Error(
+        `El ID "${cleanId}" ya existe en Firebase RTDB (/dispositivos). Usa "Registrar detectado" desde la bandeja de hardware RTDB para clasificarlo sin duplicar.`
+      );
+    }
+  }
+
+  const now = Date.now();
+  const isUnassigned = isUnassignedDeviceOrg(params.organizationId);
+  const normalizedOrgId = isUnassigned ? UNASSIGNED_DEVICE_ORG_ID : String(params.organizationId).trim();
+  const normalizedSiteId = !isUnassigned && params.siteId ? String(params.siteId).trim() : undefined;
+  const normalizedSiteName = !isUnassigned && params.siteName ? params.siteName.trim() : undefined;
+  const normalizedCrewId = !isUnassigned && params.crewId ? String(params.crewId).trim() : undefined;
+  const normalizedCrewName = !isUnassigned && params.crewName ? params.crewName.trim() : undefined;
+  const normalizedSectorId = !isUnassigned && params.sectorId ? String(params.sectorId).trim() : undefined;
+  const normalizedSectorName = isUnassigned
+    ? 'En inventario'
+    : (params.sectorName || '').trim() || (normalizedSiteName ? 'Pendiente de sector' : 'Pendiente de asignación');
+
+  const assignmentStatus = resolveDeviceAssignmentStatus({
+    organizationId: normalizedOrgId,
+    siteId: normalizedSiteId,
+    siteName: normalizedSiteName,
+    crewId: normalizedCrewId,
+    sectorId: normalizedSectorId,
+    sectorName: normalizedSectorName,
+  });
+
+  const actionType: DeviceAssignmentAuditEntry['action'] = params.isEdit
+    ? isUnassigned
+      ? 'desasignacion'
+      : normalizedSiteId
+      ? 'asignacion_faena'
+      : 'asignacion_empresa'
+    : 'registro';
+
+  const auditEntry: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action: actionType,
+    fromOrganizationId: existingCatalog?.organizationId,
+    fromOrganizationName: existingCatalog?.organizationName,
+    toOrganizationId: isUnassigned ? undefined : normalizedOrgId,
+    toOrganizationName: isUnassigned ? 'Inventario Global (Sin asignar)' : params.organizationName || normalizedOrgId,
+    toSiteId: normalizedSiteId,
+    toSiteName: normalizedSiteName,
+    note:
+      params.note?.trim() ||
+      (params.isEdit
+        ? `Actualización de ficha (${cleanCategory.toUpperCase()})`
+        : isUnassigned
+        ? `Alta de hardware ${cleanCategory.toUpperCase()} en inventario global`
+        : normalizedSiteName
+        ? `Alta de hardware ${cleanCategory.toUpperCase()} asignado a faena ${normalizedSiteName}`
+        : `Alta de hardware ${cleanCategory.toUpperCase()} asignado a empresa`),
+  };
+
+  const prevHistory = existingCatalog?.assignmentHistory || [];
+  const nextHistory = [auditEntry, ...prevHistory].slice(0, 25);
+
+  const record: RegisteredDeviceConfig = {
+    id: cleanId,
+    name: cleanName,
+    category: cleanCategory,
+    organizationId: normalizedOrgId,
+    organizationName: isUnassigned ? undefined : params.organizationName || normalizedOrgId,
+    siteId: normalizedSiteId,
+    siteName: normalizedSiteName,
+    crewId: normalizedCrewId,
+    crewName: normalizedCrewName,
+    sectorId: normalizedSectorId,
+    sectorName: normalizedSectorName,
+    parentGatewayId: cleanCategory === 'nodo' ? params.parentGatewayId?.trim() || undefined : undefined,
+    localIp: params.localIp?.trim() || existingCatalog?.localIp || undefined,
+    enabled: true,
+    active: true,
+    createdAt: existingCatalog?.createdAt || now,
+    assignmentStatus,
+    assignedBy: actingUser!.name,
+    assignedAt: now,
+    assignmentHistory: nextHistory,
+  };
+
+  await set(catalogRef, JSON.parse(JSON.stringify(record)));
+
+  const rtdbMetadata = {
+    name: record.name,
+    organizationId: record.organizationId,
+    organizationName: record.organizationName || null,
+    siteId: record.siteId || null,
+    siteName: record.siteName || null,
+    crewId: record.crewId || null,
+    crewName: record.crewName || null,
+    sectorId: record.sectorId || null,
+    sectorName: record.sectorName,
+    deviceCategory: record.category,
+    assignmentStatus: record.assignmentStatus,
+    parentGatewayId: record.parentGatewayId || null,
+    localIp: record.localIp || null,
+    assignedBy: record.assignedBy || null,
+    assignedAt: record.assignedAt || now,
+    assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+  };
+
+  if (devSnap && devSnap.exists()) {
+    await update(devRef, rtdbMetadata);
+  } else {
+    await set(devRef, {
+      ...rtdbMetadata,
+      CO: 0,
+      PM2_5: 0,
+      temperatura: 0,
+      humedad: 0,
+      alarma_activa: false,
+      alarma: false,
+      buzzer: false,
+      luz: false,
+      iluminacion_led: false,
+      estado_adquisicion: 'pendiente_hardware',
+      origen_alarma: 'NINGUNO',
+      descripcion_monitoreo: `Dispositivo ${record.name} registrado (${record.category}), en espera de telemetría ESP32.`,
+      via: record.category === 'nodo' && record.parentGatewayId ? 'ESP_NOW_GATEWAY' : 'WIFI_DIRECTO',
+      last_update_server: 0,
+    });
+  }
+
+  await syncPlatformRegisteredDevicesIfSuperAdmin(record, actingUser!);
+  return record;
+}
+
+export interface AssignOrTransferIoTDeviceParams {
+  deviceId: string;
+  targetOrganizationId?: string | null;
+  targetOrganizationName?: string;
+  targetSiteId?: string | null;
+  targetSiteName?: string;
+  note?: string;
+  fallbackDevice?: Partial<RegisteredDeviceConfig>;
+}
+
+export async function assignOrTransferIoTDeviceInRTDB(
+  params: AssignOrTransferIoTDeviceParams,
+  actingUser: UserProfile | null | undefined
+): Promise<RegisteredDeviceConfig> {
+  assertActiveSession(actingUser);
+  const perm = canRegisterAndAssignIoTDevices(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+
+  const cleanId = sanitizeDeviceHardwareId(params.deviceId);
+  const catalogRef = ref(rtdb, `catalogo_dispositivos/${cleanId}`);
+  const devRef = ref(rtdb, `dispositivos/${cleanId}`);
+  const [catalogSnap, devSnap] = await Promise.all([
+    get(catalogRef).catch(() => null),
+    get(devRef).catch(() => null),
+  ]);
+
+  const existing: RegisteredDeviceConfig =
+    catalogSnap && catalogSnap.exists()
+      ? normalizeCatalogRecord(catalogSnap.val(), cleanId)
+      : devSnap && devSnap.exists()
+      ? normalizeCatalogRecord(
+          {
+            ...devSnap.val(),
+            category: devSnap.val()?.deviceCategory || params.fallbackDevice?.category || 'gateway',
+          },
+          cleanId
+        )
+      : normalizeCatalogRecord(
+          {
+            id: cleanId,
+            name: params.fallbackDevice?.name || cleanId,
+            category: params.fallbackDevice?.category || 'gateway',
+            organizationId: params.fallbackDevice?.organizationId || UNASSIGNED_DEVICE_ORG_ID,
+            siteId: params.fallbackDevice?.siteId,
+            siteName: params.fallbackDevice?.siteName,
+            localIp: params.fallbackDevice?.localIp,
+            createdAt: params.fallbackDevice?.createdAt || Date.now(),
+          },
+          cleanId
+        );
+
+  const now = Date.now();
+  const isUnassigning = isUnassignedDeviceOrg(params.targetOrganizationId);
+  const nextOrgId = isUnassigning ? UNASSIGNED_DEVICE_ORG_ID : String(params.targetOrganizationId).trim();
+  const nextOrgName = isUnassigning ? undefined : params.targetOrganizationName || nextOrgId;
+  const nextSiteId = !isUnassigning && params.targetSiteId ? String(params.targetSiteId).trim() : undefined;
+  const nextSiteName = !isUnassigning && params.targetSiteName ? params.targetSiteName.trim() : undefined;
+
+  const orgChanged = (existing.organizationId || UNASSIGNED_DEVICE_ORG_ID) !== nextOrgId;
+  const siteChanged = (existing.siteId || '') !== (nextSiteId || '');
+  const clearInternalHierarchy = isUnassigning || orgChanged || siteChanged;
+
+  const nextCrewId = clearInternalHierarchy ? undefined : existing.crewId;
+  const nextCrewName = clearInternalHierarchy ? undefined : existing.crewName;
+  const nextSectorId = clearInternalHierarchy ? undefined : existing.sectorId;
+  const nextSectorName = isUnassigning
+    ? 'En inventario'
+    : clearInternalHierarchy
+    ? nextSiteName
+      ? 'Pendiente de sector'
+      : 'Pendiente de asignación'
+    : existing.sectorName;
+  const nextParentGatewayId =
+    isUnassigning || orgChanged ? undefined : existing.parentGatewayId;
+
+  const nextStatus = resolveDeviceAssignmentStatus({
+    organizationId: nextOrgId,
+    siteId: nextSiteId,
+    siteName: nextSiteName,
+    crewId: nextCrewId,
+    sectorId: nextSectorId,
+    sectorName: nextSectorName,
+  });
+
+  const wasAssigned = !isUnassignedDeviceOrg(existing.organizationId);
+  const action: DeviceAssignmentAuditEntry['action'] = isUnassigning
+    ? 'desasignacion'
+    : wasAssigned && (orgChanged || siteChanged)
+    ? 'reasignacion'
+    : nextSiteId
+    ? 'asignacion_faena'
+    : 'asignacion_empresa';
+
+  const auditEntry: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action,
+    fromOrganizationId: existing.organizationId,
+    fromOrganizationName: isUnassignedDeviceOrg(existing.organizationId)
+      ? 'Inventario Global'
+      : existing.organizationName || existing.organizationId,
+    toOrganizationId: isUnassigning ? undefined : nextOrgId,
+    toOrganizationName: isUnassigning ? 'Inventario Global (Sin asignar)' : nextOrgName,
+    toSiteId: nextSiteId,
+    toSiteName: nextSiteName,
+    note:
+      params.note?.trim() ||
+      (isUnassigning
+        ? 'Dispositivo desasignado y devuelto al inventario global.'
+        : action === 'reasignacion'
+        ? `Traslado de equipo hacia ${nextOrgName}${nextSiteName ? ` / ${nextSiteName}` : ''}.`
+        : nextSiteName
+        ? `Asignación directa a faena ${nextSiteName} (${nextOrgName}).`
+        : `Asignación a empresa ${nextOrgName} para distribución interna.`),
+  };
+
+  const nextHistory = [auditEntry, ...(existing.assignmentHistory || [])].slice(0, 25);
+
+  const updated: RegisteredDeviceConfig = {
+    ...existing,
+    organizationId: nextOrgId,
+    organizationName: nextOrgName,
+    siteId: nextSiteId,
+    siteName: nextSiteName,
+    crewId: nextCrewId,
+    crewName: nextCrewName,
+    sectorId: nextSectorId,
+    sectorName: nextSectorName,
+    parentGatewayId: nextParentGatewayId,
+    assignmentStatus: nextStatus,
+    assignedBy: actingUser!.name,
+    assignedAt: now,
+    assignmentHistory: nextHistory,
+  };
+
+  await set(catalogRef, JSON.parse(JSON.stringify(updated)));
+
+  const rtdbUpdate = {
+    name: updated.name,
+    organizationId: updated.organizationId,
+    organizationName: updated.organizationName || null,
+    siteId: updated.siteId || null,
+    siteName: updated.siteName || null,
+    crewId: updated.crewId || null,
+    crewName: updated.crewName || null,
+    sectorId: updated.sectorId || null,
+    sectorName: updated.sectorName,
+    deviceCategory: updated.category,
+    assignmentStatus: updated.assignmentStatus,
+    parentGatewayId: updated.parentGatewayId || null,
+    assignedBy: updated.assignedBy || null,
+    assignedAt: now,
+    assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+  };
+
+  if (devSnap && devSnap.exists()) {
+    await update(devRef, rtdbUpdate);
+  } else {
+    await set(devRef, {
+      ...rtdbUpdate,
+      CO: 0,
+      PM2_5: 0,
+      temperatura: 0,
+      humedad: 0,
+      alarma_activa: false,
+      alarma: false,
+      buzzer: false,
+      luz: false,
+      iluminacion_led: false,
+      estado_adquisicion: 'pendiente_hardware',
+      origen_alarma: 'NINGUNO',
+      descripcion_monitoreo: `Dispositivo ${updated.name} actualizado (${updated.assignmentStatus}).`,
+      via: updated.category === 'nodo' && updated.parentGatewayId ? 'ESP_NOW_GATEWAY' : 'WIFI_DIRECTO',
+      last_update_server: 0,
+    });
+  }
+
+  await syncPlatformRegisteredDevicesIfSuperAdmin(updated, actingUser!);
+  return updated;
+}
+
+export async function deleteIoTDeviceFromCatalogInRTDB(
+  deviceId: string,
+  actingUser: UserProfile | null | undefined
+): Promise<void> {
+  assertActiveSession(actingUser);
+  const perm = canRegisterAndAssignIoTDevices(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+  const cleanId = sanitizeDeviceHardwareId(deviceId);
+  await remove(ref(rtdb, `catalogo_dispositivos/${cleanId}`));
+  const devSnap = await get(ref(rtdb, `dispositivos/${cleanId}`)).catch(() => null);
+  if (devSnap && devSnap.exists()) {
+    await update(ref(rtdb, `dispositivos/${cleanId}`), {
+      organizationId: UNASSIGNED_DEVICE_ORG_ID,
+      organizationName: null,
+      siteId: null,
+      siteName: null,
+      crewId: null,
+      crewName: null,
+      sectorId: null,
+      sectorName: 'En inventario',
+      assignmentStatus: 'en_inventario',
+    }).catch(() => {});
+  }
+  await syncPlatformRegisteredDevicesIfSuperAdmin(
+    { id: cleanId, name: cleanId, category: 'gateway', sectorName: '' },
+    actingUser!,
+    cleanId
+  );
+}
+
 export async function saveRegisteredDeviceHierarchy(
   device: RegisteredDeviceConfig,
   actingUser: UserProfile | null | undefined,
@@ -4843,28 +5481,83 @@ export async function saveRegisteredDeviceHierarchy(
     throw new Error(check.reason || 'Permisos insuficientes para vincular dispositivos en esta empresa.');
   }
 
-  const cleanId = device.id.trim();
-  if (!cleanId) {
-    throw new Error('El identificador del dispositivo es obligatorio.');
+  const cleanId = sanitizeDeviceHardwareId(device.id);
+  const catalogRef = ref(rtdb, `catalogo_dispositivos/${cleanId}`);
+  const devRef = ref(rtdb, `dispositivos/${cleanId}`);
+  const [catalogSnap, devSnap] = await Promise.all([
+    get(catalogRef).catch(() => null),
+    get(devRef).catch(() => null),
+  ]);
+
+  const existingCatalog = catalogSnap && catalogSnap.exists() ? normalizeCatalogRecord(catalogSnap.val(), cleanId) : null;
+  const existingRTDB = devSnap && devSnap.exists() ? devSnap.val() : null;
+  const existingForCheck = existingCatalog
+    ? existingCatalog
+    : existingRTDB
+    ? { id: cleanId, organizationId: existingRTDB.organizationId }
+    : null;
+
+  // Admin de Empresa NO puede crear nuevos IDs de hardware ni apropiarse de equipos en inventario/ajenos
+  const distCheck = canDistributeDeviceInsideOrg(actingUser, existingForCheck, targetOrgId);
+  if (!distCheck.allowed) {
+    throw new Error(distCheck.reason);
   }
 
-  const isNodeCategory = device.category === 'nodo' || device.category === 'sensor';
+  const isGlobal = isGlobalMineSafeAdmin(actingUser!.role);
+  const existingCategory: DeviceCategory =
+    existingCatalog?.category ||
+    (existingRTDB?.deviceCategory as DeviceCategory | undefined) ||
+    device.category;
+  const effectiveCategory: DeviceCategory = isGlobal
+    ? device.category === 'nodo' || device.category === 'sensor'
+      ? 'nodo'
+      : 'gateway'
+    : existingCategory;
+
+  const isNodeCategory = effectiveCategory === 'nodo' || effectiveCategory === 'sensor';
+  const orgObj = (organizations || []).find((o) => o.id === targetOrgId);
+  const now = Date.now();
+
+  const auditEntry: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action: 'asignacion_sector',
+    fromOrganizationId: existingCatalog?.organizationId || targetOrgId,
+    fromOrganizationName: existingCatalog?.organizationName || orgObj?.name || targetOrgId,
+    toOrganizationId: targetOrgId,
+    toOrganizationName: orgObj?.name || existingCatalog?.organizationName || targetOrgId,
+    toSiteId: device.siteId || existingCatalog?.siteId,
+    toSiteName: device.siteName || existingCatalog?.siteName,
+    note: `Distribución interna en sector "${device.sectorName || 'Sector Operativo'}"${
+      device.crewName ? ` (Cuadrilla ${device.crewName})` : ''
+    }.`,
+  };
+  const nextHistory = [auditEntry, ...(existingCatalog?.assignmentHistory || [])].slice(0, 25);
+
   const normalized: RegisteredDeviceConfig = {
+    ...existingCatalog,
     ...device,
     id: cleanId,
-    name: device.name.trim() || cleanId,
+    name: device.name.trim() || existingCatalog?.name || cleanId,
     organizationId: targetOrgId,
-    category: isNodeCategory ? 'nodo' : 'gateway',
+    organizationName: orgObj?.name || existingCatalog?.organizationName || targetOrgId,
+    category: effectiveCategory,
     enabled: device.enabled !== false && device.active !== false,
     active: device.active !== false && device.enabled !== false,
-    createdAt: device.createdAt || Date.now(),
+    createdAt: existingCatalog?.createdAt || device.createdAt || now,
     parentGatewayId: isNodeCategory ? device.parentGatewayId || undefined : undefined,
+    assignedBy: actingUser!.name,
+    assignedAt: now,
+    assignmentHistory: nextHistory,
   };
+  normalized.assignmentStatus = resolveDeviceAssignmentStatus(normalized);
 
-  // 1) Actualizar registro en /dispositivos/{id} con su ubicación jerárquica completa
-  await update(ref(rtdb, `dispositivos/${cleanId}`), {
+  // 1) Actualizar/inicializar registro en /dispositivos/{id} con su ubicación jerárquica completa
+  const rtdbFields = {
     name: normalized.name,
     organizationId: normalized.organizationId,
+    organizationName: normalized.organizationName || null,
     siteId: normalized.siteId || null,
     siteName: normalized.siteName || null,
     crewId: normalized.crewId || null,
@@ -4872,21 +5565,47 @@ export async function saveRegisteredDeviceHierarchy(
     sectorId: normalized.sectorId || null,
     sectorName: normalized.sectorName || 'Sector Operativo',
     deviceCategory: normalized.category,
+    assignmentStatus: normalized.assignmentStatus,
     parentGatewayId: normalized.parentGatewayId || null,
-  });
+    assignedBy: normalized.assignedBy || null,
+    assignedAt: now,
+    assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+  };
 
-  // 2) Intentar sincronizar catálogo maestro /configuracion_plataforma/registeredDevices (si tiene permisos)
-  try {
-    const snap = await get(ref(rtdb, 'configuracion_plataforma/registeredDevices'));
-    const existing: RegisteredDeviceConfig[] = snap.exists() && Array.isArray(snap.val()) ? snap.val() : [];
-    const nextList = [
-      ...existing.filter((d) => d.id !== normalized.id),
-      JSON.parse(JSON.stringify(normalized)),
-    ];
-    await set(ref(rtdb, 'configuracion_plataforma/registeredDevices'), nextList);
-  } catch {
-    // Admin de empresa puede no tener escritura en /configuracion_plataforma; /dispositivos ya guarda la jerarquía real.
+  if (existingRTDB) {
+    await update(devRef, rtdbFields);
+  } else {
+    // Solo SuperAdmin / Admin MineSafe llegan aquí (Admin normal fue bloqueado arriba)
+    await set(devRef, {
+      ...rtdbFields,
+      CO: 0,
+      PM2_5: 0,
+      temperatura: 0,
+      humedad: 0,
+      alarma_activa: false,
+      alarma: false,
+      buzzer: false,
+      luz: false,
+      iluminacion_led: false,
+      estado_adquisicion: 'pendiente_hardware',
+      origen_alarma: 'NINGUNO',
+      descripcion_monitoreo: `Dispositivo ${normalized.name} registrado en jerarquía, en espera de telemetría ESP32.`,
+      via: isNodeCategory && normalized.parentGatewayId ? 'ESP_NOW_GATEWAY' : 'WIFI_DIRECTO',
+      last_update_server: 0,
+    });
   }
+
+  // 2) Sincronizar /catalogo_dispositivos/{id} (Admin cliente solo actualiza existentes de su org)
+  try {
+    if (isGlobal || existingCatalog) {
+      await set(catalogRef, JSON.parse(JSON.stringify(normalized)));
+    }
+  } catch {
+    // Fallback silencioso si /catalogo_dispositivos aún no tenía el registro legacy para Admin de empresa
+  }
+
+  // 3) Sincronizar catálogo legacy /configuracion_plataforma/registeredDevices si es SuperAdmin
+  await syncPlatformRegisteredDevicesIfSuperAdmin(normalized, actingUser!);
 
   return normalized;
 }

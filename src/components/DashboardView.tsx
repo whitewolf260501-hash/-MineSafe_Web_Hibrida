@@ -13,6 +13,13 @@ import {
   Zap,
   Wind,
   MapPin,
+  Users,
+  ArrowDownToLine,
+  AlertTriangle,
+  ShieldAlert,
+  CheckCircle2,
+  Clock,
+  ArrowRight,
 } from 'lucide-react';
 import {
   TelemetryVariable,
@@ -65,6 +72,7 @@ interface DashboardViewProps {
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
+  variables = [],
   telemetryHistory = [],
   activeAlerts,
   currentSite,
@@ -77,15 +85,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   activeTelemetryDeviceId,
   onSelectTelemetryDevice,
   onNavigateTab,
+  onSelectSensor,
+  onAcknowledgeAlert,
+  onResetPageLevels,
   isAlarmActive,
   onToggleAlarm,
   onShutdownAlarmCompletely,
   onToggleGatewayAlarm,
+  isLightActive,
+  onToggleLight,
   currentUser,
   usersList = [],
   onChangeUserModal,
   platformConfig,
 }) => {
+  const isSuperAdmin = currentUser?.role === 'superadmin';
   const activeDevice = devices.find((d) => d.id === activeTelemetryDeviceId) || devices[0];
   const canSeeEquipos = isTabVisibleForUser('equipos', currentUser ?? null, platformConfig);
   const canSeeAlertas = isTabVisibleForUser('alertas', currentUser ?? null, platformConfig);
@@ -113,6 +127,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
     });
     return sectors.size;
   }, [devices, currentSite.activeSectors]);
+
+  const totalWorkersOnShift = useMemo(() => {
+    const fromSectors = currentSite.activeSectors.reduce(
+      (acc, sector) => acc + (Number(sector.activeWorkers) || 0),
+      0
+    );
+    return fromSectors > 0 ? fromSectors : usersList.length;
+  }, [currentSite.activeSectors, usersList.length]);
+
+  const maxDepthMeters = useMemo(() => {
+    const depths = currentSite.activeSectors
+      .map((s) => Number(s.depthMeters) || 0)
+      .filter((d) => d > 0);
+    return depths.length > 0 ? Math.max(...depths) : 0;
+  }, [currentSite.activeSectors]);
 
   // Clarify Active Alerts timeframe: last 24h + timestamp of most recent alert
   const recent24hAlerts = useMemo(() => {
@@ -148,7 +177,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const consolidatedAtmosphericSection =
     showDual && activeDevice ? (
       <div className="relative z-10">
-        <DualReadingSensorCards device={activeDevice} />
+        <DualReadingSensorCards
+          device={activeDevice}
+          isSuperAdmin={isSuperAdmin}
+          quickVariables={variables}
+        />
       </div>
     ) : null;
 
@@ -175,8 +208,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        {/* Clean Operational Summary (3 cards: Nodos activos, Sectores monitoreados, Alertas activas 24h) */}
-        <div className="relative z-10 grid grid-cols-1 sm:grid-cols-3 gap-4 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400">
+        {/* Operational Summary (3 cards standard; + Personal en Turno & Profundidad Máxima for SuperAdmin) */}
+        <div
+          className={`relative z-10 grid grid-cols-1 ${
+            isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-5' : 'sm:grid-cols-3'
+          } gap-4 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400`}
+        >
           <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
             <span className="block text-slate-400">Nodos Activos del Total</span>
             <span className="text-base font-bold text-emerald-400 tabular-nums mt-0.5 block">
@@ -204,6 +241,34 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 : 'Sin alertas vigentes en las últimas 24h'}
             </span>
           </div>
+          {isSuperAdmin && (
+            <>
+              <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50">
+                <span className="flex items-center justify-between text-purple-200">
+                  <span>Personal en Turno</span>
+                  <Users className="w-3.5 h-3.5 text-purple-400" />
+                </span>
+                <span className="text-base font-bold text-white tabular-nums mt-0.5 block">
+                  {totalWorkersOnShift} Trabajadores
+                </span>
+                <span className="text-[10px] text-purple-300/80 block mt-0.5">
+                  Vista Diagnóstico SuperAdmin
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50">
+                <span className="flex items-center justify-between text-purple-200">
+                  <span>Profundidad Máxima</span>
+                  <ArrowDownToLine className="w-3.5 h-3.5 text-purple-400" />
+                </span>
+                <span className="text-base font-bold text-cyan-300 tabular-nums mt-0.5 block">
+                  {maxDepthMeters > 0 ? `-${maxDepthMeters} m` : 'Superficie / N/D'}
+                </span>
+                <span className="text-[10px] text-purple-300/80 block mt-0.5">
+                  Cota máxima en {currentSite.name}
+                </span>
+              </div>
+            </>
+          )}
         </div>
 
         {/* ==============================================================
@@ -223,6 +288,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               telemetryHistory={telemetryHistory}
               siteName={currentSite.name}
               betweenWelcomeAndChart={consolidatedAtmosphericSection}
+              canViewSystemUsers={isSuperAdmin}
               sites={sites}
               crews={crews}
               organizations={organizations}
@@ -244,11 +310,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             devices={devices}
             activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
             onSelectDevice={(id) => onSelectTelemetryDevice?.(id)}
+            onResetPageLevels={onResetPageLevels}
             isAlarmActive={isAlarmActive}
             onToggleAlarm={onToggleAlarm}
             onShutdownAlarmCompletely={onShutdownAlarmCompletely}
             onToggleGatewayAlarm={onToggleGatewayAlarm}
-            isSuperAdmin={currentUser?.role === 'superadmin'}
+            isLightActive={isLightActive}
+            onToggleLight={onToggleLight}
+            isSuperAdmin={isSuperAdmin}
             currentUser={currentUser}
             timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
           />
@@ -407,6 +476,134 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </p>
             </div>
           </div>
+        </section>
+      )}
+
+      {/* ==============================================================
+          SUPERADMIN ONLY: INCIDENCIAS Y ALERTAS ACTIVAS AL PIE DEL DASHBOARD
+         ============================================================== */}
+      {isSuperAdmin && (
+        <section className="rounded-2xl bg-slate-900/80 border border-purple-800/50 p-5 sm:p-6 shadow-xl space-y-4">
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
+            <div className="flex items-center gap-2.5">
+              <div className="w-9 h-9 rounded-xl bg-rose-950/80 border border-rose-800 flex items-center justify-center text-rose-400">
+                <ShieldAlert className="w-5 h-5" />
+              </div>
+              <div>
+                <div className="flex flex-wrap items-center gap-2">
+                  <h2 className="text-base font-bold text-white">
+                    Incidencias y Alertas Activas en Faena
+                  </h2>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-bold bg-purple-950 text-purple-200 border border-purple-700/70">
+                    Solo SuperAdmin
+                  </span>
+                  <span className="px-2 py-0.5 rounded-full text-[10px] font-mono font-bold bg-slate-950 text-amber-300 border border-slate-700">
+                    {activeAlerts.length} vigentes
+                  </span>
+                </div>
+                <p className="text-xs text-slate-400">
+                  Resumen rápido de contingencias activas detectadas en el sistema con reconocimiento directo.
+                </p>
+              </div>
+            </div>
+
+            {canSeeAlertas && (
+              <button
+                type="button"
+                onClick={() => safeNavigate('alertas')}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 text-xs font-semibold transition-colors self-start sm:self-center cursor-pointer"
+              >
+                <span>Abrir Centro de Alertas</span>
+                <ArrowRight className="w-3.5 h-3.5" />
+              </button>
+            )}
+          </div>
+
+          {activeAlerts.length === 0 ? (
+            <div className="p-6 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-xs text-slate-400 flex flex-col items-center gap-2">
+              <CheckCircle2 className="w-7 h-7 text-emerald-400" />
+              <span className="font-semibold text-slate-200">
+                No existen incidencias ni alertas activas pendientes.
+              </span>
+            </div>
+          ) : (
+            <div className="space-y-2.5 max-h-[360px] overflow-y-auto pr-1">
+              {activeAlerts.slice(0, 10).map((alert) => (
+                <div
+                  key={alert.id}
+                  className={`p-3.5 rounded-xl border flex flex-col md:flex-row md:items-center justify-between gap-3 ${
+                    alert.severity === 'critico'
+                      ? 'bg-rose-950/20 border-rose-800/70'
+                      : 'bg-amber-950/20 border-amber-800/60'
+                  }`}
+                >
+                  <div className="space-y-1 min-w-0">
+                    <div className="flex flex-wrap items-center gap-2">
+                      <span
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                          alert.severity === 'critico'
+                            ? 'bg-rose-950 text-rose-300 border-rose-700'
+                            : 'bg-amber-950 text-amber-300 border-amber-700'
+                        }`}
+                      >
+                        <AlertTriangle className="w-3 h-3" />
+                        {alert.severity}
+                      </span>
+                      <span className="text-xs font-bold text-white truncate">{alert.title}</span>
+                      <span className="text-[10px] font-mono text-slate-400 bg-slate-950 px-1.5 py-0.5 rounded border border-slate-800">
+                        {alert.code}
+                      </span>
+                    </div>
+                    <div className="flex flex-wrap items-center gap-2.5 text-[11px] text-slate-400">
+                      <span>
+                        Sector: <strong className="text-cyan-300">{alert.sectorName}</strong>
+                      </span>
+                      <span>•</span>
+                      <span>
+                        Sensor: <strong className="font-mono text-slate-200">{alert.sensorCode}</strong>
+                      </span>
+                      <span>•</span>
+                      <span>
+                        Lectura: <strong className="font-mono text-white">{alert.recordedValue}</strong> (Límite:{' '}
+                        {alert.safeLimit})
+                      </span>
+                      <span>•</span>
+                      <span className="inline-flex items-center gap-1 font-mono">
+                        <Clock className="w-3 h-3" />
+                        {alert.timestamp}
+                      </span>
+                    </div>
+                  </div>
+
+                  <div className="flex items-center gap-2 shrink-0">
+                    {onSelectSensor && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectSensor(alert.sensorCode)}
+                        className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 text-cyan-300 border border-slate-700 text-[11px] font-semibold cursor-pointer"
+                      >
+                        Ver Sensor
+                      </button>
+                    )}
+                    {onAcknowledgeAlert && !alert.acknowledged && (
+                      <button
+                        type="button"
+                        onClick={() => onAcknowledgeAlert(alert.id)}
+                        className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-bold cursor-pointer"
+                      >
+                        Reconocer
+                      </button>
+                    )}
+                    {alert.acknowledged && (
+                      <span className="px-2 py-1 rounded-lg bg-cyan-950/70 border border-cyan-800/70 text-cyan-300 text-[10px] font-semibold">
+                        Reconocida
+                      </span>
+                    )}
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
         </section>
       )}
     </div>

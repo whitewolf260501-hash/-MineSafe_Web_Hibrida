@@ -49,7 +49,10 @@ import {
   isAnyAdminRole,
   isGlobalMineSafeAdmin,
   isOrganizationOwner,
+  isUnassignedDeviceOrg,
+  resolveDeviceAssignmentStatus,
 } from '../utils/accessControl';
+import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
 import {
   BulkBundleParseResult,
   BulkEntityType,
@@ -68,6 +71,8 @@ interface CompanyBulkManagementViewProps {
   sites?: MiningSite[];
   crews?: MiningCrew[];
   devices?: SensorDevice[];
+  catalogDevices?: RegisteredDeviceConfig[];
+  rtdbDevices?: SensorDevice[];
   activeOrganizationId: string;
   platformConfig: PlatformConfig;
   onSelectOrganization: (orgId: string) => void;
@@ -75,6 +80,7 @@ interface CompanyBulkManagementViewProps {
   onSiteSaved?: (site: MiningSite) => void;
   onCrewSaved?: (crew: MiningCrew) => void;
   onDeviceHierarchySaved?: (device: RegisteredDeviceConfig) => void;
+  onDeviceDeleted?: (deviceId: string) => void;
   onBulkImportCompleted?: (result: BulkImportExecutionResult) => void;
 }
 
@@ -134,6 +140,8 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   sites = [],
   crews = [],
   devices = [],
+  catalogDevices,
+  rtdbDevices,
   activeOrganizationId,
   platformConfig,
   onSelectOrganization,
@@ -141,6 +149,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   onSiteSaved,
   onCrewSaved,
   onDeviceHierarchySaved,
+  onDeviceDeleted,
   onBulkImportCompleted,
 }) => {
   const isSuperAdmin = currentUser.role === 'superadmin';
@@ -153,8 +162,8 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     return organizations.filter((o) => allowedIds.has(o.id));
   }, [isGlobalAdmin, currentUser, organizations]);
 
-  const [section, setSection] = useState<'empresas' | 'jerarquia' | 'carga_masiva'>(
-    isGlobalAdmin ? 'empresas' : 'jerarquia'
+  const [section, setSection] = useState<'empresas' | 'jerarquia' | 'dispositivos' | 'carga_masiva'>(
+    isGlobalAdmin ? 'dispositivos' : 'jerarquia'
   );
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSavingOrg, setIsSavingOrg] = useState(false);
@@ -414,37 +423,45 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     () => crews.filter((c) => (c.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id),
     [crews, selectedBulkOrg.id]
   );
+  const effectiveCatalogDevices = useMemo<RegisteredDeviceConfig[]>(() => {
+    const byId = new Map<string, RegisteredDeviceConfig>();
+    (platformConfig.registeredDevices || []).forEach((d) => byId.set(d.id, d));
+    (catalogDevices || []).forEach((d) => byId.set(d.id, d));
+    return Array.from(byId.values());
+  }, [platformConfig.registeredDevices, catalogDevices]);
+
   const scopedOrgDevices = useMemo(() => {
     const byId = new Map<string, RegisteredDeviceConfig>();
-    (platformConfig.registeredDevices || [])
-      .filter((d) => (d.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id)
+    effectiveCatalogDevices
+      .filter((d) => !isUnassignedDeviceOrg(d.organizationId) && d.organizationId === selectedBulkOrg.id)
       .forEach((d) => byId.set(d.id, d));
     devices
-      .filter((d) => (d.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id)
+      .filter((d) => !isUnassignedDeviceOrg(d.organizationId) && d.organizationId === selectedBulkOrg.id)
       .forEach((d) => {
         const prev = byId.get(d.id);
         byId.set(d.id, {
+          ...prev,
           id: d.id,
-          name: d.name || prev?.name || d.id,
-          organizationId: d.organizationId || selectedBulkOrg.id,
-          siteId: d.siteId || prev?.siteId,
-          siteName: d.siteName || prev?.siteName,
-          crewId: d.crewId || prev?.crewId,
-          crewName: d.crewName || prev?.crewName,
-          sectorId: d.sectorId || prev?.sectorId,
-          sectorName: d.sectorName || prev?.sectorName || 'Sector Operativo',
-          category: d.deviceCategory || prev?.category || 'gateway',
-          parentGatewayId: d.parentGatewayId || prev?.parentGatewayId,
+          name: prev?.name || d.name || d.id,
+          organizationId: prev?.organizationId || d.organizationId || selectedBulkOrg.id,
+          siteId: prev?.siteId || d.siteId,
+          siteName: prev?.siteName || d.siteName,
+          crewId: prev?.crewId || d.crewId,
+          crewName: prev?.crewName || d.crewName,
+          sectorId: prev?.sectorId || d.sectorId,
+          sectorName: prev?.sectorName || d.sectorName || 'Pendiente de asignación',
+          category: prev?.category || d.deviceCategory || 'gateway',
+          parentGatewayId: prev?.parentGatewayId || d.parentGatewayId,
           enabled: true,
           active: true,
           createdAt: prev?.createdAt || Date.now(),
         });
       });
     return Array.from(byId.values());
-  }, [platformConfig.registeredDevices, devices, selectedBulkOrg.id]);
+  }, [effectiveCatalogDevices, devices, selectedBulkOrg.id]);
 
   const scopedGateways = useMemo(
-    () => scopedOrgDevices.filter((d) => d.category !== 'nodo'),
+    () => scopedOrgDevices.filter((d) => d.category !== 'nodo' && d.category !== 'sensor'),
     [scopedOrgDevices]
   );
 
@@ -749,6 +766,20 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
           </div>
 
           <div className="flex flex-wrap items-center gap-2 shrink-0">
+            {isGlobalAdmin && (
+              <button
+                type="button"
+                onClick={() => setSection('dispositivos')}
+                className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
+                  section === 'dispositivos'
+                    ? 'bg-sky-600 text-white border-sky-400 shadow-md'
+                    : 'bg-slate-950/70 text-slate-300 border-slate-700 hover:text-white'
+                }`}
+              >
+                <Router className="w-4 h-4" />
+                <span>Registro y Asignación IoT ({effectiveCatalogDevices.length})</span>
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setSection('jerarquia')}
@@ -788,6 +819,19 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
           </div>
         </div>
       </div>
+
+      {/* SECCIÓN EXCLUSIVA MINESAFE: REGISTRO, CLASIFICACIÓN Y ASIGNACIÓN DE DISPOSITIVOS IoT */}
+      {section === 'dispositivos' && isGlobalAdmin && (
+        <DeviceRegistryAndAssignmentPanel
+          currentUser={currentUser}
+          organizations={organizations}
+          sites={sites}
+          catalogDevices={effectiveCatalogDevices}
+          rtdbDevices={rtdbDevices || devices}
+          onDeviceUpdated={(saved) => onDeviceHierarchySaved?.(saved)}
+          onDeviceDeleted={(devId) => onDeviceDeleted?.(devId)}
+        />
+      )}
 
       {/* FEEDBACK BANNER */}
       {feedback && (
@@ -1023,18 +1067,32 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
               onSubmit={handleLinkDeviceToSector}
               className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3"
             >
-              <div className="flex items-center gap-2 font-bold text-white text-sm">
-                <Router className="w-4 h-4 text-sky-400" />
-                <span>Vincular Dispositivo (Gateway o Nodo) a Sector</span>
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <div className="flex items-center gap-2 font-bold text-white text-sm">
+                  <Router className="w-4 h-4 text-sky-400" />
+                  <span>Distribuir Dispositivo (Gateway o Nodo) a Sector</span>
+                </div>
+                {isGlobalAdmin && (
+                  <button
+                    type="button"
+                    onClick={() => setSection('dispositivos')}
+                    className="px-2.5 py-1 rounded-lg bg-sky-950/80 hover:bg-sky-900 border border-sky-700 text-sky-200 text-[11px] font-bold cursor-pointer"
+                  >
+                    + Registrar / Asignar Nuevo ID
+                  </button>
+                )}
               </div>
               <p className="text-[11px] text-slate-400">
-                Registra o reasigna un equipo diferenciando si es Gateway concentrador o Nodo sensor de sector.
+                {isGlobalAdmin
+                  ? 'Selecciona un dispositivo asignado a esta empresa para ubicarlo en su Faena, Cuadrilla y Sector operativo.'
+                  : 'Selecciona un dispositivo ya asignado a tu empresa por MineSafe para distribuirlo internamente a una Faena, Cuadrilla y Sector.'}
               </p>
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-[10px] text-slate-400 block mb-1">Equipo existente o nuevo código</label>
-                  <input
-                    list="minesafe-org-devices-list"
+                  <label className="text-[10px] text-slate-400 block mb-1">
+                    Dispositivo asignado a {selectedBulkOrg.name}
+                  </label>
+                  <select
                     value={linkDeviceId}
                     onChange={(e) => {
                       const val = e.target.value;
@@ -1042,23 +1100,33 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                       const found = scopedOrgDevices.find((d) => d.id === val);
                       if (found) {
                         setLinkDeviceName(found.name);
-                        setLinkDeviceCategory(found.category === 'nodo' ? 'nodo' : 'gateway');
+                        setLinkDeviceCategory(
+                          found.category === 'nodo' || found.category === 'sensor' ? 'nodo' : 'gateway'
+                        );
                         setLinkDeviceSiteId(found.siteId || '');
                         setLinkDeviceCrewId(found.crewId || '');
-                        setLinkDeviceSectorName(found.sectorName || '');
+                        setLinkDeviceSectorName(
+                          found.sectorName && found.sectorName !== 'Pendiente de asignación'
+                            ? found.sectorName
+                            : ''
+                        );
                         setLinkDeviceParentGatewayId(found.parentGatewayId || '');
                       }
                     }}
-                    placeholder="Ej: GW-NORTE-01 o NODO-101"
                     className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
-                  />
-                  <datalist id="minesafe-org-devices-list">
+                    required
+                  >
+                    <option value="">
+                      {scopedOrgDevices.length > 0
+                        ? 'Selecciona un Gateway o Nodo asignado...'
+                        : 'Sin dispositivos asignados a esta empresa aún'}
+                    </option>
                     {scopedOrgDevices.map((d) => (
                       <option key={d.id} value={d.id}>
-                        {d.name} ({d.category})
+                        [{d.category === 'nodo' || d.category === 'sensor' ? 'NODO' : 'GATEWAY'}] {d.name} ({d.id})
                       </option>
                     ))}
-                  </datalist>
+                  </select>
                 </div>
                 <div>
                   <label className="text-[10px] text-slate-400 block mb-1">Nombre visible</label>
@@ -1076,7 +1144,13 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                 <select
                   value={linkDeviceCategory}
                   onChange={(e) => setLinkDeviceCategory(e.target.value as 'gateway' | 'nodo')}
-                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-semibold"
+                  disabled={!isGlobalAdmin}
+                  title={
+                    !isGlobalAdmin
+                      ? 'El tipo de hardware (Gateway o Nodo) es definido exclusivamente por MineSafe al registrar el dispositivo.'
+                      : undefined
+                  }
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-semibold disabled:opacity-60"
                 >
                   <option value="gateway">Tipo: Gateway</option>
                   <option value="nodo">Tipo: Nodo Sensor</option>
@@ -1149,7 +1223,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                 className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
               >
                 <Link2 className="w-3.5 h-3.5" />
-                <span>Guardar Vinculación de Dispositivo</span>
+                <span>Guardar Ubicación del Dispositivo</span>
               </button>
             </form>
           </div>

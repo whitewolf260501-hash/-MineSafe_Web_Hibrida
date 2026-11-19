@@ -70,6 +70,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   onSelectSensor,
 }) => {
   const isOperadorReadOnly = Boolean(isReadOnly || currentUser?.role === 'operador');
+  const isSuperAdmin = currentUser?.role === 'superadmin';
 
   // Main view switcher: Alertas Activas vs Auditoría Registro de Alarmas (RTDB / ESP32)
   const [subTab, setSubTab] = useState<'alertas_activas' | 'auditoria_rtdb'>('alertas_activas');
@@ -80,6 +81,8 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   const [filterStatus, setFilterStatus] = useState<'active' | 'resolved' | 'all'>('active');
   const [filterTimeRange, setFilterTimeRange] = useState<'24h' | '7d' | '30d' | 'all'>('24h');
   const [visibleAlertsLimit, setVisibleAlertsLimit] = useState<number>(15);
+  const [superAdminUnrestricted, setSuperAdminUnrestricted] = useState<boolean>(false);
+  const [isTestingSiren, setIsTestingSiren] = useState<boolean>(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [alertToResolve, setAlertToResolve] = useState<SafetyAlert | null>(null);
   const [alertToInspect, setAlertToInspect] = useState<SafetyAlert | null>(null);
@@ -151,6 +154,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       : 0;
 
   const matchesRecencyWindow = (alert: SafetyAlert) => {
+    if (isSuperAdmin && superAdminUnrestricted) return true;
     if (rangeCutoffMs <= 0) return true;
     const ts = alert.createdAtMs || alert.timestampMs || 0;
     return ts === 0 || ts >= rangeCutoffMs;
@@ -178,7 +182,10 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     return matchesSeverity && matchesStatus && matchesTime && matchesSearch;
   });
 
-  const visibleAlerts = filteredAlerts.slice(0, visibleAlertsLimit);
+  const visibleAlerts =
+    isSuperAdmin && superAdminUnrestricted
+      ? filteredAlerts
+      : filteredAlerts.slice(0, visibleAlertsLimit);
   const recentScopedAlerts = alerts.filter(matchesRecencyWindow);
   const activeAlertsCount = recentScopedAlerts.filter(a => !a.resolved).length;
   const resolvedAlertsCount = recentScopedAlerts.filter(a => a.resolved).length;
@@ -337,6 +344,39 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 : 'Monitoreo centralizado de contingencias y auditoría de hardware ESP32 según normativa DS 132 (Sernageomin).'}
             </p>
           </div>
+
+          {/* SuperAdmin Exclusive: Probar Sirena */}
+          {isSuperAdmin && (
+            <div className="flex flex-wrap items-center gap-2 shrink-0">
+              <button
+                type="button"
+                onClick={() => {
+                  if (isTestingSiren) {
+                    soundAlert.stopContinuousAlarm();
+                    setIsTestingSiren(false);
+                    showExportToast('Prueba acústica de sirena detenida.');
+                  } else {
+                    soundAlert.setMuted(false);
+                    soundAlert.playCriticalAlert();
+                    setIsTestingSiren(true);
+                    showExportToast('Prueba de sirena acústica ejecutada (modo diagnóstico SuperAdmin).');
+                    setTimeout(() => {
+                      setIsTestingSiren(false);
+                    }, 1800);
+                  }
+                }}
+                className={`inline-flex items-center gap-2 px-3.5 py-2 rounded-xl text-xs font-bold border transition-all cursor-pointer ${
+                  isTestingSiren
+                    ? 'bg-rose-600 hover:bg-rose-500 text-white border-rose-400 animate-pulse shadow-lg shadow-rose-950/50'
+                    : 'bg-purple-950/70 hover:bg-purple-900 text-purple-200 border-purple-700/70'
+                }`}
+                title="Ejecutar prueba de sirena de seguridad (Solo SuperAdmin)"
+              >
+                <Volume2 className="w-4 h-4" />
+                <span>{isTestingSiren ? 'Probando Sirena...' : 'Probar Sirena'}</span>
+              </button>
+            </div>
+          )}
         </div>
 
         {isOperadorReadOnly ? (
@@ -508,6 +548,30 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 <option value="resolved">Solo Resueltas ({resolvedAlertsCount})</option>
                 <option value="all">Todas ({recentScopedAlerts.length})</option>
               </select>
+
+              {isSuperAdmin && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setSuperAdminUnrestricted((prev) => {
+                      const next = !prev;
+                      if (next) {
+                        setFilterTimeRange('all');
+                        setFilterStatus('all');
+                      }
+                      return next;
+                    });
+                  }}
+                  className={`px-2.5 py-1.5 rounded-lg text-xs font-bold border transition-colors cursor-pointer ${
+                    superAdminUnrestricted
+                      ? 'bg-purple-700 text-white border-purple-500'
+                      : 'bg-slate-950 text-purple-300 border-purple-800/70 hover:bg-purple-950/60'
+                  }`}
+                  title="Desactivar recorte de 24h y paginación para auditar el historial completo (Solo SuperAdmin)"
+                >
+                  {superAdminUnrestricted ? `Sin Recortes (${alerts.length})` : 'Ver Todo (SuperAdmin)'}
+                </button>
+              )}
             </div>
           </div>
 
@@ -670,7 +734,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               })
             )}
 
-            {filteredAlerts.length > visibleAlertsLimit && (
+            {!(isSuperAdmin && superAdminUnrestricted) && filteredAlerts.length > visibleAlertsLimit && (
               <div className="flex items-center justify-center pt-2">
                 <button
                   type="button"
@@ -1084,6 +1148,20 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                     <strong>Medidas:</strong> {alertToInspect.resolutionDetails.correctiveActions}
                   </p>
                 )}
+              </div>
+            )}
+
+            {isSuperAdmin && (
+              <div className="p-3 rounded-xl bg-purple-950/25 border border-purple-800/50 text-[11px] font-mono space-y-1">
+                <span className="text-[10px] font-sans uppercase font-bold text-purple-300 block">
+                  Metadatos Técnicos Crudos (SuperAdmin)
+                </span>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-1 text-slate-300">
+                  <span className="truncate">ID Alerta: <strong className="text-cyan-300">{alertToInspect.id}</strong></span>
+                  <span className="truncate">Org ID: <strong>{alertToInspect.organizationId || 'global'}</strong></span>
+                  <span>createdAtMs: <strong>{alertToInspect.createdAtMs || alertToInspect.timestampMs || 'N/D'}</strong></span>
+                  <span>Sensor/Code: <strong>{alertToInspect.sensorCode} / {alertToInspect.code}</strong></span>
+                </div>
               </div>
             )}
 

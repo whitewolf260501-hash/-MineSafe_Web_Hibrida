@@ -8,15 +8,28 @@ import {
   CheckCircle2, 
   ShieldAlert, 
   Activity,
-  Gauge
+  Gauge,
+  Battery,
+  Sun,
+  CloudRain,
+  TrendingUp,
+  Minus,
+  Volume2,
+  HeartPulse
 } from 'lucide-react';
-import { SensorDevice } from '../types';
+import { SensorDevice, TelemetryVariable } from '../types';
 
 interface DualReadingSensorCardsProps {
   device: SensorDevice;
+  isSuperAdmin?: boolean;
+  quickVariables?: TelemetryVariable[];
 }
 
-export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({ device }) => {
+export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
+  device,
+  isSuperAdmin = false,
+  quickVariables = [],
+}) => {
   const faultSet = new Set(device?.faultFields || []);
   const coFault = faultSet.has('CO');
   const pmFault = faultSet.has('PM2_5');
@@ -129,11 +142,15 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({ 
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-[11px] font-semibold text-cyan-300 bg-cyan-950 px-2.5 py-1 rounded-lg border border-cyan-800">
-            {device.sectorName || 'Sector Principal'} · {device.name}
+            {isSuperAdmin
+              ? `Dispositivo: ${device.name} (${device.id})`
+              : `${device.sectorName || 'Sector Principal'} · ${device.name}`}
           </span>
-          <span className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-700">
-            {batteryDisplay}
-          </span>
+          {isSuperAdmin && (
+            <span className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-700">
+              {batteryDisplay}
+            </span>
+          )}
         </div>
       </div>
 
@@ -312,6 +329,196 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({ 
         </div>
 
       </div>
+
+      {/* ==============================================================
+          FILA INFERIOR DE TARJETAS DE LECTURA RÁPIDA:
+          - Todos los roles ven: Temperatura, Humedad, Gases/CO y PM2.5
+          - Exclusivo SuperAdmin: Batería Dispositivo IoT, Flujo de Ventilación, Oxígeno y Ruido
+         ============================================================== */}
+      {(() => {
+        const findVar = (id: string) => quickVariables.find((v) => v.id === id);
+        const tempVar = findVar('temp');
+        const humVar = findVar('hum');
+        const gasVar = findVar('co2');
+        const pmVar = findVar('lux');
+        const batVar = findVar('kwh');
+        const airVar = findVar('air_flow');
+
+        const quickCards = [
+          {
+            id: 'temp',
+            title: 'TEMPERATURA AMBIENTE',
+            value: tempFault ? '--' : (tempVar?.value ?? tempVal ?? 0),
+            unit: '°C',
+            trendLabel: tempVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
+            isAlertTrend: tempVar?.trend === 'alza critica',
+            statusLabel: tempVar?.statusLabel || 'Estable',
+            statusTone: tempVar?.status || 'normal',
+            icon: <Thermometer className="w-4 h-4 text-cyan-400" />,
+          },
+          {
+            id: 'hum',
+            title: 'HUMEDAD RELATIVA',
+            value: humFault ? '--' : (humVar?.value ?? humVal ?? 0),
+            unit: '%',
+            trendLabel: 'Estable',
+            isAlertTrend: false,
+            statusLabel: humVar?.statusLabel || 'Normal',
+            statusTone: humVar?.status || 'normal',
+            icon: <Droplets className="w-4 h-4 text-cyan-400" />,
+          },
+          {
+            id: 'co',
+            title: 'GASES / CO (MQ-2 ADC)',
+            value: coFault ? '--' : (coVal ?? gasVar?.value ?? 0),
+            unit: 'ADC',
+            trendLabel: (coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
+            isAlertTrend: (coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica',
+            statusLabel: gasVar?.statusLabel || (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico'),
+            statusTone: gasVar?.status || (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
+            icon: <CloudRain className="w-4 h-4 text-cyan-400" />,
+          },
+          {
+            id: 'pm25',
+            title: 'MATERIAL PARTICULADO (PM2.5)',
+            value: pmFault ? '--' : (pmVal ?? pmVar?.value ?? 0),
+            unit: 'ADC',
+            trendLabel: (pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
+            isAlertTrend: (pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica',
+            statusLabel: pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico'),
+            statusTone: pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
+            icon: <Sun className="w-4 h-4 text-cyan-400" />,
+          },
+          ...(isSuperAdmin
+            ? [
+                {
+                  id: 'bat',
+                  title: 'BATERÍA DISPOSITIVO IoT',
+                  value: device.batteryReported ? (batVar?.value ?? device.batteryPct) : (device.batteryPct ?? 95),
+                  unit: '%',
+                  trendLabel: (device.batteryPct ?? 95) >= 30 ? 'Óptima' : 'Baja',
+                  isAlertTrend: (device.batteryPct ?? 95) < 30,
+                  statusLabel: batVar?.statusLabel || 'Eficiente',
+                  statusTone: (device.batteryPct ?? 95) < 25 ? 'advertencia' : 'normal',
+                  icon: <Battery className="w-4 h-4 text-cyan-400" />,
+                },
+                {
+                  id: 'air',
+                  title: 'FLUJO DE VENTILACIÓN',
+                  value: airVar?.value ?? device.metrics?.flujoAire ?? 0,
+                  unit: 'm/s',
+                  trendLabel: 'Estable',
+                  isAlertTrend: false,
+                  statusLabel: airVar?.statusLabel || 'Circulación OK',
+                  statusTone: airVar?.status || 'normal',
+                  icon: <Wind className="w-4 h-4 text-cyan-400" />,
+                },
+              ]
+            : []),
+        ];
+
+        const o2Val = device.metrics?.o2 ?? 20.9;
+        const noiseVal = device.metrics?.ruido ?? 0;
+
+        return (
+          <div className="space-y-3 pt-1">
+            <div
+              className={`grid grid-cols-2 gap-3 ${
+                isSuperAdmin ? 'sm:grid-cols-3 xl:grid-cols-6' : 'lg:grid-cols-4'
+              }`}
+            >
+              {quickCards.map((card) => (
+                <div
+                  key={card.id}
+                  className="rounded-2xl bg-slate-900/80 border border-slate-800 hover:border-cyan-500/50 transition-all p-4 flex flex-col justify-between shadow-md"
+                >
+                  <div className="flex items-start justify-between gap-2 mb-3">
+                    <span className="text-[10px] font-bold uppercase tracking-wider text-cyan-300 leading-tight line-clamp-2">
+                      {card.title}
+                    </span>
+                    <div className="w-7 h-7 rounded-lg bg-cyan-950/70 border border-cyan-800/60 flex items-center justify-center shrink-0">
+                      {card.icon}
+                    </div>
+                  </div>
+
+                  <div>
+                    <div className="flex items-baseline gap-1.5">
+                      <span className="text-2xl font-black text-white font-mono tabular-nums">
+                        {card.value}
+                      </span>
+                      <span className="text-xs font-semibold text-cyan-300">{card.unit}</span>
+                    </div>
+                    <div
+                      className={`mt-1 flex items-center gap-1 text-[11px] font-semibold ${
+                        card.isAlertTrend ? 'text-amber-400' : 'text-slate-400'
+                      }`}
+                    >
+                      {card.isAlertTrend ? (
+                        <TrendingUp className="w-3 h-3" />
+                      ) : (
+                        <Minus className="w-3 h-3" />
+                      )}
+                      <span>{card.trendLabel}</span>
+                    </div>
+                  </div>
+
+                  <div className="mt-3 pt-2 border-t border-slate-800/80 flex items-center justify-between text-[10px]">
+                    <span className="text-slate-500">Última act.: {device.lastPing || 'en vivo'}</span>
+                    <span
+                      className={`font-bold ${
+                        card.statusTone === 'critico'
+                          ? 'text-rose-400'
+                          : card.statusTone === 'advertencia' || card.statusTone === 'preventivo'
+                          ? 'text-amber-400'
+                          : 'text-emerald-400'
+                      }`}
+                    >
+                      {card.statusLabel}
+                    </span>
+                  </div>
+                </div>
+              ))}
+            </div>
+
+            {/* Extra SuperAdmin Environmental Strip: Oxígeno (O2) & Ruido Acústico (dB) */}
+            {isSuperAdmin && (
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <div className="rounded-xl bg-purple-950/20 border border-purple-800/40 px-4 py-2.5 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <HeartPulse className="w-4 h-4 text-emerald-400" />
+                    <span className="font-bold text-slate-200">Oxígeno en Galería (O₂)</span>
+                    <span className="text-[10px] font-mono text-purple-300 bg-purple-950/70 px-1.5 py-0.5 rounded border border-purple-800/50">
+                      SuperAdmin
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 font-mono">
+                    <span className={`font-black text-sm ${o2Val < 19.5 ? 'text-rose-400' : 'text-emerald-300'}`}>
+                      {o2Val}%
+                    </span>
+                    <span className="text-[10px] text-slate-400">(DS 132 ≥ 19.5%)</span>
+                  </div>
+                </div>
+
+                <div className="rounded-xl bg-purple-950/20 border border-purple-800/40 px-4 py-2.5 flex items-center justify-between text-xs">
+                  <div className="flex items-center gap-2">
+                    <Volume2 className="w-4 h-4 text-amber-400" />
+                    <span className="font-bold text-slate-200">Nivel de Ruido Acústico</span>
+                    <span className="text-[10px] font-mono text-purple-300 bg-purple-950/70 px-1.5 py-0.5 rounded border border-purple-800/50">
+                      SuperAdmin
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-2 font-mono">
+                    <span className={`font-black text-sm ${noiseVal >= 85 ? 'text-rose-400' : 'text-amber-300'}`}>
+                      {noiseVal} dB
+                    </span>
+                    <span className="text-[10px] text-slate-400">(Límite 8h &lt; 85 dB)</span>
+                  </div>
+                </div>
+              </div>
+            )}
+          </div>
+        );
+      })()}
     </div>
   );
 };

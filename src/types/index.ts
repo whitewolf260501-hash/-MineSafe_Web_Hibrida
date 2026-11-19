@@ -111,6 +111,11 @@ export interface SensorDevice {
   deviceCategory?: DeviceCategory;
   parentGatewayId?: string;
   registroAlarmas?: Record<string, any>;
+  assignmentStatus?: DeviceAssignmentStatus;
+  organizationName?: string;
+  assignedBy?: string;
+  assignedAt?: number;
+  assignmentHistory?: DeviceAssignmentAuditEntry[];
 }
 
 export interface AlarmAuditRecord {
@@ -344,9 +349,24 @@ export type ControllableTab =
 
 export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
 
+export type ControllableRoleKey = 'admin_minesafe' | 'admin' | 'operador' | 'supervisor';
+
 export type NavigationTab = ControllableTab | 'superadmin_panel' | 'superadmin_docs';
 
 export type WindowOverrideValue = 'inherit' | 'allow' | 'block';
+
+export interface PlatformPolicyLocks {
+  /** true (default) = Operador restricted by policy to Alertas read-only; false = unlocked */
+  operadorStrictPolicy: boolean;
+  /** true (default) = Admin MineSafe blocked by policy on visor_3d & gateway_3d; false = unlocked */
+  adminMineSafe3DPolicy: boolean;
+  /** Granular per-(role, window) policy lock:
+   *  - true  => explicitly locked by policy (overrides rolePermissions AND userOverrides)
+   *  - false => explicitly unlocked from default policy for that (role, tab)
+   *  - undefined => inherits default role policy
+   */
+  roleWindowPolicyLocks?: Partial<Record<ControllableRoleKey, Partial<Record<ControllableTab, boolean>>>>;
+}
 
 export interface PlatformVisibilityConfig {
   rolePermissions: {
@@ -365,6 +385,7 @@ export interface PlatformVisibilityConfig {
   };
   equiposSubTabUserOverrides?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
   equiposSubTabUserOverridesByEmail?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
+  policyLocks?: PlatformPolicyLocks;
 }
 
 export interface PlatformMetricsConfig {
@@ -423,9 +444,36 @@ export interface PlatformAppearanceConfig {
 
 export type DeviceCategory = 'sensor' | 'nodo' | 'gateway' | 'gateway_sensor';
 
+export type DeviceAssignmentStatus =
+  | 'en_inventario'
+  | 'asignado_empresa'
+  | 'asignado_faena'
+  | 'asignado_sector';
+
+export interface DeviceAssignmentAuditEntry {
+  timestamp: number;
+  actorName: string;
+  actorRole: UserRole;
+  action:
+    | 'registro'
+    | 'asignacion_empresa'
+    | 'asignacion_faena'
+    | 'asignacion_sector'
+    | 'reasignacion'
+    | 'desasignacion';
+  fromOrganizationId?: string;
+  fromOrganizationName?: string;
+  toOrganizationId?: string;
+  toOrganizationName?: string;
+  toSiteId?: string;
+  toSiteName?: string;
+  note?: string;
+}
+
 export interface RegisteredDeviceConfig {
   id: string;
   organizationId?: string;
+  organizationName?: string;
   siteId?: string;
   siteName?: string;
   crewId?: string;
@@ -439,6 +487,10 @@ export interface RegisteredDeviceConfig {
   enabled?: boolean;
   active?: boolean;
   createdAt?: number;
+  assignmentStatus?: DeviceAssignmentStatus;
+  assignedBy?: string;
+  assignedAt?: number;
+  assignmentHistory?: DeviceAssignmentAuditEntry[];
 }
 
 export interface PlatformConfig {

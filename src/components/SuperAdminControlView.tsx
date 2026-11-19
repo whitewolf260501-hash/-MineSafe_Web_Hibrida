@@ -42,9 +42,11 @@ import {
 } from 'lucide-react';
 import {
   ControllableTab,
+  ControllableRoleKey,
   EquiposSubTab,
   DeviceCategory,
   HeroTitleScale,
+  MiningSite,
   Organization,
   PlatformConfig,
   RegisteredDeviceConfig,
@@ -62,23 +64,29 @@ import {
   resetPlatformConfigToDefault,
   initializeRegisteredDeviceInRTDB,
   normalizeEmailOverrideKey,
+  isWindowPolicyLockedForRole,
   saveOrganizationToRTDB,
   deleteOrganizationFromRTDB
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
 
 interface SuperAdminControlViewProps {
   currentUser: UserProfile;
   usersList: UserProfile[];
   platformConfig: PlatformConfig;
   rtdbDevices?: SensorDevice[];
+  catalogDevices?: RegisteredDeviceConfig[];
   organizations?: Organization[];
+  sites?: MiningSite[];
   activeOrganizationId?: string;
   onSelectOrganization?: (orgId: string) => void;
   onUpdateUserRole?: (userId: string, newRole: UserRole) => Promise<void> | void;
   onToggleUserStatus?: (userId: string) => void;
   onPreviewTextScale?: (pct: number | null) => void;
+  onCatalogDeviceUpdated?: (device: RegisteredDeviceConfig) => void;
+  onCatalogDeviceDeleted?: (deviceId: string) => void;
 }
 
 const CONTROLLABLE_WINDOWS: Array<{
@@ -175,12 +183,16 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   usersList,
   platformConfig,
   rtdbDevices = [],
+  catalogDevices,
   organizations = [DEFAULT_ORGANIZATION],
+  sites = [],
   activeOrganizationId = 'all',
   onSelectOrganization,
   onUpdateUserRole,
   onToggleUserStatus,
   onPreviewTextScale,
+  onCatalogDeviceUpdated,
+  onCatalogDeviceDeleted,
 }) => {
   const [subTab, setSubTab] = useState<'windows' | 'metrics' | 'page' | 'devices' | 'organizations'>('windows');
   const [draftConfig, setDraftConfig] = useState<PlatformConfig>(platformConfig);
@@ -294,17 +306,112 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       });
   };
 
-  const handleToggleRoleWindow = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
+  const ROLE_DISPLAY_LABELS: Record<ControllableRoleKey, string> = {
+    admin_minesafe: 'Admin MineSafe',
+    admin: 'Administrador',
+    supervisor: 'Supervisor',
+    operador: 'Operador (Normal)',
+  };
+
+  const handleToggleRolePolicyLock = (role: 'operador' | 'admin_minesafe') => {
+    soundAlert.playFeedbackBeep();
+    const currentLocks = draftConfig.visibility.policyLocks || {
+      operadorStrictPolicy: true,
+      adminMineSafe3DPolicy: true,
+      roleWindowPolicyLocks: {},
+    };
+    const isCurrentlyLocked =
+      role === 'operador'
+        ? currentLocks.operadorStrictPolicy ?? true
+        : currentLocks.adminMineSafe3DPolicy ?? true;
+    const nextLocked = !isCurrentlyLocked;
+
+    commitVisibilityChange((prev) => {
+      const prevLocks = prev.visibility.policyLocks || {
+        operadorStrictPolicy: true,
+        adminMineSafe3DPolicy: true,
+        roleWindowPolicyLocks: {},
+      };
+      const nextRoleWindowLocks = { ...(prevLocks.roleWindowPolicyLocks || {}) };
+
+      if (role === 'operador') {
+        // Clear per-window overrides for operador so the role-level policy switch applies cleanly
+        delete nextRoleWindowLocks.operador;
+        return {
+          ...prev,
+          visibility: {
+            ...prev.visibility,
+            policyLocks: {
+              ...prevLocks,
+              operadorStrictPolicy: nextLocked,
+              roleWindowPolicyLocks: nextRoleWindowLocks,
+            },
+          },
+        };
+      }
+
+      const prevMsMap = { ...(nextRoleWindowLocks.admin_minesafe || {}) };
+      delete prevMsMap.visor_3d;
+      delete prevMsMap.gateway_3d;
+      if (Object.keys(prevMsMap).length === 0) {
+        delete nextRoleWindowLocks.admin_minesafe;
+      } else {
+        nextRoleWindowLocks.admin_minesafe = prevMsMap;
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          policyLocks: {
+            ...prevLocks,
+            adminMineSafe3DPolicy: nextLocked,
+            roleWindowPolicyLocks: nextRoleWindowLocks,
+          },
+        },
+      };
+    });
+
+    if (role === 'operador') {
+      showNotice(
+        'success',
+        nextLocked
+          ? 'Política estricta de Operadores reactivada (Solo Alertas en lectura).'
+          : 'Política de Operadores desbloqueada. Ahora puedes activar o bloquear ventanas libremente.'
+      );
+    } else {
+      showNotice(
+        'success',
+        nextLocked
+          ? 'Política 3D de Admin MineSafe bloqueada nuevamente.'
+          : 'Política 3D de Admin MineSafe desbloqueada. Ahora puedes habilitar Visor 3D y Gateway 3D.'
+      );
+    }
+  };
+
+  const handleToggleWindowPolicyLock = (
+    role: ControllableRoleKey,
     tabId: ControllableTab
   ) => {
-    if (role === 'operador') return;
-    if (role === 'admin_minesafe' && (tabId === 'visor_3d' || tabId === 'gateway_3d')) return;
     soundAlert.playFeedbackBeep();
+    const currentlyPolicyLocked = isWindowPolicyLockedForRole(role, tabId, draftConfig);
+    const nextPolicyLocked = !currentlyPolicyLocked;
+    const winMeta = CONTROLLABLE_WINDOWS.find((w) => w.id === tabId);
+    const winLabel = winMeta?.label || tabId;
+
     commitVisibilityChange((prev) => {
+      const prevLocks = prev.visibility.policyLocks || {
+        operadorStrictPolicy: true,
+        adminMineSafe3DPolicy: true,
+        roleWindowPolicyLocks: {},
+      };
+      const prevRoleLocks = { ...(prevLocks.roleWindowPolicyLocks?.[role] || {}) };
+      prevRoleLocks[tabId] = nextPolicyLocked;
+
       const currentRoleMap = (prev.visibility.rolePermissions[role] ||
         DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role] ||
         DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin) as Record<ControllableTab, boolean>;
+
       return {
         ...prev,
         visibility: {
@@ -313,43 +420,100 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
             ...prev.visibility.rolePermissions,
             [role]: {
               ...currentRoleMap,
-              [tabId]: !currentRoleMap[tabId],
+              // Unlocking from policy enables the window immediately; locking by policy disables it
+              [tabId]: !nextPolicyLocked,
             },
           },
+          policyLocks: {
+            ...prevLocks,
+            roleWindowPolicyLocks: {
+              ...(prevLocks.roleWindowPolicyLocks || {}),
+              [role]: prevRoleLocks,
+            },
+          },
+        },
+      };
+    });
+
+    showNotice(
+      'success',
+      nextPolicyLocked
+        ? `"${winLabel}" bloqueada por política para ${ROLE_DISPLAY_LABELS[role]}.`
+        : `"${winLabel}" desbloqueada por política para ${ROLE_DISPLAY_LABELS[role]} (ahora visible).`
+    );
+  };
+
+  const handleToggleRoleWindow = (
+    role: ControllableRoleKey,
+    tabId: ControllableTab
+  ) => {
+    if (isWindowPolicyLockedForRole(role, tabId, draftConfig)) return;
+    soundAlert.playFeedbackBeep();
+    commitVisibilityChange((prev) => {
+      const currentRoleMap = (prev.visibility.rolePermissions[role] ||
+        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role] ||
+        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin) as Record<ControllableTab, boolean>;
+      const nextVal = !currentRoleMap[tabId];
+
+      // If toggling Alertas for Operador while strict policy is active, record explicit policy unlock so toggle applies
+      let nextPolicyLocks = prev.visibility.policyLocks;
+      if (role === 'operador' && tabId === 'alertas') {
+        const baseLocks = prev.visibility.policyLocks || {
+          operadorStrictPolicy: true,
+          adminMineSafe3DPolicy: true,
+          roleWindowPolicyLocks: {},
+        };
+        nextPolicyLocks = {
+          ...baseLocks,
+          roleWindowPolicyLocks: {
+            ...(baseLocks.roleWindowPolicyLocks || {}),
+            operador: {
+              ...(baseLocks.roleWindowPolicyLocks?.operador || {}),
+              alertas: false,
+            },
+          },
+        };
+      }
+
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          rolePermissions: {
+            ...prev.visibility.rolePermissions,
+            [role]: {
+              ...currentRoleMap,
+              [tabId]: nextVal,
+            },
+          },
+          ...(nextPolicyLocks ? { policyLocks: nextPolicyLocks } : {}),
         },
       };
     });
   };
 
   const handleSetAllRoleWindows = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
+    role: ControllableRoleKey,
     allowed: boolean
   ) => {
-    if (role === 'operador') return;
     soundAlert.playFeedbackBeep();
-    const updated: Record<ControllableTab, boolean> = {
-      dashboard: allowed,
-      monitoreo: allowed,
-      alertas: allowed,
-      configuracion_alertas: allowed,
-      equipos: allowed,
-      reportes: allowed,
-      faenas: allowed,
-      usuarios: allowed,
-      empresas: allowed,
-      visor_3d: role === 'admin_minesafe' ? false : allowed,
-      gateway_3d: role === 'admin_minesafe' ? false : allowed,
-    };
-    commitVisibilityChange((prev) => ({
-      ...prev,
-      visibility: {
-        ...prev.visibility,
-        rolePermissions: {
-          ...prev.visibility.rolePermissions,
-          [role]: updated,
+    commitVisibilityChange((prev) => {
+      const updated = {} as Record<ControllableTab, boolean>;
+      for (const win of CONTROLLABLE_WINDOWS) {
+        const policyLocked = isWindowPolicyLockedForRole(role, win.id, prev);
+        updated[win.id] = policyLocked ? false : allowed;
+      }
+      return {
+        ...prev,
+        visibility: {
+          ...prev.visibility,
+          rolePermissions: {
+            ...prev.visibility.rolePermissions,
+            [role]: updated,
+          },
         },
-      },
-    }));
+      };
+    });
   };
 
   const handleUserWindowOverride = (
@@ -357,8 +521,15 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     tabId: ControllableTab,
     value: WindowOverrideValue
   ) => {
-    if (targetUser.role === 'operador') return;
-    if (targetUser.role === 'admin_minesafe' && (tabId === 'visor_3d' || tabId === 'gateway_3d')) {
+    const roleKey: ControllableRoleKey =
+      targetUser.role === 'admin_minesafe'
+        ? 'admin_minesafe'
+        : targetUser.role === 'admin'
+        ? 'admin'
+        : targetUser.role === 'supervisor'
+        ? 'supervisor'
+        : 'operador';
+    if (isWindowPolicyLockedForRole(roleKey, tabId, draftConfig)) {
       return;
     }
     soundAlert.playFeedbackBeep();
@@ -404,9 +575,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   };
 
   const handleToggleEquiposSubTabRole = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
+    role: ControllableRoleKey,
     subId: EquiposSubTab
   ) => {
+    if (isWindowPolicyLockedForRole(role, 'equipos', draftConfig)) return;
     soundAlert.playFeedbackBeep();
     commitVisibilityChange((prev) => {
       const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
@@ -1080,82 +1252,173 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
             </div>
 
             {/* Quick Bulk Controls */}
-            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3 text-[11px]">
-              <div className="p-3 rounded-xl bg-indigo-950/25 border border-indigo-800/50 flex items-center justify-between gap-2">
-                <span className="font-bold text-indigo-300 flex items-center gap-1.5">
-                  <ShieldCheck className="w-3.5 h-3.5" /> Admin MineSafe
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('admin_minesafe', true)}
-                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
-                  >
-                    Ver permitidas
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('admin_minesafe', false)}
-                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
-                  >
-                    Bloquear
-                  </button>
-                </div>
-              </div>
+            {(() => {
+              const isOperadorPolicyLocked =
+                draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true;
+              const isAdminMs3DPolicyLocked =
+                draftConfig.visibility.policyLocks?.adminMineSafe3DPolicy ?? true;
 
-              <div className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-900/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-cyan-300 flex items-center gap-1.5">
-                  <Shield className="w-3.5 h-3.5" /> Admins
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('admin', true)}
-                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
-                  >
-                    Ver todas
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('admin', false)}
-                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
-                  >
-                    Bloquear
-                  </button>
-                </div>
-              </div>
+              return (
+                <div className="space-y-2.5">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-[11px]">
+                    <div className="p-3 rounded-xl bg-indigo-950/25 border border-indigo-800/50 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-indigo-300 flex items-center gap-1.5">
+                        <ShieldCheck className="w-3.5 h-3.5" /> Admin MineSafe
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleRolePolicyLock('admin_minesafe')}
+                          title={
+                            isAdminMs3DPolicyLocked
+                              ? 'Desbloquear política 3D para Admin MineSafe'
+                              : 'Volver a bloquear Visor 3D y Gateway 3D por política'
+                          }
+                          className={`px-2 py-1 rounded border font-bold inline-flex items-center gap-1 transition-colors ${
+                            isAdminMs3DPolicyLocked
+                              ? 'bg-amber-950/80 text-amber-300 border-amber-700/80 hover:bg-amber-900/60'
+                              : 'bg-indigo-950 text-indigo-200 border-indigo-700 hover:bg-indigo-900/60'
+                          }`}
+                        >
+                          {isAdminMs3DPolicyLocked ? (
+                            <>
+                              <Unlock className="w-3 h-3" />
+                              <span>Desbloq. Pol. 3D</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldAlert className="w-3 h-3" />
+                              <span>Bloq. Pol. 3D</span>
+                            </>
+                          )}
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('admin_minesafe', true)}
+                          className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                        >
+                          Ver permitidas
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('admin_minesafe', false)}
+                          className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                        >
+                          Bloquear
+                        </button>
+                      </div>
+                    </div>
 
-              <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-emerald-300 flex items-center gap-1.5">
-                  <Eye className="w-3.5 h-3.5" /> Supervisores
-                </span>
-                <div className="flex items-center gap-1.5">
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('supervisor', true)}
-                    className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
-                  >
-                    Ver todas
-                  </button>
-                  <button
-                    type="button"
-                    onClick={() => handleSetAllRoleWindows('supervisor', false)}
-                    className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
-                  >
-                    Bloquear
-                  </button>
-                </div>
-              </div>
+                    <div className="p-3 rounded-xl bg-cyan-950/20 border border-cyan-900/40 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-cyan-300 flex items-center gap-1.5">
+                        <Shield className="w-3.5 h-3.5" /> Admins
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('admin', true)}
+                          className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                        >
+                          Ver todas
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('admin', false)}
+                          className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                        >
+                          Bloquear
+                        </button>
+                      </div>
+                    </div>
 
-              <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 flex items-center justify-between gap-2">
-                <span className="font-bold text-amber-300 flex items-center gap-1.5">
-                  <HardHat className="w-3.5 h-3.5" /> Operadores
-                </span>
-                <span className="px-2 py-1 rounded bg-amber-950/80 text-amber-200 border border-amber-800/80 text-[10px] font-bold">
-                  Fija: Solo Alertas (Lectura)
-                </span>
-              </div>
-            </div>
+                    <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/40 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-emerald-300 flex items-center gap-1.5">
+                        <Eye className="w-3.5 h-3.5" /> Supervisores
+                      </span>
+                      <div className="flex items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('supervisor', true)}
+                          className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                        >
+                          Ver permitidas
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => handleSetAllRoleWindows('supervisor', false)}
+                          className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                        >
+                          Bloquear
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="p-3 rounded-xl bg-amber-950/20 border border-amber-900/40 flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-bold text-amber-300 flex items-center gap-1.5">
+                        <HardHat className="w-3.5 h-3.5" /> Operadores
+                      </span>
+                      <div className="flex flex-wrap items-center gap-1.5">
+                        <button
+                          type="button"
+                          onClick={() => handleToggleRolePolicyLock('operador')}
+                          title={
+                            isOperadorPolicyLocked
+                              ? 'Desbloquear política estricta de Operadores para gestionar sus ventanas'
+                              : 'Volver a bloquear Operadores por política (Solo Alertas lectura)'
+                          }
+                          className={`px-2 py-1 rounded border font-bold inline-flex items-center gap-1 transition-colors ${
+                            isOperadorPolicyLocked
+                              ? 'bg-amber-600 text-white border-amber-500 hover:bg-amber-500'
+                              : 'bg-amber-950/90 text-amber-300 border-amber-700 hover:bg-amber-900/60'
+                          }`}
+                        >
+                          {isOperadorPolicyLocked ? (
+                            <>
+                              <Unlock className="w-3 h-3" />
+                              <span>Desbloquear Política</span>
+                            </>
+                          ) : (
+                            <>
+                              <ShieldAlert className="w-3 h-3" />
+                              <span>Bloquear por Política</span>
+                            </>
+                          )}
+                        </button>
+                        {!isOperadorPolicyLocked && (
+                          <>
+                            <button
+                              type="button"
+                              onClick={() => handleSetAllRoleWindows('operador', true)}
+                              className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
+                            >
+                              Ver permitidas
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleSetAllRoleWindows('operador', false)}
+                              className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
+                            >
+                              Bloquear
+                            </button>
+                          </>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  <div className="flex flex-wrap items-center justify-between gap-2 px-3 py-2 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-400">
+                    <span className="flex items-center gap-1.5">
+                      <Lock className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      Haz clic en <strong className="text-amber-300">Bloqueada (Política)</strong> para desbloquear una ventana puntual por política.
+                    </span>
+                    <span className="flex items-center gap-1.5">
+                      <ShieldAlert className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      Usa el ícono de escudo junto a cualquier ventana para <strong className="text-slate-200">bloquearla por política</strong> (anula excepciones individuales).
+                    </span>
+                  </div>
+                </div>
+              );
+            })()}
 
             {/* Table of Controllable Windows */}
             <div className="overflow-x-auto border border-slate-800 rounded-xl">
@@ -1171,19 +1434,96 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 </thead>
                 <tbody className="divide-y divide-slate-800/80">
                   {CONTROLLABLE_WINDOWS.map((win) => {
-                    const isHardLockedForMineSafeAdmin =
-                      win.id === 'visor_3d' || win.id === 'gateway_3d';
-                    const mineSafeAdminVisible = isHardLockedForMineSafeAdmin
-                      ? false
-                      : draftConfig.visibility.rolePermissions.admin_minesafe?.[win.id] ??
-                        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe?.[win.id] ??
-                        true;
-                    const adminVisible = draftConfig.visibility.rolePermissions.admin[win.id];
-                    const monVisible =
-                      draftConfig.visibility.rolePermissions.supervisor?.[win.id] ??
-                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor?.[win.id] ??
-                      true;
-                    const opVisible = draftConfig.visibility.rolePermissions.operador[win.id];
+                    const renderRoleCell = (role: ControllableRoleKey) => {
+                      const policyLocked = isWindowPolicyLockedForRole(role, win.id, draftConfig);
+                      const isOperadorFixedReadOnlyAlertas =
+                        role === 'operador' &&
+                        win.id === 'alertas' &&
+                        !policyLocked &&
+                        (draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true) &&
+                        draftConfig.visibility.policyLocks?.roleWindowPolicyLocks?.operador?.alertas === undefined;
+
+                      const isVisible =
+                        draftConfig.visibility.rolePermissions[role]?.[win.id] ??
+                        DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[role]?.[win.id] ??
+                        false;
+
+                      if (policyLocked) {
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleWindowPolicyLock(role, win.id)}
+                            title={`Bloqueada por política para ${ROLE_DISPLAY_LABELS[role]}. Haz clic para desbloquear por política.`}
+                            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-300 border-slate-700 hover:border-amber-500/80 hover:bg-amber-950/40 hover:text-amber-200 transition-colors cursor-pointer"
+                          >
+                            <Lock
+                              className={`w-3.5 h-3.5 ${
+                                role === 'admin_minesafe' ? 'text-indigo-400' : 'text-amber-400'
+                              }`}
+                            />
+                            <span>Bloqueada (Política)</span>
+                          </button>
+                        );
+                      }
+
+                      if (isOperadorFixedReadOnlyAlertas) {
+                        return (
+                          <div className="inline-flex items-center gap-1">
+                            <button
+                              type="button"
+                              onClick={() => handleToggleRoleWindow('operador', 'alertas')}
+                              title="Solo Lectura (Fija) por política de Operador. Haz clic para gestionar visibilidad."
+                              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-bold text-[11px] border bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60 transition-colors"
+                            >
+                              <Unlock className="w-3.5 h-3.5" />
+                              <span>Solo Lectura (Fija)</span>
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => handleToggleWindowPolicyLock('operador', 'alertas')}
+                              title="Bloquear por política (impide acceso incluso con excepciones individuales)"
+                              className="p-1.5 rounded-lg border bg-slate-900 text-amber-400/80 border-slate-700 hover:bg-amber-950/60 hover:text-amber-300 hover:border-amber-600/80 transition-colors"
+                            >
+                              <ShieldAlert className="w-3.5 h-3.5" />
+                            </button>
+                          </div>
+                        );
+                      }
+
+                      return (
+                        <div className="inline-flex items-center gap-1">
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRoleWindow(role, win.id)}
+                            className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                              isVisible
+                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                            }`}
+                          >
+                            {isVisible ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Visible</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Bloqueada</span>
+                              </>
+                            )}
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleWindowPolicyLock(role, win.id)}
+                            title={`Bloquear "${win.label}" por política para ${ROLE_DISPLAY_LABELS[role]}`}
+                            className="p-1.5 rounded-lg border bg-slate-900 text-slate-400 border-slate-700 hover:bg-amber-950/60 hover:text-amber-300 hover:border-amber-600/80 transition-colors"
+                          >
+                            <ShieldAlert className="w-3.5 h-3.5" />
+                          </button>
+                        </div>
+                      );
+                    };
 
                     return (
                       <tr key={win.id} className="hover:bg-slate-800/30 transition-colors">
@@ -1191,101 +1531,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           <span className="font-bold text-white block">{win.label}</span>
                           <span className="text-[11px] text-slate-400">{win.description}</span>
                         </td>
-                        <td className="px-4 py-3 text-center">
-                          {isHardLockedForMineSafeAdmin ? (
-                            <span
-                              title="Por política MineSafe, este rol nunca puede abrir Inspector 3D ni Gateway 3D."
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700"
-                            >
-                              <Lock className="w-3.5 h-3.5 text-indigo-400" />
-                              <span>Bloqueada (Política)</span>
-                            </span>
-                          ) : (
-                            <button
-                              type="button"
-                              onClick={() => handleToggleRoleWindow('admin_minesafe', win.id)}
-                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                                mineSafeAdminVisible
-                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                              }`}
-                            >
-                              {mineSafeAdminVisible ? (
-                                <>
-                                  <Unlock className="w-3.5 h-3.5" />
-                                  <span>Visible</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Lock className="w-3.5 h-3.5" />
-                                  <span>Bloqueada</span>
-                                </>
-                              )}
-                            </button>
-                          )}
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleRoleWindow('admin', win.id)}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                              adminVisible
-                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                            }`}
-                          >
-                            {adminVisible ? (
-                              <>
-                                <Unlock className="w-3.5 h-3.5" />
-                                <span>Visible</span>
-                              </>
-                            ) : (
-                              <>
-                                <Lock className="w-3.5 h-3.5" />
-                                <span>Bloqueada</span>
-                              </>
-                            )}
-                          </button>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          <button
-                            type="button"
-                            onClick={() => handleToggleRoleWindow('supervisor', win.id)}
-                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                              monVisible
-                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                            }`}
-                          >
-                            {monVisible ? (
-                              <>
-                                <Unlock className="w-3.5 h-3.5" />
-                                <span>Visible</span>
-                              </>
-                            ) : (
-                              <>
-                                <Lock className="w-3.5 h-3.5" />
-                                <span>Bloqueada</span>
-                              </>
-                            )}
-                          </button>
-                        </td>
-                        <td className="px-4 py-3 text-center">
-                          {win.id === 'alertas' ? (
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-emerald-950/70 text-emerald-300 border-emerald-700">
-                              <Unlock className="w-3.5 h-3.5" />
-                              <span>Solo Lectura (Fija)</span>
-                            </span>
-                          ) : (
-                            <span
-                              title="Por política de seguridad, el Operador solo puede ver datos y descripciones de alertas"
-                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700"
-                            >
-                              <Lock className="w-3.5 h-3.5 text-amber-400" />
-                              <span>Bloqueada ({opVisible ? 'Restringida' : 'Política'})</span>
-                            </span>
-                          )}
-                        </td>
+                        <td className="px-4 py-3 text-center">{renderRoleCell('admin_minesafe')}</td>
+                        <td className="px-4 py-3 text-center">{renderRoleCell('admin')}</td>
+                        <td className="px-4 py-3 text-center">{renderRoleCell('supervisor')}</td>
+                        <td className="px-4 py-3 text-center">{renderRoleCell('operador')}</td>
                       </tr>
                     );
                   })}
@@ -1319,10 +1568,49 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   <tbody className="divide-y divide-slate-800/80">
                     {EQUIPOS_SUB_WINDOWS.map((sub) => {
                       const subPerms = draftConfig.visibility.equiposSubTabRolePermissions;
-                      const mineSafeAdminSubVisible = subPerms?.admin_minesafe?.[sub.id] ?? true;
-                      const adminSubVisible = subPerms?.admin?.[sub.id] ?? true;
-                      const monSubVisible = subPerms?.supervisor?.[sub.id] ?? true;
-                      const opSubVisible = subPerms?.operador?.[sub.id] ?? true;
+                      const renderSubRoleCell = (role: ControllableRoleKey) => {
+                        const equiposPolicyLocked = isWindowPolicyLockedForRole(role, 'equipos', draftConfig);
+                        if (equiposPolicyLocked) {
+                          return (
+                            <button
+                              type="button"
+                              onClick={() => handleToggleWindowPolicyLock(role, 'equipos')}
+                              title={`El módulo Equipos está bloqueado por política para ${ROLE_DISPLAY_LABELS[role]}. Clic para desbloquear por política.`}
+                              className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-300 border-slate-700 hover:border-amber-500/80 hover:bg-amber-950/40 hover:text-amber-200 transition-colors cursor-pointer"
+                            >
+                              <Lock className="w-3.5 h-3.5 text-amber-400" />
+                              <span>Bloqueada (Política)</span>
+                            </button>
+                          );
+                        }
+                        const isVisible =
+                          subPerms?.[role]?.[sub.id] ??
+                          DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions?.[role]?.[sub.id] ??
+                          false;
+                        return (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleEquiposSubTabRole(role, sub.id)}
+                            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
+                              isVisible
+                                ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
+                                : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
+                            }`}
+                          >
+                            {isVisible ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Visible</span>
+                              </>
+                            ) : (
+                              <>
+                                <Lock className="w-3.5 h-3.5" />
+                                <span>Bloqueada</span>
+                              </>
+                            )}
+                          </button>
+                        );
+                      };
 
                       return (
                         <tr key={sub.id} className="hover:bg-slate-800/30 transition-colors">
@@ -1330,81 +1618,10 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                             <span className="font-bold text-white block">{sub.label}</span>
                             <span className="text-[11px] text-slate-400">{sub.description}</span>
                           </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => handleToggleEquiposSubTabRole('admin_minesafe', sub.id)}
-                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                                mineSafeAdminSubVisible
-                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                              }`}
-                            >
-                              {mineSafeAdminSubVisible ? (
-                                <>
-                                  <Unlock className="w-3.5 h-3.5" />
-                                  <span>Visible</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Lock className="w-3.5 h-3.5" />
-                                  <span>Bloqueada</span>
-                                </>
-                              )}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => handleToggleEquiposSubTabRole('admin', sub.id)}
-                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                                adminSubVisible
-                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                              }`}
-                            >
-                              {adminSubVisible ? (
-                                <>
-                                  <Unlock className="w-3.5 h-3.5" />
-                                  <span>Visible</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Lock className="w-3.5 h-3.5" />
-                                  <span>Bloqueada</span>
-                                </>
-                              )}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <button
-                              type="button"
-                              onClick={() => handleToggleEquiposSubTabRole('supervisor', sub.id)}
-                              className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
-                                monSubVisible
-                                  ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
-                                  : 'bg-rose-950/70 text-rose-300 border-rose-700 hover:bg-rose-900/60'
-                              }`}
-                            >
-                              {monSubVisible ? (
-                                <>
-                                  <Unlock className="w-3.5 h-3.5" />
-                                  <span>Visible</span>
-                                </>
-                              ) : (
-                                <>
-                                  <Lock className="w-3.5 h-3.5" />
-                                  <span>Bloqueada</span>
-                                </>
-                              )}
-                            </button>
-                          </td>
-                          <td className="px-4 py-2.5 text-center">
-                            <span className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border bg-slate-900 text-slate-400 border-slate-700">
-                              <Lock className="w-3.5 h-3.5 text-amber-400" />
-                              <span>Bloqueada ({opSubVisible ? 'Política' : 'Política'})</span>
-                            </span>
-                          </td>
+                          <td className="px-4 py-2.5 text-center">{renderSubRoleCell('admin_minesafe')}</td>
+                          <td className="px-4 py-2.5 text-center">{renderSubRoleCell('admin')}</td>
+                          <td className="px-4 py-2.5 text-center">{renderSubRoleCell('supervisor')}</td>
+                          <td className="px-4 py-2.5 text-center">{renderSubRoleCell('operador')}</td>
                         </tr>
                       );
                     })}
@@ -1688,25 +1905,56 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         </button>
                       </div>
 
-                      {activeTargetUser.role === 'operador' ? (
-                        <div className="p-3.5 rounded-xl bg-amber-950/35 border border-amber-800/60 text-xs text-amber-200 flex items-start gap-2.5">
-                          <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                          <div>
-                            <strong className="block text-amber-100">
-                              Política Fija para Operador
-                            </strong>
-                            <span className="text-[11px] text-amber-200/90">
-                              Por limitación de rol, este usuario solo tiene acceso de lectura a los datos y descripción de alertas en el módulo <strong>Alertas</strong>. Las demás ventanas y ediciones permanecen bloqueadas.
-                            </span>
+                      {activeTargetUser.role === 'operador' && (
+                        <div className="p-3 rounded-xl bg-amber-950/35 border border-amber-800/60 text-xs text-amber-200 flex flex-wrap items-center justify-between gap-2.5">
+                          <div className="flex items-start gap-2 min-w-0">
+                            <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                            <div>
+                              <strong className="block text-amber-100">
+                                {(draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true)
+                                  ? 'Política Estricta Activa (Operador)'
+                                  : 'Política de Operador Desbloqueada'}
+                              </strong>
+                              <span className="text-[11px] text-amber-200/90">
+                                {(draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true)
+                                  ? 'Puedes desbloquear la política completa o hacer clic en cada ventana bloqueada por política.'
+                                  : 'Las ventanas desbloqueadas permiten configurar excepciones individuales para este usuario.'}
+                              </span>
+                            </div>
                           </div>
+                          <button
+                            type="button"
+                            onClick={() => handleToggleRolePolicyLock('operador')}
+                            className={`px-2.5 py-1.5 rounded-lg text-[11px] font-bold border inline-flex items-center gap-1.5 shrink-0 transition-colors ${
+                              (draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true)
+                                ? 'bg-amber-600 text-white border-amber-500 hover:bg-amber-500'
+                                : 'bg-slate-900 text-amber-300 border-amber-700 hover:bg-amber-950/60'
+                            }`}
+                          >
+                            {(draftConfig.visibility.policyLocks?.operadorStrictPolicy ?? true) ? (
+                              <>
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Desbloquear Política</span>
+                              </>
+                            ) : (
+                              <>
+                                <ShieldAlert className="w-3.5 h-3.5" />
+                                <span>Bloquear por Política</span>
+                              </>
+                            )}
+                          </button>
                         </div>
-                      ) : userOverrideSection === 'main' ? (
+                      )}
+
+                      {userOverrideSection === 'main' ? (
                         <div className="space-y-2 max-h-[420px] overflow-y-auto pr-1">
                           {CONTROLLABLE_WINDOWS.map((win) => {
-                            const isPolicyLockedForMineSafeAdmin =
-                              activeTargetUser.role === 'admin_minesafe' &&
-                              (win.id === 'visor_3d' || win.id === 'gateway_3d');
-                            const roleDefault = isPolicyLockedForMineSafeAdmin
+                            const isPolicyLocked = isWindowPolicyLockedForRole(
+                              roleKey,
+                              win.id,
+                              draftConfig
+                            );
+                            const roleDefault = isPolicyLocked
                               ? false
                               : draftConfig.visibility.rolePermissions[roleKey]?.[win.id] ??
                                 DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions[roleKey]?.[win.id] ??
@@ -1729,17 +1977,22 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                     {win.label}
                                   </span>
                                   <span className="text-[10px] text-slate-400">
-                                    {isPolicyLockedForMineSafeAdmin
-                                      ? 'Política fija: Bloqueada'
+                                    {isPolicyLocked
+                                      ? 'Política activa: Bloqueada (clic para desbloquear)'
                                       : `Por rol: ${roleDefault ? 'Visible' : 'Bloqueada'}`}
                                   </span>
                                 </div>
 
-                                {isPolicyLockedForMineSafeAdmin ? (
-                                  <span className="inline-flex items-center gap-1 px-2.5 py-1 rounded border bg-slate-950 border-indigo-900/60 text-indigo-300 text-[10px] font-bold shrink-0">
+                                {isPolicyLocked ? (
+                                  <button
+                                    type="button"
+                                    onClick={() => handleToggleWindowPolicyLock(roleKey, win.id)}
+                                    title={`Desbloquear "${win.label}" por política para ${ROLE_DISPLAY_LABELS[roleKey]}`}
+                                    className="inline-flex items-center gap-1 px-2.5 py-1 rounded border bg-slate-950 border-amber-700/70 text-amber-300 hover:bg-amber-950/60 hover:border-amber-500 text-[10px] font-bold shrink-0 transition-colors cursor-pointer"
+                                  >
                                     <Lock className="w-2.5 h-2.5" />
                                     <span>Bloqueada (Política)</span>
-                                  </span>
+                                  </button>
                                 ) : (
                                   <div className="flex items-center gap-1 shrink-0 text-[10px] font-bold">
                                     <button
@@ -1782,6 +2035,14 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                       <Lock className="w-2.5 h-2.5" />
                                       <span>Bloquear</span>
                                     </button>
+                                    <button
+                                      type="button"
+                                      onClick={() => handleToggleWindowPolicyLock(roleKey, win.id)}
+                                      title={`Bloquear "${win.label}" por política para todo el rol ${ROLE_DISPLAY_LABELS[roleKey]}`}
+                                      className="p-1 rounded border bg-slate-950 text-slate-400 border-slate-800 hover:text-amber-300 hover:border-amber-600/80 transition-colors"
+                                    >
+                                      <ShieldAlert className="w-3 h-3" />
+                                    </button>
                                   </div>
                                 )}
                               </div>
@@ -1790,7 +2051,25 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         </div>
                       ) : (
                         <div className="space-y-2.5">
-                          {!isParentEquiposVisible && (
+                          {isWindowPolicyLockedForRole(roleKey, 'equipos', draftConfig) ? (
+                            <div className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-700/70 flex flex-col gap-2">
+                              <div className="flex items-start gap-2 text-[11px] text-amber-200">
+                                <Lock className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                                <span>
+                                  La pestaña <strong>Equipos y Arriendos</strong> está bloqueada por política para el rol{' '}
+                                  <strong>{ROLE_DISPLAY_LABELS[roleKey]}</strong>. Desbloquéala por política para gestionar sus sub-ventanas.
+                                </span>
+                              </div>
+                              <button
+                                type="button"
+                                onClick={() => handleToggleWindowPolicyLock(roleKey, 'equipos')}
+                                className="self-start px-2.5 py-1 rounded-md bg-amber-600 hover:bg-amber-500 text-white text-[11px] font-bold inline-flex items-center gap-1.5 transition-colors"
+                              >
+                                <Unlock className="w-3.5 h-3.5" />
+                                <span>Desbloquear &quot;Equipos y Arriendos&quot; por Política</span>
+                              </button>
+                            </div>
+                          ) : !isParentEquiposVisible && (
                             <div className="p-2.5 rounded-lg bg-amber-950/50 border border-amber-700/70 flex flex-col gap-2">
                               <div className="flex items-start gap-2 text-[11px] text-amber-200">
                                 <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
@@ -2652,6 +2931,68 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       {/* SUB-TAB 4: GESTIÓN DE DISPOSITIVOS (SENSORES Y GATEWAYS)             */}
       {/* ==================================================================== */}
       {subTab === 'devices' && (
+        <div className="space-y-6">
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+            <div>
+              <h3 className="text-sm font-bold text-white">
+                Modo Lista Controlada de Dispositivos
+              </h3>
+              <p className="text-[11px] text-slate-400 mt-0.5">
+                Cuando está activo, los paneles operativos muestran únicamente los dispositivos registrados y asignados a cada empresa (los equipos en inventario quedan ocultos hasta ser asignados).
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={() => {
+                soundAlert.playFeedbackBeep();
+                setDraftConfig((prev) => ({
+                  ...prev,
+                  onlyShowRegisteredDevices: !prev.onlyShowRegisteredDevices,
+                }));
+              }}
+              className={`px-3.5 py-2 rounded-xl font-bold text-xs border shrink-0 transition-colors cursor-pointer ${
+                draftConfig.onlyShowRegisteredDevices
+                  ? 'bg-emerald-950/80 text-emerald-300 border-emerald-600'
+                  : 'bg-slate-950 text-slate-300 border-slate-700'
+              }`}
+            >
+              {draftConfig.onlyShowRegisteredDevices
+                ? 'Activo: Solo Registrados y Asignados'
+                : 'Desactivado: Mostrar Todos RTDB'}
+            </button>
+          </div>
+
+          <DeviceRegistryAndAssignmentPanel
+            currentUser={currentUser}
+            organizations={organizations}
+            sites={sites}
+            catalogDevices={catalogDevices || registeredDevices}
+            rtdbDevices={rtdbDevices}
+            onDeviceUpdated={(saved) => {
+              setDraftConfig((prev) => {
+                const list = prev.registeredDevices || [];
+                const exists = list.some((d) => d.id === saved.id);
+                return {
+                  ...prev,
+                  registeredDevices: exists
+                    ? list.map((d) => (d.id === saved.id ? saved : d))
+                    : [...list, saved],
+                };
+              });
+              onCatalogDeviceUpdated?.(saved);
+            }}
+            onDeviceDeleted={(devId) => {
+              setDraftConfig((prev) => ({
+                ...prev,
+                registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== devId),
+              }));
+              onCatalogDeviceDeleted?.(devId);
+            }}
+          />
+        </div>
+      )}
+
+      {false && subTab === 'devices' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
           {/* Columna Izquierda: Formulario para agregar Sensor o Gateway */}
           <div className="lg:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">

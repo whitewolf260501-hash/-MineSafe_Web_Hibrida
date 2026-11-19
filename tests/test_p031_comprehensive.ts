@@ -11,8 +11,10 @@ import {
   fetchPaginatedTelemetryHistory,
   isEquiposSubTabVisibleForUser,
   isTabVisibleForUser,
+  isWindowPolicyLockedForRole,
   mapRTDBContractToRental,
   normalizeHeroTitleScale,
+  sanitizeDeviceHardwareId,
   validateRentalDatesAndCost,
 } from '../src/services/firebase';
 import {
@@ -30,14 +32,17 @@ import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspecto
 import {
   assignWorkersToCrew,
   buildCrewMemberFromUser,
+  belongsToOrganization,
   canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
+  canDistributeDeviceInsideOrg,
   canManageContractsAndPayments,
   canManageCrews,
   canManageOrganizationHierarchy,
   canModifyTargetUser,
   canProvisionUserInOrganization,
+  canRegisterAndAssignIoTDevices,
   canViewSystemUsersPanel,
   createEmptyTelemetryVariables,
   DEFAULT_ORGANIZATION_ID,
@@ -45,9 +50,12 @@ import {
   filterScopedUsers,
   findUserEmailConflictInOrg,
   getAuthorizedOrganizationIds,
+  isUnassignedDeviceOrg,
+  resolveDeviceAssignmentStatus,
   resolveEffectiveOrgId,
   resolveScopedCurrentSite,
   selectBestLoginProfileForEmail,
+  UNASSIGNED_DEVICE_ORG_ID,
 } from '../src/utils/accessControl';
 import {
   expandHierarchyRowsToEntities,
@@ -1560,16 +1568,21 @@ async function runTests() {
   const chartAndUsersSrc = readRepoFile('src/components/InteractiveDeviceChartAndUsers.tsx');
 
   assert.ok(
-    !chartAndUsersSrc.includes('Usuarios del Sistema') &&
+    chartAndUsersSrc.includes("const isSuperAdmin = currentUser?.role === 'superadmin'") &&
+      chartAndUsersSrc.includes('const showUsersPanel = isSuperAdmin') &&
+      chartAndUsersSrc.includes('{showUsersPanel && (') &&
+      chartAndUsersSrc.includes('Usuarios del Sistema') &&
       chartAndUsersSrc.includes('{betweenWelcomeAndChart}') &&
+      dashboardViewSrc.includes("const isSuperAdmin = currentUser?.role === 'superadmin'") &&
       dashboardViewSrc.includes('betweenWelcomeAndChart={consolidatedAtmosphericSection}') &&
       dashboardViewSrc.includes('Nodos Activos del Total') &&
-      !dashboardViewSrc.includes('Personal en Turno') &&
-      !dashboardViewSrc.includes('Profundidad Máxima'),
-    'DashboardView and InteractiveDeviceChartAndUsers remove Usuarios del Sistema, Personal en Turno, Profundidad Máxima, and render atmospheric cards before sector chart'
+      dashboardViewSrc.includes('{isSuperAdmin && (') &&
+      dashboardViewSrc.includes('Personal en Turno') &&
+      dashboardViewSrc.includes('Profundidad Máxima'),
+    'DashboardView and InteractiveDeviceChartAndUsers gate Usuarios del Sistema, Personal en Turno, and Profundidad Máxima exclusively to SuperAdmin while rendering atmospheric cards before sector chart'
   );
 
-  console.log('✅ 20. Dashboard layout order & streamlined summary cards passed');
+  console.log('✅ 20. Dashboard layout order & SuperAdmin-exclusive panels passed');
 
   // ---------------------------------------------------------------------------
   // 21. Validación RUT chileno mediante Módulo 11
@@ -1768,36 +1781,50 @@ async function runTests() {
     'Landing removes university/prototype copy, uses Empresa o Institución, and exposes theme toggle'
   );
 
-  // 24.3 Dashboard: sin Ventilación/Ruido/Oxígeno ni Prevencionista
+  // 24.3 Dashboard: 4 tarjetas rápidas atmosféricas visibles a todos los roles; Batería IoT, Flujo de Ventilación, Ruido y Oxígeno solo SuperAdmin
+  const dualCardsSrc = readRepoFile('src/components/DualReadingSensorCards.tsx');
+  const monitoringViewSrc = readRepoFile('src/components/MonitoringView.tsx');
   assert.ok(
-    !chartAndUsersSrc.includes('Ventilación') &&
-      !chartAndUsersSrc.includes('Ruido') &&
-      !chartAndUsersSrc.includes('Oxígeno') &&
-      !dashboardViewSrc.includes('Prevencionista'),
-    'Dashboard and bar chart eliminate Ventilación, Ruido, Oxígeno, and Prevencionista'
+    chartAndUsersSrc.includes('...(isSuperAdmin') &&
+      chartAndUsersSrc.includes('Flujo de Ventilación') &&
+      chartAndUsersSrc.includes('Nivel de Ruido') &&
+      chartAndUsersSrc.includes('Oxígeno (O₂)') &&
+      !dualCardsSrc.includes('{isSuperAdmin && (() => {') &&
+      dualCardsSrc.includes('...(isSuperAdmin') &&
+      dualCardsSrc.includes('BATERÍA DISPOSITIVO IoT') &&
+      dualCardsSrc.includes('FLUJO DE VENTILACIÓN') &&
+      dualCardsSrc.includes('TEMPERATURA AMBIENTE') &&
+      dualCardsSrc.includes('MATERIAL PARTICULADO (PM2.5)') &&
+      dashboardViewSrc.includes('Incidencias y Alertas Activas en Faena'),
+    'DualReadingSensorCards shows 4 atmospheric quick cards to all roles while restricting Battery, Ventilation Flow, O2, Noise and bottom incidents strictly to SuperAdmin'
   );
 
-  // 24.4 Gateway & Alarma: Admin de empresa controla alarma propia y propaga a nodos, sin Resetear/Encender Luz
+  // 24.4 Gateway & Alarma: Admin de empresa controla alarma propia; Resetear Página/Gateway, Luz Manual e IDs ESP32 solo SuperAdmin
   assert.equal(canControlMineAlarm(admA, 'org-alpha').allowed, true, 'Company admin can control own org alarm');
   assert.equal(canControlMineAlarm(admA, 'org-beta').allowed, false, 'Company admin cannot control other org alarm');
   assert.equal(canControlMineAlarm(sa, 'org-beta').allowed, true, 'SuperAdmin can control any org alarm');
   assert.equal(canControlMineAlarm(monA, 'org-alpha').allowed, false, 'Supervisor cannot control alarm');
   assert.equal(canControlMineAlarm(opA, 'org-alpha').allowed, false, 'Operador cannot control alarm');
   assert.ok(
-    !gatewaySecSrc.includes('Resetear Página') &&
-      !gatewaySecSrc.includes('Encender Luz') &&
-      !gatewaySecSrc.includes('ESP-WROOM-32'),
-    'ESP32GatewaySection hides Resetear Página, Encender Luz, and raw ESP32 identifiers'
+    gatewaySecSrc.includes("const isSuperAdmin = Boolean(isSuperAdminProp || currentUser?.role === 'superadmin')") &&
+      gatewaySecSrc.includes('Controles Técnicos ESP32 (Solo SuperAdmin)') &&
+      gatewaySecSrc.includes('Resetear Página') &&
+      gatewaySecSrc.includes('Resetear Gateway') &&
+      gatewaySecSrc.includes('Encender Luz') &&
+      monitoringViewSrc.includes("const isSuperAdmin = currentUser?.role === 'superadmin'") &&
+      monitoringViewSrc.includes('Firebase RTDB: {FIREBASE_PROJECT_ID}'),
+    'ESP32GatewaySection and MonitoringView restrict hardware reset/light controls, ESP32 IDs and Firebase RTDB badge strictly to SuperAdmin'
   );
 
-  // 24.5 Alertas: sin Probar Sirena, deduplicación, supresión tras cierre manual, detalle in-place, rango de fechas
+  // 24.5 Alertas: Probar Sirena exclusivo SuperAdmin, deduplicación, supresión tras cierre manual, detalle in-place, rango de fechas
   const resolutionModalSrc = readRepoFile('src/components/AlertResolutionModal.tsx');
   assert.ok(
-    !alertsViewSrc.includes('Probar Sirena') &&
+    alertsViewSrc.includes("const isSuperAdmin = currentUser?.role === 'superadmin'") &&
+      alertsViewSrc.includes('Probar Sirena') &&
       alertsViewSrc.includes('alertToInspect') &&
       alertsViewSrc.includes('auditDateFrom') &&
       alertsViewSrc.includes('auditDateTo'),
-    'AlertsView removes Probar Sirena, adds in-place detail modal, and date-range filters in Auditoría'
+    'AlertsView gates Probar Sirena strictly to SuperAdmin, preserves in-place detail modal, and keeps date-range filters in Auditoría'
   );
   assert.ok(
     resolutionModalSrc.includes('MIN_TITLE_LEN') && resolutionModalSrc.includes('MIN_COMMENT_LEN'),
@@ -1859,6 +1886,274 @@ async function runTests() {
   assert.equal(afterManualClose.newEvents.length, 0, 'Does not duplicate alert immediately after manual resolution');
 
   console.log('✅ 24. All 6 audit modules (hierarchy, auth/landing, dashboard, gateway, monitoring, alerts) passed');
+
+  // ---------------------------------------------------------------------------
+  // 25. Registro, Clasificación (Gateway/Nodo) y Asignación Exclusiva IoT
+  // ---------------------------------------------------------------------------
+  assert.equal(sanitizeDeviceHardwareId('  device_38A839E81F84 '), 'device_38A839E81F84');
+  assert.equal(sanitizeDeviceHardwareId('NODO U.01/A'), 'NODO_U_01_A');
+  assert.throws(() => sanitizeDeviceHardwareId('ab'), /al menos 3 caracteres/i);
+
+  // Permisos exclusivos SuperAdmin y Admin MineSafe para registrar/asignar IDs IoT
+  assert.equal(canRegisterAndAssignIoTDevices(sa).allowed, true, 'SuperAdmin can register/assign IoT devices');
+  assert.equal(canRegisterAndAssignIoTDevices(admMs).allowed, true, 'Admin MineSafe can register/assign IoT devices');
+  assert.equal(canRegisterAndAssignIoTDevices(admA).allowed, false, 'Company Admin cannot register new IoT hardware IDs');
+  assert.equal(canRegisterAndAssignIoTDevices(monG).allowed, false, 'Supervisor cannot register IoT devices');
+  assert.equal(canRegisterAndAssignIoTDevices(opG).allowed, false, 'Operador cannot register IoT devices');
+  assert.equal(
+    canRegisterAndAssignIoTDevices({ ...admMs, status: 'inactivo' }).allowed,
+    false,
+    'Inactive Admin MineSafe is blocked'
+  );
+
+  // Distribución interna de Company Admin (solo dispositivos existentes de su propia empresa)
+  assert.equal(
+    canDistributeDeviceInsideOrg(admA, null, 'org-alpha').allowed,
+    false,
+    'Company Admin cannot create unregistered device IDs'
+  );
+  assert.equal(
+    canDistributeDeviceInsideOrg(admA, { id: 'GW-INV-1', organizationId: UNASSIGNED_DEVICE_ORG_ID }, 'org-alpha').allowed,
+    false,
+    'Company Admin cannot claim unassigned inventory devices'
+  );
+  assert.equal(
+    canDistributeDeviceInsideOrg(admA, { id: 'GW-B-1', organizationId: 'org-beta' }, 'org-alpha').allowed,
+    false,
+    'Company Admin cannot modify devices from another company'
+  );
+  assert.equal(
+    canDistributeDeviceInsideOrg(admA, { id: 'GW-A-1', organizationId: 'org-alpha' }, 'org-alpha').allowed,
+    true,
+    'Company Admin can distribute existing devices already assigned to their own company'
+  );
+  assert.equal(
+    canDistributeDeviceInsideOrg(admMs, null, 'org-alpha').allowed,
+    true,
+    'Admin MineSafe can create/assign devices globally'
+  );
+
+  // Estados de asignación y aislamiento de inventario global (__unassigned__)
+  assert.equal(isUnassignedDeviceOrg(undefined), true);
+  assert.equal(isUnassignedDeviceOrg(''), true);
+  assert.equal(isUnassignedDeviceOrg(UNASSIGNED_DEVICE_ORG_ID), true);
+  assert.equal(isUnassignedDeviceOrg('org-a'), false);
+  assert.equal(
+    belongsToOrganization(UNASSIGNED_DEVICE_ORG_ID, DEFAULT_ORGANIZATION_ID),
+    false,
+    'Unassigned inventory devices never leak into default organization'
+  );
+  assert.equal(
+    belongsToOrganization(UNASSIGNED_DEVICE_ORG_ID, 'all'),
+    false,
+    'Unassigned inventory devices never leak into operational dashboards'
+  );
+
+  assert.equal(
+    resolveDeviceAssignmentStatus({ organizationId: UNASSIGNED_DEVICE_ORG_ID, sectorName: 'En inventario' }),
+    'en_inventario'
+  );
+  assert.equal(
+    resolveDeviceAssignmentStatus({ organizationId: 'org-a', sectorName: 'Pendiente de asignación' }),
+    'asignado_empresa'
+  );
+  assert.equal(
+    resolveDeviceAssignmentStatus({ organizationId: 'org-a', siteId: 'site-1', siteName: 'Faena Norte', sectorName: 'Pendiente de asignación' }),
+    'asignado_faena'
+  );
+  assert.equal(
+    resolveDeviceAssignmentStatus({ organizationId: 'org-a', siteId: 'site-1', siteName: 'Faena Norte', sectorId: 'sec-1', sectorName: 'Galería Sur' }),
+    'asignado_sector'
+  );
+
+  // Verificación estática de reglas RTDB y componentes de registro/asignación
+  assert.ok(rtdbRules.rules.catalogo_dispositivos, 'RTDB rules define /catalogo_dispositivos');
+  assert.ok(
+    rtdbRules.rules.catalogo_dispositivos.$deviceId['.write'].includes("admin_minesafe") &&
+      rtdbRules.rules.catalogo_dispositivos.$deviceId['.write'].includes("data.exists() && newData.exists()"),
+    '/catalogo_dispositivos allows SuperAdmin & Admin MineSafe full management while restricting Company Admin to existing devices'
+  );
+  assert.ok(
+    rtdbRules.rules.dispositivos.$deviceId['.write'].includes("data.exists() && data.child('organizationId').val() !== '__unassigned__'"),
+    '/dispositivos blocks Company Admin from creating brand-new device IDs or claiming unassigned inventory'
+  );
+  assert.ok(
+    !rtdbRules.rules.configuracion_plataforma['.write'].includes('admin_minesafe'),
+    'Platform master config remains strictly SuperAdmin-only'
+  );
+
+  const deviceRegistryPanelSrc = readRepoFile('src/components/DeviceRegistryAndAssignmentPanel.tsx');
+  assert.ok(
+    firebaseSvcSrc.includes('registerIoTDeviceInRTDB') &&
+      firebaseSvcSrc.includes('assignOrTransferIoTDeviceInRTDB') &&
+      firebaseSvcSrc.includes('subscribeToDeviceCatalog') &&
+      deviceRegistryPanelSrc.includes('Dejar en Inventario (Sin asignar)') &&
+      deviceRegistryPanelSrc.includes('Asignar directamente a Empresa + Faena') &&
+      deviceRegistryPanelSrc.includes('Historial de Trazabilidad del Equipo') &&
+      bulkViewSrc.includes('DeviceRegistryAndAssignmentPanel') &&
+      controlViewSrc.includes('DeviceRegistryAndAssignmentPanel'),
+    'UI and Firebase service wire full IoT device registration, classification, transfer, unassignment, and traceability'
+  );
+
+  console.log('✅ 25. IoT Device Registration, Classification (Gateway/Nodo), Exclusive RBAC & Traceability passed');
+
+  // 26. Dynamic Policy Lock / Unlock in Control Maestro (Desbloquear por Política & Bloquear por Política)
+  assert.equal(
+    isWindowPolicyLockedForRole('operador', 'dashboard', DEFAULT_PLATFORM_CONFIG),
+    true,
+    'Operador dashboard is policy-locked by default'
+  );
+  assert.equal(
+    isWindowPolicyLockedForRole('admin_minesafe', 'visor_3d', DEFAULT_PLATFORM_CONFIG),
+    true,
+    'Admin MineSafe visor_3d is policy-locked by default'
+  );
+  assert.equal(
+    isWindowPolicyLockedForRole('admin', 'reportes', DEFAULT_PLATFORM_CONFIG),
+    false,
+    'Admin reportes is NOT policy-locked by default'
+  );
+
+  // 26a. Granular unlock by policy for Operador (dashboard only)
+  const granularUnlockOpConfig: PlatformConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      rolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+        operador: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
+          dashboard: true,
+        },
+      },
+      policyLocks: {
+        operadorStrictPolicy: true,
+        adminMineSafe3DPolicy: true,
+        roleWindowPolicyLocks: {
+          operador: { dashboard: false },
+        },
+      },
+    },
+  };
+  assert.equal(
+    isTabVisibleForUser('dashboard', opA, granularUnlockOpConfig),
+    true,
+    'Granular policy unlock allows Operador to view dashboard'
+  );
+  assert.equal(
+    isTabVisibleForUser('faenas', opA, granularUnlockOpConfig),
+    false,
+    'Other Operador tabs remain policy-locked when only dashboard is unlocked'
+  );
+
+  // 26b. Global unlock of Operador strict policy + Equipos sub-tabs
+  const globalUnlockOpConfig: PlatformConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      rolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+        operador: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
+          dashboard: true,
+          monitoreo: true,
+          equipos: true,
+        },
+      },
+      equiposSubTabRolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!,
+        operador: {
+          asignaciones: true,
+          arriendos: false,
+          pagos: false,
+          inventario: true,
+        },
+      },
+      policyLocks: {
+        operadorStrictPolicy: false,
+        adminMineSafe3DPolicy: false,
+        roleWindowPolicyLocks: {},
+      },
+    },
+  };
+  assert.equal(isTabVisibleForUser('monitoreo', opA, globalUnlockOpConfig), true);
+  assert.equal(isTabVisibleForUser('equipos', opA, globalUnlockOpConfig), true);
+  assert.equal(isEquiposSubTabVisibleForUser('asignaciones', opA, globalUnlockOpConfig), true);
+  assert.equal(isEquiposSubTabVisibleForUser('arriendos', opA, globalUnlockOpConfig), false);
+  assert.equal(
+    isTabVisibleForUser('empresas', opA, globalUnlockOpConfig),
+    false,
+    'Empresas remains policy-protected for Operador unless explicitly unlocked by cell'
+  );
+
+  // 26c. Unlocking Admin MineSafe 3D policy allows visor_3d & gateway_3d
+  const unlocked3DAdminMsConfig: PlatformConfig = {
+    ...globalUnlockOpConfig,
+    visibility: {
+      ...globalUnlockOpConfig.visibility,
+      rolePermissions: {
+        ...globalUnlockOpConfig.visibility.rolePermissions,
+        admin_minesafe: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin_minesafe!,
+          visor_3d: true,
+          gateway_3d: true,
+        },
+      },
+    },
+  };
+  assert.equal(isTabVisibleForUser('visor_3d', admMs, unlocked3DAdminMsConfig), true);
+  assert.equal(isTabVisibleForUser('gateway_3d', admMs, unlocked3DAdminMsConfig), true);
+
+  // 26d. Explicitly locking ANY window by policy for Admin overrides both rolePermissions AND userOverrides
+  const adminPolicyLockedConfig: PlatformConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      rolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
+        admin: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.admin,
+          reportes: true,
+        },
+      },
+      userOverrides: {
+        [admA.id]: { reportes: 'allow' },
+      },
+      policyLocks: {
+        operadorStrictPolicy: true,
+        adminMineSafe3DPolicy: true,
+        roleWindowPolicyLocks: {
+          admin: { reportes: true },
+        },
+      },
+    },
+  };
+  assert.equal(
+    isWindowPolicyLockedForRole('admin', 'reportes', adminPolicyLockedConfig),
+    true,
+    'Admin reportes is explicitly locked by policy'
+  );
+  assert.equal(
+    isTabVisibleForUser('reportes', admA, adminPolicyLockedConfig),
+    false,
+    'Policy lock overrides both rolePermissions=true and userOverrides=allow for Admin'
+  );
+  assert.equal(
+    isTabVisibleForUser('reportes', sa, adminPolicyLockedConfig),
+    true,
+    'SuperAdmin is never locked out by role policy locks'
+  );
+
+  // 26e. Static check that SuperAdminControlView exposes interactive policy lock & unlock buttons
+  assert.ok(
+    controlViewSrc.includes('handleToggleRolePolicyLock') &&
+      controlViewSrc.includes('handleToggleWindowPolicyLock') &&
+      controlViewSrc.includes('Desbloquear Política') &&
+      controlViewSrc.includes('Bloquear por Política'),
+    'SuperAdminControlView exposes both role-level and per-window policy lock/unlock controls'
+  );
+
+  console.log('✅ 26. Dynamic Policy Lock / Unlock (Global & Per-Window across all roles) passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

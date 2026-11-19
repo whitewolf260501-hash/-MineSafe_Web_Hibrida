@@ -13,6 +13,12 @@ import {
   Users,
   Server,
   Cpu,
+  Database,
+  Terminal,
+  AlertTriangle,
+  Wind,
+  Volume2,
+  HeartPulse,
 } from 'lucide-react';
 import {
   SensorDevice,
@@ -23,6 +29,7 @@ import {
   UserProfile,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
+import { FIREBASE_PROJECT_ID } from '../services/firebase';
 import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 
 interface MonitoringViewProps {
@@ -56,6 +63,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
 }) => {
   const canSimulateEvents = isAnyAdminRole(currentUser?.role);
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser?.role);
+  const isSuperAdmin = currentUser?.role === 'superadmin';
   const isCompanyAdmin = currentUser?.role === 'admin';
 
   const [searchQuery, setSearchQuery] = useState('');
@@ -64,8 +72,11 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   const [selectedSector, setSelectedSector] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
   const [selectedCategory, setSelectedCategory] = useState<'all' | 'gateway' | 'nodo'>('all');
+  const [showSuperAdminTechView, setShowSuperAdminTechView] = useState<boolean>(true);
 
   const selectedDevice = devices.find((d) => d.id === selectedSensorId);
+  const isNodeDevice = (d: SensorDevice) =>
+    d.deviceCategory === 'sensor' || d.deviceCategory === 'nodo';
 
   // Build available hierarchy options from props + live devices
   const availableSites = useMemo(() => {
@@ -133,7 +144,11 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
         device.name.toLowerCase().includes(q) ||
         (device.sectorName || '').toLowerCase().includes(q) ||
         (device.siteName || '').toLowerCase().includes(q) ||
-        (device.crewName || '').toLowerCase().includes(q);
+        (device.crewName || '').toLowerCase().includes(q) ||
+        (isSuperAdmin &&
+          (device.id.toLowerCase().includes(q) ||
+            (device.localIp || '').toLowerCase().includes(q) ||
+            (device.via || '').toLowerCase().includes(q)));
 
       const matchesSite =
         selectedSiteFilter === 'all' ||
@@ -152,7 +167,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
 
       const matchesStatus = selectedStatus === 'all' || device.status === selectedStatus;
 
-      const isGateway = device.deviceCategory !== 'sensor';
+      const isGateway = !isNodeDevice(device);
       const matchesCategory =
         selectedCategory === 'all' ||
         (selectedCategory === 'gateway' && isGateway) ||
@@ -211,7 +226,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
 
   const getDeviceCategoryLabel = (device: SensorDevice) => {
     if (device.deviceCategory === 'gateway') return 'Gateway';
-    if (device.deviceCategory === 'sensor') return 'Nodo Sensor';
+    if (isNodeDevice(device)) return 'Nodo Sensor';
     return 'Gateway + Nodo';
   };
 
@@ -229,11 +244,33 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               Red de Gateways y Nodos ambientales desplegados por faena, cuadrilla y sector en{' '}
               <span className="text-slate-200 font-medium">{currentSite.name}</span>.
             </p>
-            <div className="flex items-center gap-2 mt-2">
+            <div className="flex flex-wrap items-center gap-2 mt-2">
               <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-medium bg-emerald-950/70 border border-emerald-700/60 text-emerald-300">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Telemetría en tiempo real activa</span>
               </span>
+              {isSuperAdmin && (
+                <>
+                  <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-purple-950/70 border border-purple-700/60 text-purple-200">
+                    <Database className="w-3 h-3 text-purple-400" />
+                    <span>Firebase RTDB: {FIREBASE_PROJECT_ID}</span>
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => setShowSuperAdminTechView((prev) => !prev)}
+                    className={`inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-semibold border transition-colors cursor-pointer ${
+                      showSuperAdminTechView
+                        ? 'bg-cyan-950/80 border-cyan-500/70 text-cyan-200'
+                        : 'bg-slate-900 border-slate-700 text-slate-400 hover:text-white'
+                    }`}
+                  >
+                    <Terminal className="w-3 h-3" />
+                    <span>
+                      {showSuperAdminTechView ? 'Diagnóstico Técnico: Activo' : 'Activar Diagnóstico Técnico'}
+                    </span>
+                  </button>
+                </>
+              )}
             </div>
           </div>
 
@@ -381,7 +418,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {filteredDevices.map((device) => {
           const isSelected = selectedSensorId === device.id;
-          const isGateway = device.deviceCategory !== 'sensor';
+          const isGateway = !isNodeDevice(device);
           const coDisplay =
             device.status === 'desconectado'
               ? '--'
@@ -452,7 +489,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                   </div>
                 </div>
 
-                {/* Live Key Metrics Mini-Grid (Temp, CO, PM2.5 — NO Ventilación/O2/Ruido) */}
+                {/* Live Key Metrics Mini-Grid */}
                 <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 text-xs mb-3">
                   <div>
                     <span className="text-[10px] text-slate-400 block">Temp.</span>
@@ -477,6 +514,54 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                     </span>
                   </div>
                 </div>
+
+                {/* SuperAdmin Extended Technical Diagnostic Block */}
+                {isSuperAdmin && showSuperAdminTechView && (
+                  <div className="mb-3 p-2.5 rounded-lg bg-purple-950/20 border border-purple-800/40 space-y-2 text-[11px]">
+                    <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] font-mono">
+                      <span className="text-purple-300 font-bold truncate">ID: {device.id}</span>
+                      <span className="text-slate-400">
+                        {device.via || 'WIFI_DIRECTO'}
+                        {device.localIp ? ` · ${device.localIp}` : ''}
+                      </span>
+                    </div>
+                    <div className="grid grid-cols-3 gap-1.5 pt-1.5 border-t border-purple-900/40 font-mono text-[10px]">
+                      <div>
+                        <span className="text-slate-400 block">O₂</span>
+                        <span className="text-emerald-300 font-bold">
+                          {device.metrics.o2 ?? 20.9}%
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">Ventilación</span>
+                        <span className="text-cyan-300 font-bold">
+                          {device.metrics.flujoAire ?? 0} m/s
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400 block">Ruido</span>
+                        <span className="text-amber-300 font-bold">
+                          {device.metrics.ruido ?? 0} dB
+                        </span>
+                      </div>
+                    </div>
+                    {(device.parentGatewayId || (device.faultFields && device.faultFields.length > 0)) && (
+                      <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-purple-900/40 text-[10px]">
+                        {device.parentGatewayId && (
+                          <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 font-mono text-slate-300">
+                            GW Padre: {device.parentGatewayId}
+                          </span>
+                        )}
+                        {device.faultFields && device.faultFields.length > 0 && (
+                          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-950/80 border border-amber-700/70 text-amber-300 font-mono">
+                            <AlertTriangle className="w-2.5 h-2.5" />
+                            Falla ADC: {device.faultFields.join(', ')}
+                          </span>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                )}
               </div>
 
               {/* Footer: Real Battery Status, Signal & Last Ping */}
@@ -606,7 +691,77 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                   {selectedDevice.rawPM25 !== undefined ? 'Prev: < 350 ADC' : 'Límite: 50 µg/m³'}
                 </span>
               </div>
+              {isSuperAdmin && (
+                <>
+                  <div className="p-3 bg-purple-950/20 rounded-lg border border-purple-800/50">
+                    <span className="text-[11px] text-purple-300 flex items-center gap-1">
+                      <HeartPulse className="w-3 h-3" /> Oxígeno (O₂)
+                    </span>
+                    <span className="text-lg font-bold text-emerald-300 font-mono tabular-nums">
+                      {selectedDevice.metrics.o2 ?? 20.9} %
+                    </span>
+                    <span className="text-[10px] text-slate-400 block">Mín seguro: ≥ 19.5 %</span>
+                  </div>
+                  <div className="p-3 bg-purple-950/20 rounded-lg border border-purple-800/50">
+                    <span className="text-[11px] text-purple-300 flex items-center gap-1">
+                      <Wind className="w-3 h-3" /> Flujo de Ventilación
+                    </span>
+                    <span className="text-lg font-bold text-cyan-300 font-mono tabular-nums">
+                      {selectedDevice.metrics.flujoAire ?? 0} m/s
+                    </span>
+                    <span className="text-[10px] text-slate-400 block">Rango DS 132: 0.5 – 3.5 m/s</span>
+                  </div>
+                  <div className="p-3 bg-purple-950/20 rounded-lg border border-purple-800/50">
+                    <span className="text-[11px] text-purple-300 flex items-center gap-1">
+                      <Volume2 className="w-3 h-3" /> Nivel de Ruido
+                    </span>
+                    <span className="text-lg font-bold text-amber-300 font-mono tabular-nums">
+                      {selectedDevice.metrics.ruido ?? 0} dB
+                    </span>
+                    <span className="text-[10px] text-slate-400 block">Límite 8h: &lt; 85 dB</span>
+                  </div>
+                </>
+              )}
             </div>
+
+            {/* SuperAdmin Technical Hardware & RTDB Diagnostics */}
+            {isSuperAdmin && (
+              <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50 text-xs space-y-2">
+                <div className="flex items-center justify-between">
+                  <span className="font-bold uppercase tracking-wider text-[11px] text-purple-300 flex items-center gap-1.5">
+                    <Terminal className="w-3.5 h-3.5" />
+                    Diagnóstico Técnico de Hardware &amp; RTDB (SuperAdmin)
+                  </span>
+                  <span className="font-mono text-[10px] text-purple-200 bg-purple-950 px-2 py-0.5 rounded border border-purple-800">
+                    {FIREBASE_PROJECT_ID}
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 font-mono text-[11px]">
+                  <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block font-sans">ID Hardware</span>
+                    <span className="text-cyan-300 break-all">{selectedDevice.id}</span>
+                  </div>
+                  <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block font-sans">IP Local / Vía</span>
+                    <span className="text-slate-200">
+                      {selectedDevice.localIp || 'N/D'} · {selectedDevice.via || 'WIFI_DIRECTO'}
+                    </span>
+                  </div>
+                  <div className="bg-slate-950/70 p-2 rounded border border-slate-800">
+                    <span className="text-[10px] text-slate-400 block font-sans">Estado / GW Padre</span>
+                    <span className="text-slate-200">
+                      {selectedDevice.assignmentStatus || 'asignado'}
+                      {selectedDevice.parentGatewayId ? ` · ${selectedDevice.parentGatewayId}` : ''}
+                    </span>
+                  </div>
+                </div>
+                {selectedDevice.faultFields && selectedDevice.faultFields.length > 0 && (
+                  <div className="text-[11px] text-amber-300 font-mono">
+                    Canales ADC en falla detectados: {selectedDevice.faultFields.join(', ')}
+                  </div>
+                )}
+              </div>
+            )}
 
             {/* Test Simulation Controls (Solo SuperAdmin / Admin) */}
             {canSimulateEvents && (

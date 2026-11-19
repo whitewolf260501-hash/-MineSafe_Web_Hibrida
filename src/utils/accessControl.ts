@@ -1,6 +1,52 @@
-import { CrewMember, MiningCrew, MiningSite, Organization, TelemetryVariable, UserProfile, UserRole } from '../types';
+import {
+  CrewMember,
+  DeviceAssignmentStatus,
+  MiningCrew,
+  MiningSite,
+  Organization,
+  RegisteredDeviceConfig,
+  SensorDevice,
+  TelemetryVariable,
+  UserProfile,
+  UserRole,
+} from '../types';
 
 export const DEFAULT_ORGANIZATION_ID = 'org-minesafe-principal';
+export const UNASSIGNED_DEVICE_ORG_ID = '__unassigned__';
+
+export function isUnassignedDeviceOrg(orgId?: string | null): boolean {
+  const normalized = (orgId || '').trim();
+  return !normalized || normalized === UNASSIGNED_DEVICE_ORG_ID;
+}
+
+export function resolveDeviceAssignmentStatus(
+  device?: Pick<
+    RegisteredDeviceConfig | SensorDevice,
+    'organizationId' | 'siteId' | 'siteName' | 'sectorId' | 'sectorName' | 'crewId' | 'assignmentStatus'
+  > | null
+): DeviceAssignmentStatus {
+  if (!device || isUnassignedDeviceOrg(device.organizationId)) {
+    return 'en_inventario';
+  }
+  const hasExplicitSector = Boolean(
+    (device.sectorId && !device.sectorId.startsWith('sec-device_') && !device.sectorId.startsWith('sec-NODO')) ||
+      device.crewId ||
+      (device.sectorName &&
+        device.sectorName.trim() !== '' &&
+        device.sectorName.trim() !== 'Sin asignar' &&
+        device.sectorName.trim() !== 'En inventario' &&
+        device.sectorName.trim() !== 'Faena Minera' &&
+        device.sectorName.trim() !== 'Sector Operativo' &&
+        device.sectorName.trim() !== 'Pendiente de asignación')
+  );
+  if (hasExplicitSector) {
+    return 'asignado_sector';
+  }
+  if (device.siteId || (device.siteName && device.siteName.trim() !== '')) {
+    return 'asignado_faena';
+  }
+  return 'asignado_empresa';
+}
 
 export function isGlobalMineSafeAdmin(role?: UserRole | null): boolean {
   return role === 'superadmin' || role === 'admin_minesafe';
@@ -159,6 +205,69 @@ export function canControlMineAlarm(
   };
 }
 
+export function canRegisterAndAssignIoTDevices(
+  actingUser: UserProfile | null | undefined
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa o autorizada.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason:
+      'Solo SuperAdmin y Admin MineSafe pueden registrar nuevos IDs de dispositivos IoT (Gateway/Nodo) o asignarlos/reasignarlos entre empresas y faenas.',
+  };
+}
+
+export function canDistributeDeviceInsideOrg(
+  actingUser: UserProfile | null | undefined,
+  existingDevice: Pick<RegisteredDeviceConfig, 'id' | 'organizationId'> | null | undefined,
+  targetOrgId?: string
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa o autorizada.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  if (actingUser.role !== 'admin') {
+    return {
+      allowed: false,
+      reason: 'Solo Administradores autorizados pueden asignar dispositivos a sectores o cuadrillas.',
+    };
+  }
+  const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+  if (targetOrgId && targetOrgId !== actorOrg) {
+    return {
+      allowed: false,
+      reason: 'Un Administrador de Empresa solo puede distribuir dispositivos dentro de su propia empresa.',
+    };
+  }
+  if (!existingDevice) {
+    return {
+      allowed: false,
+      reason:
+        'Un Administrador de Empresa no puede registrar nuevos IDs de hardware. Solicite a MineSafe (SuperAdmin o Admin MineSafe) dar de alta y asignar el dispositivo a su empresa.',
+    };
+  }
+  if (isUnassignedDeviceOrg(existingDevice.organizationId)) {
+    return {
+      allowed: false,
+      reason:
+        'Este dispositivo está en inventario global sin asignar. Solo SuperAdmin o Admin MineSafe pueden asignarlo a una empresa.',
+    };
+  }
+  if (existingDevice.organizationId !== actorOrg) {
+    return {
+      allowed: false,
+      reason: 'Este dispositivo pertenece a otra empresa y no puede ser modificado por tu cuenta.',
+    };
+  }
+  return { allowed: true };
+}
+
 export function resolveEffectiveOrgId(
   actingUser: UserProfile | null,
   selectedOrgId: string,
@@ -175,6 +284,7 @@ export function belongsToOrganization(
   entityOrgId: string | undefined,
   effectiveOrgId: string
 ): boolean {
+  if (entityOrgId === UNASSIGNED_DEVICE_ORG_ID) return false;
   if (effectiveOrgId === 'all') return true;
   return (entityOrgId || DEFAULT_ORGANIZATION_ID) === effectiveOrgId;
 }

@@ -100,6 +100,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   platformConfig,
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin';
+  const isOperador = currentUser?.role === 'operador';
   const activeDevice = devices.find((d) => d.id === activeTelemetryDeviceId) || devices[0];
   const canSeeEquipos = isTabVisibleForUser('equipos', currentUser ?? null, platformConfig);
   const canSeeAlertas = isTabVisibleForUser('alertas', currentUser ?? null, platformConfig);
@@ -208,12 +209,13 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        {/* Operational Summary (3 cards standard; + Personal en Turno & Profundidad Máxima for SuperAdmin) */}
-        <div
-          className={`relative z-10 grid grid-cols-1 ${
-            isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-5' : 'sm:grid-cols-3'
-          } gap-4 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400`}
-        >
+        {/* Operational Summary (Hidden for Operador; 3 cards standard; + Personal en Turno & Profundidad Máxima for SuperAdmin) */}
+        {!isOperador && (
+          <div
+            className={`relative z-10 grid grid-cols-1 ${
+              isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-5' : 'sm:grid-cols-3'
+            } gap-4 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400`}
+          >
           <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
             <span className="block text-slate-400">Nodos Activos del Total</span>
             <span className="text-base font-bold text-emerald-400 tabular-nums mt-0.5 block">
@@ -269,13 +271,14 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               </div>
             </>
           )}
-        </div>
+          </div>
+        )}
 
         {/* ==============================================================
             BIENVENIDA, MONITOREO ATMOSFÉRICO CONSOLIDADO Y GRÁFICO SECTORIAL
            ============================================================== */}
-        {(appCfg?.showChartsAndUsers ?? true) ? (
-          <div className="relative z-10 mb-8">
+        {(isOperador || (appCfg?.showChartsAndUsers ?? true)) ? (
+          <div className={`relative z-10 ${isOperador ? '' : 'mb-8'}`}>
             <InteractiveDeviceChartAndUsers
               currentUser={currentUser}
               usersList={usersList}
@@ -303,9 +306,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
 
         {/* ==============================================================
-            GATEWAYS POR SECTOR Y CONTROL DE ALARMA
+            GATEWAYS POR SECTOR Y CONTROL DE ALARMA (Oculto para Operador)
            ============================================================== */}
-        {(appCfg?.showESP32Section ?? true) && (
+        {!isOperador && (appCfg?.showESP32Section ?? true) && (
           <ESP32GatewaySection
             devices={devices}
             activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
@@ -325,9 +328,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </section>
 
       {/* ==============================================================
-          CAPABILITIES GRID (Optional via Master Control)
+          CAPABILITIES GRID (Oculto para Operador; opcional en Control Maestro)
          ============================================================== */}
-      {(appCfg?.showCapabilitiesGrid ?? true) && (
+      {!isOperador && (appCfg?.showCapabilitiesGrid ?? true) && (
         <section className="space-y-4">
           <div className="text-center max-w-2xl mx-auto mb-8">
             <span className="text-xs uppercase font-bold tracking-widest text-cyan-400">

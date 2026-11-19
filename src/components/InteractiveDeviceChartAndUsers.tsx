@@ -892,96 +892,98 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
         </div>
 
-        {/* Operational Stat Strip (2 cards standard; + Dispositivo Activo & Alertas de Faena for SuperAdmin) */}
-        <div
-          className={`grid grid-cols-1 ${
-            isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-2'
-          } gap-3 sm:gap-4 mt-5 pt-4 border-t border-slate-800/80 relative z-10`}
-        >
-          <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
-            <div>
-              <span className="text-xs text-slate-400 font-medium block">Nodos Activos del Total</span>
-              <div className="mt-1 text-2xl font-black text-emerald-400 tabular-nums">
-                {onlineNodesCount}{' '}
-                <span className="text-xs font-normal text-slate-400">/ {totalNodesCount} nodos</span>
+        {/* Operational Stat Strip (Hidden for Operador; 2 cards standard; + Dispositivo Activo & Alertas de Faena for SuperAdmin) */}
+        {currentUser?.role !== 'operador' && (
+          <div
+            className={`grid grid-cols-1 ${
+              isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-2'
+            } gap-3 sm:gap-4 mt-5 pt-4 border-t border-slate-800/80 relative z-10`}
+          >
+            <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
+              <div>
+                <span className="text-xs text-slate-400 font-medium block">Nodos Activos del Total</span>
+                <div className="mt-1 text-2xl font-black text-emerald-400 tabular-nums">
+                  {onlineNodesCount}{' '}
+                  <span className="text-xs font-normal text-slate-400">/ {totalNodesCount} nodos</span>
+                </div>
+              </div>
+              <div className="w-9 h-9 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-400">
+                <Cpu className="w-4 h-4" />
               </div>
             </div>
-            <div className="w-9 h-9 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-400">
-              <Cpu className="w-4 h-4" />
-            </div>
-          </div>
 
-          <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
-            <div>
-              <span className="text-xs text-slate-400 font-medium block">Sectores con Cobertura</span>
-              <div className="mt-1 text-2xl font-black text-cyan-300 tabular-nums">
-                {availableSectors.length}{' '}
-                <span className="text-xs font-normal text-slate-400">
-                  {availableSectors.length === 1 ? 'sector monitoreado' : 'sectores monitoreados'}
-                </span>
-              </div>
-            </div>
-            <div className="w-9 h-9 rounded-xl bg-cyan-950/60 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
-              <MapPin className="w-4 h-4" />
-            </div>
-          </div>
-
-          {isSuperAdmin && (
-            <>
-              <div className="bg-purple-950/25 rounded-xl p-3.5 border border-purple-800/50 flex flex-col justify-between gap-1.5">
-                <div className="flex items-center justify-between gap-2">
-                  <span className="text-xs text-purple-200 font-medium">Dispositivo Activo</span>
-                  <span className="text-[10px] font-mono text-purple-300 truncate max-w-[120px]">
-                    {activeSelectedDevice?.id || 'N/D'}
+            <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
+              <div>
+                <span className="text-xs text-slate-400 font-medium block">Sectores con Cobertura</span>
+                <div className="mt-1 text-2xl font-black text-cyan-300 tabular-nums">
+                  {availableSectors.length}{' '}
+                  <span className="text-xs font-normal text-slate-400">
+                    {availableSectors.length === 1 ? 'sector monitoreado' : 'sectores monitoreados'}
                   </span>
                 </div>
-                {devices.length > 0 && onSelectDevice ? (
-                  <select
-                    value={activeSelectedDevice?.id || ''}
-                    onChange={(e) => onSelectDevice(e.target.value)}
-                    aria-label="Seleccionar dispositivo activo"
-                    className="w-full bg-slate-950 border border-purple-700/60 rounded-lg px-2 py-1 text-xs font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400"
-                  >
-                    {devices.map((d) => (
-                      <option key={d.id} value={d.id}>
-                        {d.name} ({d.sectorName || d.id})
-                      </option>
-                    ))}
-                  </select>
-                ) : (
-                  <span className="text-sm font-bold text-white truncate">
-                    {activeSelectedDevice?.name || 'Sin equipo'}
-                  </span>
-                )}
               </div>
+              <div className="w-9 h-9 rounded-xl bg-cyan-950/60 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
+                <MapPin className="w-4 h-4" />
+              </div>
+            </div>
 
-              <div className="bg-purple-950/25 rounded-xl p-3.5 border border-purple-800/50 flex items-center justify-between">
-                <div>
-                  <span className="text-xs text-purple-200 font-medium block">Alertas de Faena</span>
-                  <div
-                    className={`mt-1 text-2xl font-black tabular-nums ${
-                      activeAlertCount > 0 ? 'text-amber-400' : 'text-emerald-400'
-                    }`}
-                  >
-                    {activeAlertCount}{' '}
-                    <span className="text-xs font-normal text-slate-400">
-                      {activeAlertCount === 1 ? 'alerta' : 'alertas'}
+            {isSuperAdmin && (
+              <>
+                <div className="bg-purple-950/25 rounded-xl p-3.5 border border-purple-800/50 flex flex-col justify-between gap-1.5">
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="text-xs text-purple-200 font-medium">Dispositivo Activo</span>
+                    <span className="text-[10px] font-mono text-purple-300 truncate max-w-[120px]">
+                      {activeSelectedDevice?.id || 'N/D'}
                     </span>
                   </div>
+                  {devices.length > 0 && onSelectDevice ? (
+                    <select
+                      value={activeSelectedDevice?.id || ''}
+                      onChange={(e) => onSelectDevice(e.target.value)}
+                      aria-label="Seleccionar dispositivo activo"
+                      className="w-full bg-slate-950 border border-purple-700/60 rounded-lg px-2 py-1 text-xs font-semibold text-cyan-200 focus:outline-none focus:border-cyan-400"
+                    >
+                      {devices.map((d) => (
+                        <option key={d.id} value={d.id}>
+                          {d.name} ({d.sectorName || d.id})
+                        </option>
+                      ))}
+                    </select>
+                  ) : (
+                    <span className="text-sm font-bold text-white truncate">
+                      {activeSelectedDevice?.name || 'Sin equipo'}
+                    </span>
+                  )}
                 </div>
-                <div
-                  className={`w-9 h-9 rounded-xl border flex items-center justify-center ${
-                    activeAlertCount > 0
-                      ? 'bg-amber-950/70 border-amber-700/70 text-amber-400'
-                      : 'bg-emerald-950/60 border-emerald-800/60 text-emerald-400'
-                  }`}
-                >
-                  <Bell className="w-4 h-4" />
+
+                <div className="bg-purple-950/25 rounded-xl p-3.5 border border-purple-800/50 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-purple-200 font-medium block">Alertas de Faena</span>
+                    <div
+                      className={`mt-1 text-2xl font-black tabular-nums ${
+                        activeAlertCount > 0 ? 'text-amber-400' : 'text-emerald-400'
+                      }`}
+                    >
+                      {activeAlertCount}{' '}
+                      <span className="text-xs font-normal text-slate-400">
+                        {activeAlertCount === 1 ? 'alerta' : 'alertas'}
+                      </span>
+                    </div>
+                  </div>
+                  <div
+                    className={`w-9 h-9 rounded-xl border flex items-center justify-center ${
+                      activeAlertCount > 0
+                        ? 'bg-amber-950/70 border-amber-700/70 text-amber-400'
+                        : 'bg-emerald-950/60 border-emerald-800/60 text-emerald-400'
+                    }`}
+                  >
+                    <Bell className="w-4 h-4" />
+                  </div>
                 </div>
-              </div>
-            </>
-          )}
-        </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
 
       {/* Consolidated Atmospheric Cards placed between Welcome Banner and Bar Chart */}

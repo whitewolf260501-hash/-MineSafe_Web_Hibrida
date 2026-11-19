@@ -1795,8 +1795,12 @@ async function runTests() {
       dualCardsSrc.includes('FLUJO DE VENTILACIÓN') &&
       dualCardsSrc.includes('TEMPERATURA AMBIENTE') &&
       dualCardsSrc.includes('MATERIAL PARTICULADO (PM2.5)') &&
+      dashboardViewSrc.includes("const isOperador = currentUser?.role === 'operador'") &&
+      dashboardViewSrc.includes('{!isOperador && (appCfg?.showESP32Section ?? true)') &&
+      dashboardViewSrc.includes('{!isOperador && (appCfg?.showCapabilitiesGrid ?? true)') &&
+      chartAndUsersSrc.includes("{currentUser?.role !== 'operador' && (") &&
       dashboardViewSrc.includes('Incidencias y Alertas Activas en Faena'),
-    'DualReadingSensorCards shows 4 atmospheric quick cards to all roles while restricting Battery, Ventilation Flow, O2, Noise and bottom incidents strictly to SuperAdmin'
+    'DualReadingSensorCards shows 4 atmospheric quick cards to all roles, Dashboard restricts Operador to header/welcome/atmospheric/chart, and SuperAdmin retains exclusive diagnostic sections'
   );
 
   // 24.4 Gateway & Alarma: Admin de empresa controla alarma propia; Resetear Página/Gateway, Luz Manual e IDs ESP32 solo SuperAdmin

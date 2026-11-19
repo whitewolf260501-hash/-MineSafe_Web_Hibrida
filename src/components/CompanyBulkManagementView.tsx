@@ -63,6 +63,8 @@ import {
   parseBulkInput,
 } from '../utils/bulkCompanyImport';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import { validatePasswordPolicy } from '../utils/passwordPolicy';
+import { RutInput } from './RutInput';
 import { soundAlert } from '../services/audioAlert';
 
 interface CompanyBulkManagementViewProps {
@@ -187,11 +189,23 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     return authorizedOrganizations[0]?.id || currentUser.organizationId || DEFAULT_ORGANIZATION.id;
   }, [activeOrganizationId, authorizedOrganizations, currentUser.organizationId]);
 
+  const visibleEntityOptions = useMemo(
+    () =>
+      isGlobalAdmin
+        ? ENTITY_OPTIONS
+        : ENTITY_OPTIONS.filter((opt) =>
+            opt.id === 'sites' || opt.id === 'crews' || opt.id === 'users' || opt.id === 'rentals'
+          ),
+    [isGlobalAdmin]
+  );
+
   const [bulkOrgId, setBulkOrgId] = useState<string>(defaultTargetOrg);
-  const [entityType, setEntityType] = useState<BulkEntityType>('hierarchy');
+  const [entityType, setEntityType] = useState<BulkEntityType>(
+    isGlobalAdmin ? 'hierarchy' : 'sites'
+  );
   const [rawContent, setRawContent] = useState<string>('');
   const [createAuthAccounts, setCreateAuthAccounts] = useState<boolean>(false);
-  const [defaultAuthPassword, setDefaultAuthPassword] = useState<string>('MineSafe2026*');
+  const [defaultAuthPassword, setDefaultAuthPassword] = useState<string>('');
   const [sendResetEmail, setSendResetEmail] = useState<boolean>(true);
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [progress, setProgress] = useState<{ completed: number; total: number; label: string } | null>(null);
@@ -625,14 +639,16 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     if (
       (entityType === 'users' ||
         (entityType === 'bundle' && (bundleParsePreview?.users.validRows.length || 0) > 0)) &&
-      createAuthAccounts &&
-      defaultAuthPassword.length < 8
+      createAuthAccounts
     ) {
-      showNotice(
-        'error',
-        'Si activas la creación en Firebase Auth, la contraseña inicial por defecto debe tener mínimo 8 caracteres.'
-      );
-      return;
+      const pwPolicy = validatePasswordPolicy(defaultAuthPassword);
+      if (!pwPolicy.valid) {
+        showNotice(
+          'error',
+          `Contraseña inicial por defecto inválida: ${pwPolicy.errors.join(' ')}`
+        );
+        return;
+      }
     }
 
     setIsExecuting(true);
@@ -747,7 +763,9 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
-                  Jerarquía Organizacional y Carga Masiva
+                  {isGlobalAdmin
+                    ? 'Empresas, Jerarquía y Carga Masiva'
+                    : 'Mi Organización · Estructura y Carga Masiva'}
                 </h1>
                 <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-cyan-950 text-cyan-200 border border-cyan-700">
                   {isSuperAdmin
@@ -760,7 +778,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
               <p className="text-xs sm:text-sm text-slate-300 mt-1">
                 {isGlobalAdmin
                   ? 'Administra empresas, vincula la cadena completa Empresa → Faena → Cuadrilla → Sector → Dispositivo (Gateway o Nodo) y ejecuta cargas masivas CSV/JSON.'
-                  : 'Gestiona la estructura de tu empresa (Cuadrillas → Faenas, Sectores → Cuadrillas y Dispositivos → Sectores) de forma individual o mediante carga masiva.'}
+                  : 'Administra exclusivamente la operación interna de tu empresa: faenas, sectores, cuadrillas, personal y contratos de arriendo.'}
               </p>
             </div>
           </div>
@@ -1342,36 +1360,13 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
 
               <div className="grid grid-cols-2 gap-2.5">
                 <div>
-                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa (Módulo 11)</label>
-                  <input
-                    type="text"
+                  <label className="text-slate-300 font-semibold block mb-1">RUT Empresa</label>
+                  <RutInput
                     value={orgRut}
-                    onChange={(e) => setOrgRut(e.target.value)}
-                    onBlur={() => {
-                      const res = validateChileanRut(orgRut);
-                      if (res.valid && res.formatted) setOrgRut(res.formatted);
-                    }}
+                    onChange={setOrgRut}
+                    allowEmpty
                     placeholder="76.543.210-3"
-                    className={`w-full px-3 py-2 rounded-lg bg-slate-950 border text-white font-mono ${
-                      orgRut.trim() && !isPlaceholderRut(orgRut)
-                        ? validateChileanRut(orgRut).valid
-                          ? 'border-emerald-500/70 focus:border-emerald-400'
-                          : 'border-rose-500/80 focus:border-rose-400'
-                        : 'border-slate-700'
-                    }`}
                   />
-                  {orgRut.trim() && !isPlaceholderRut(orgRut) && (() => {
-                    const res = validateChileanRut(orgRut);
-                    return (
-                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {res.valid
-                          ? `✓ RUT válido (${res.formatted})`
-                          : res.expectedVerifierDigit
-                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
-                          : `✗ ${res.error}`}
-                      </p>
-                    );
-                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 font-semibold block mb-1">Estado Operativo</label>
@@ -1614,7 +1609,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                     2. Tipo de Datos a Importar
                   </label>
                   <div className="grid grid-cols-1 gap-2">
-                    {ENTITY_OPTIONS.map((opt) => (
+                    {visibleEntityOptions.map((opt) => (
                       <button
                         key={opt.id}
                         type="button"
@@ -1656,16 +1651,49 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                     {createAuthAccounts ? (
                       <div className="space-y-2 pl-1">
                         <div>
-                          <label className="text-slate-400 block mb-1 text-[11px]">
-                            Contraseña inicial por defecto (mín. 8 caracteres, si falta columna password)
-                          </label>
+                          <div className="flex items-center justify-between gap-2 mb-1">
+                            <label className="text-slate-400 text-[11px]">
+                              Contraseña temporal segura (si falta columna password)
+                            </label>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                const upper = 'ABCDEFGHJKLMNPQRSTUVWXYZ';
+                                const lower = 'abcdefghijkmnopqrstuvwxyz';
+                                const nums = '23456789';
+                                const syms = '!@#$%&*';
+                                const all = upper + lower + nums + syms;
+                                const pick = (chars: string) =>
+                                  chars[Math.floor(Math.random() * chars.length)];
+                                const raw = [
+                                  pick(upper),
+                                  pick(lower),
+                                  pick(nums),
+                                  pick(syms),
+                                  ...Array.from({ length: 8 }, () => pick(all)),
+                                ]
+                                  .sort(() => Math.random() - 0.5)
+                                  .join('');
+                                setDefaultAuthPassword(raw);
+                              }}
+                              className="text-[10px] font-semibold text-cyan-300 hover:text-cyan-200 underline"
+                            >
+                              Generar aleatoria
+                            </button>
+                          </div>
                           <input
                             type="text"
                             minLength={8}
+                            placeholder="Define una clave segura temporal..."
                             value={defaultAuthPassword}
                             onChange={(e) => setDefaultAuthPassword(e.target.value)}
                             className="w-full px-2.5 py-1.5 rounded bg-slate-900 border border-slate-700 text-white font-mono"
                           />
+                          {defaultAuthPassword && !validatePasswordPolicy(defaultAuthPassword).valid && (
+                            <p className="text-[10px] text-rose-400 mt-1">
+                              {validatePasswordPolicy(defaultAuthPassword).errors.join(' ')}
+                            </p>
+                          )}
                         </div>
                         <label className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-400">
                           <input

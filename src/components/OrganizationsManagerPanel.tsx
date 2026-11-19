@@ -16,6 +16,8 @@ import {
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import { isGlobalMineSafeAdmin } from '../utils/accessControl';
+import { RutInput } from './RutInput';
 
 interface OrganizationsManagerPanelProps {
   currentUser: UserProfile;
@@ -32,14 +34,10 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
   onSelectOrganization,
   onOrganizationsChanged,
 }) => {
-  const canManageOrgs =
-    currentUser.role === 'superadmin' ||
-    currentUser.role === 'admin_minesafe' ||
-    currentUser.role === 'admin';
-  const canDeleteAnyOrg =
-    currentUser.role === 'superadmin' || currentUser.role === 'admin_minesafe';
-  const canViewAllOrganizations =
-    currentUser.role === 'superadmin' || currentUser.role === 'admin_minesafe';
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
+  const canManageOrgs = isGlobalAdmin;
+  const canDeleteAnyOrg = isGlobalAdmin;
+  const canViewAllOrganizations = isGlobalAdmin;
 
   const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
   const [orgName, setOrgName] = useState('');
@@ -205,37 +203,14 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
               <div className="grid grid-cols-2 gap-2">
                 <div>
                   <label className="text-slate-300 font-semibold block mb-1">
-                    RUT Empresa (Módulo 11)
+                    RUT Empresa
                   </label>
-                  <input
-                    type="text"
+                  <RutInput
                     value={orgRut}
-                    onChange={(e) => setOrgRut(e.target.value)}
-                    onBlur={() => {
-                      const res = validateChileanRut(orgRut);
-                      if (res.valid && res.formatted) setOrgRut(res.formatted);
-                    }}
+                    onChange={setOrgRut}
+                    allowEmpty
                     placeholder="76.543.210-3"
-                    className={`w-full px-3 py-2 rounded-lg bg-slate-950 border text-white font-mono ${
-                      orgRut.trim() && !isPlaceholderRut(orgRut)
-                        ? validateChileanRut(orgRut).valid
-                          ? 'border-emerald-500/70 focus:border-emerald-400'
-                          : 'border-rose-500/80 focus:border-rose-400'
-                        : 'border-slate-700'
-                    }`}
                   />
-                  {orgRut.trim() && !isPlaceholderRut(orgRut) && (() => {
-                    const res = validateChileanRut(orgRut);
-                    return (
-                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {res.valid
-                          ? `✓ RUT válido (${res.formatted})`
-                          : res.expectedVerifierDigit
-                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
-                          : `✗ ${res.error}`}
-                      </p>
-                    );
-                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 font-semibold block mb-1">Estado Operativo</label>

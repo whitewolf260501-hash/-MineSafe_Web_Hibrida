@@ -101,7 +101,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isOperador = currentUser?.role === 'operador';
-  const activeDevice = devices.find((d) => d.id === activeTelemetryDeviceId) || devices[0];
+
+  const { activeDevice, isOperatorUnassigned } = useMemo(() => {
+    if (isOperador && currentUser) {
+      const cleanUserId = (currentUser.id || '').trim();
+      const cleanEmail = (currentUser.email || '').trim().toLowerCase();
+      const cleanRut = (currentUser.rut || '').trim().toLowerCase().replace(/[^0-9k]/g, '');
+      const userCrews = crews.filter((c) =>
+        (c.members || []).some(
+          (m) =>
+            (cleanUserId && m.userId === cleanUserId) ||
+            (cleanEmail && (m.email || '').trim().toLowerCase() === cleanEmail) ||
+            (cleanRut && cleanRut.length >= 7 && (m.rut || '').trim().toLowerCase().replace(/[^0-9k]/g, '') === cleanRut)
+        )
+      );
+      const allowedSectors = new Set<string>();
+      const sec = (currentUser.assignedSector || '').trim().toLowerCase();
+      if (sec && sec !== 'sin asignar' && sec !== 'faena minera central') {
+        allowedSectors.add(sec);
+      }
+      userCrews.forEach((c) => {
+        if (c.sectorName?.trim()) allowedSectors.add(c.sectorName.trim().toLowerCase());
+      });
+      const assignedCode = (currentUser.assignedDeviceCode || '').trim().toLowerCase();
+      const crewIds = new Set(userCrews.map((c) => c.id));
+      const matched = devices.filter(
+        (d) =>
+          (assignedCode &&
+            ((d.code || '').trim().toLowerCase() === assignedCode ||
+              (d.id || '').trim().toLowerCase() === assignedCode)) ||
+          (d.crewId && crewIds.has(d.crewId)) ||
+          allowedSectors.has((d.sectorName || '').trim().toLowerCase())
+      );
+      if (matched.length === 0) {
+        return { activeDevice: undefined, isOperatorUnassigned: true };
+      }
+      const chosen = matched.find((d) => d.id === activeTelemetryDeviceId) || matched[0];
+      return { activeDevice: chosen, isOperatorUnassigned: false };
+    }
+    return {
+      activeDevice: devices.find((d) => d.id === activeTelemetryDeviceId) || devices[0],
+      isOperatorUnassigned: false,
+    };
+  }, [isOperador, currentUser, crews, devices, activeTelemetryDeviceId]);
   const canSeeEquipos = isTabVisibleForUser('equipos', currentUser ?? null, platformConfig);
   const canSeeAlertas = isTabVisibleForUser('alertas', currentUser ?? null, platformConfig);
   const canSeeMonitoreo = isTabVisibleForUser('monitoreo', currentUser ?? null, platformConfig);
@@ -194,20 +236,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const hasAnyDualBlock =
     showDualDiagnosticRow || showDualQuickCore || showDualBatteryAirflow || showDualO2Noise;
   const showDual = (appCfg?.showDualSensorCards ?? true) && Boolean(activeDevice) && hasAnyDualBlock;
-  const consolidatedAtmosphericSection =
-    showDual && activeDevice ? (
-      <div className="relative z-10">
-        <DualReadingSensorCards
-          device={activeDevice}
-          isSuperAdmin={isSuperAdmin}
-          quickVariables={variables}
-          showDiagnosticRow={showDualDiagnosticRow}
-          showQuickCore={showDualQuickCore}
-          showBatteryAndAirflow={showDualBatteryAirflow}
-          showO2AndNoise={showDualO2Noise}
-        />
+  const consolidatedAtmosphericSection = isOperatorUnassigned ? (
+    <div className="relative z-10 mb-6 p-6 rounded-2xl bg-slate-900/80 border border-amber-700/60 text-center space-y-2">
+      <div className="w-11 h-11 rounded-xl bg-amber-950/70 border border-amber-700/60 text-amber-400 flex items-center justify-center mx-auto">
+        <MapPin className="w-5 h-5" />
       </div>
-    ) : null;
+      <h3 className="text-base font-bold text-white">
+        Sin faena, sector ni dispositivo IoT asignado
+      </h3>
+      <p className="text-xs text-slate-300 max-w-lg mx-auto leading-relaxed">
+        Tu cuenta está activa, pero aún no estás asignado a una cuadrilla o sector operativo con sensores.
+        Contacta al Administrador de tu empresa para que vincule tu turno y sector.
+      </p>
+    </div>
+  ) : showDual && activeDevice ? (
+    <div className="relative z-10">
+      <DualReadingSensorCards
+        device={activeDevice}
+        isSuperAdmin={isSuperAdmin}
+        quickVariables={variables}
+        showDiagnosticRow={showDualDiagnosticRow}
+        showQuickCore={showDualQuickCore}
+        showBatteryAndAirflow={showDualBatteryAirflow}
+        showO2AndNoise={showDualO2Noise}
+      />
+    </div>
+  ) : null;
 
   return (
     <div className="space-y-10 pb-16">
@@ -625,19 +679,15 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                         Ver Sensor
                       </button>
                     )}
-                    {onAcknowledgeAlert && !alert.acknowledged && (
+                    {onAcknowledgeAlert && !alert.resolved && (
                       <button
                         type="button"
                         onClick={() => onAcknowledgeAlert(alert.id)}
                         className="px-2.5 py-1.5 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white text-[11px] font-bold cursor-pointer"
+                        title="Reconocer y quitar esta alarma completamente"
                       >
                         Reconocer
                       </button>
-                    )}
-                    {alert.acknowledged && (
-                      <span className="px-2 py-1 rounded-lg bg-cyan-950/70 border border-cyan-800/70 text-cyan-300 text-[10px] font-semibold">
-                        Reconocida
-                      </span>
                     )}
                   </div>
                 </div>

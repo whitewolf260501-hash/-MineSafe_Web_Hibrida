@@ -31,9 +31,9 @@ import {
   buildCrewMemberFromUser,
   canManageCrews,
   DEFAULT_ORGANIZATION_ID,
+  getCrewMemberIdentityKey,
 } from '../utils/accessControl';
 import { soundAlert } from '../services/audioAlert';
-import { validateChileanRut } from '../utils/rut';
 
 interface CrewCandidateWorker {
   key: string;
@@ -74,21 +74,8 @@ const SHIFT_OPTIONS = [
   'Turno Administrativo',
 ];
 
-function buildCandidateKey(member: {
-  userId?: string;
-  email?: string;
-  rut?: string;
-  name: string;
-  id?: string;
-}): string {
-  if (member.userId) return `uid:${member.userId}`;
-  if (member.email && member.email.trim()) return `email:${member.email.trim().toLowerCase()}`;
-  const cleanRut = (member.rut || '').trim().toLowerCase();
-  if (cleanRut && cleanRut !== 'sin rut' && cleanRut !== 'no registrado') {
-    return `rut:${cleanRut}`;
-  }
-  return `name:${member.name.trim().toLowerCase()}`;
-}
+// Unified identity key comes directly from accessControl.getCrewMemberIdentityKey
+// so draft UI selection and assignWorkersToCrew deduplication always match 1:1.
 
 export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
   crews,
@@ -112,6 +99,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
   const [searchQuery, setSearchQuery] = useState('');
   const [notice, setNotice] = useState<{ text: string; tone: 'success' | 'error' } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [confirmRemoveMemberKey, setConfirmRemoveMemberKey] = useState<string | null>(null);
 
   // Create / Edit Crew Modal State
   const [showCrewModal, setShowCrewModal] = useState(false);
@@ -131,12 +119,6 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
   const [assigningCrew, setAssigningCrew] = useState<MiningCrew | null>(null);
   const [workerSearch, setWorkerSearch] = useState('');
   const [draftMembers, setDraftMembers] = useState<CrewMember[]>([]);
-  const [manualName, setManualName] = useState('');
-  const [manualRut, setManualRut] = useState('');
-  const [manualRole, setManualRole] = useState('Operador Subterráneo');
-  const [manualDeviceCode, setManualDeviceCode] = useState('');
-  const [manualContact, setManualContact] = useState('');
-  const [showManualForm, setShowManualForm] = useState(false);
   const [workersModalError, setWorkersModalError] = useState<string | null>(null);
   const [isSavingWorkers, setIsSavingWorkers] = useState(false);
 
@@ -178,7 +160,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
   const totalWorkersAssigned = useMemo(() => {
     const unique = new Set<string>();
     crews.forEach((c) => {
-      (c.members || []).forEach((m) => unique.add(buildCandidateKey(m)));
+      (c.members || []).forEach((m) => unique.add(getCrewMemberIdentityKey(m)));
     });
     return unique.size;
   }, [crews]);
@@ -205,7 +187,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
     const findOtherCrews = (candidateKey: string): string[] =>
       crews
         .filter((c) => c.id !== assigningCrew.id && (c.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg)
-        .filter((c) => (c.members || []).some((m) => buildCandidateKey(m) === candidateKey))
+        .filter((c) => (c.members || []).some((m) => getCrewMemberIdentityKey(m) === candidateKey))
         .map((c) => c.name);
 
     // 1. Registered company users (active, excluding superadmin)
@@ -217,7 +199,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
           (u.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg
       )
       .forEach((u) => {
-        const key = buildCandidateKey({
+        const key = getCrewMemberIdentityKey({
           userId: u.id,
           email: u.email,
           rut: u.rut,
@@ -240,7 +222,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
     assignments
       .filter((a) => (a.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg)
       .forEach((a) => {
-        const key = buildCandidateKey({
+        const key = getCrewMemberIdentityKey({
           userId: a.userId,
           rut: a.workerRut,
           name: a.workerName,
@@ -269,9 +251,9 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
         }
       });
 
-    // 3. Current draft/existing members of this crew (in case manually added)
+    // 3. Current draft/existing members of this crew
     draftMembers.forEach((m) => {
-      const key = buildCandidateKey(m);
+      const key = getCrewMemberIdentityKey(m);
       if (!map.has(key)) {
         map.set(key, {
           key,
@@ -300,14 +282,6 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
         (c.email || '').toLowerCase().includes(q)
     );
   }, [assigningCrew, crews, usersList, assignments, draftMembers, workerSearch]);
-
-  const orgDevicesForAssigningCrew = useMemo(() => {
-    if (!assigningCrew) return [];
-    const targetOrg = assigningCrew.organizationId || DEFAULT_ORGANIZATION_ID;
-    return devices.filter(
-      (d) => (d.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg
-    );
-  }, [assigningCrew, devices]);
 
   const openCreateCrewModal = () => {
     const nextNum = crews.length + 1;
@@ -342,12 +316,6 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
     setAssigningCrew(crew);
     setDraftMembers([...(crew.members || [])]);
     setWorkerSearch('');
-    setManualName('');
-    setManualRut('');
-    setManualRole('Operador Subterráneo');
-    setManualDeviceCode('');
-    setManualContact('');
-    setShowManualForm(false);
     setWorkersModalError(null);
   };
 
@@ -434,118 +402,75 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
     }
   };
 
+  const buildDraftMemberFromCandidate = (candidate: CrewCandidateWorker): CrewMember =>
+    candidate.userId
+      ? buildCrewMemberFromUser(
+          {
+            id: candidate.userId,
+            name: candidate.name,
+            email: candidate.email || '',
+            role: 'operador',
+            roleLabel: candidate.role,
+            rut: candidate.rut,
+            shift: assigningCrew?.shift || '',
+            status: 'activo',
+            assignedDeviceCode: candidate.assignedDeviceCode,
+          },
+          { isLeader: false }
+        )
+      : {
+          id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+          assignmentId: candidate.assignmentId,
+          name: candidate.name,
+          rut: candidate.rut,
+          role: candidate.role,
+          email: candidate.email,
+          assignedDeviceCode: candidate.assignedDeviceCode,
+          emergencyContact: candidate.emergencyContact,
+          isLeader: false,
+          addedAt: Date.now(),
+        };
+
   const toggleWorkerInDraft = (candidate: CrewCandidateWorker) => {
     setDraftMembers((prev) => {
-      const exists = prev.some((m) => buildCandidateKey(m) === candidate.key);
+      const exists = prev.some((m) => getCrewMemberIdentityKey(m) === candidate.key);
       if (exists) {
-        return prev.filter((m) => buildCandidateKey(m) !== candidate.key);
+        return prev.filter((m) => getCrewMemberIdentityKey(m) !== candidate.key);
       }
-      const nextMember: CrewMember = candidate.userId
-        ? buildCrewMemberFromUser(
-            {
-              id: candidate.userId,
-              name: candidate.name,
-              email: candidate.email || '',
-              role: 'operador',
-              roleLabel: candidate.role,
-              rut: candidate.rut,
-              shift: assigningCrew?.shift || '',
-              status: 'activo',
-              assignedDeviceCode: candidate.assignedDeviceCode,
-            },
-            { isLeader: prev.length === 0 }
-          )
-        : {
-            id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-            assignmentId: candidate.assignmentId,
-            name: candidate.name,
-            rut: candidate.rut,
-            role: candidate.role,
-            email: candidate.email,
-            assignedDeviceCode: candidate.assignedDeviceCode,
-            emergencyContact: candidate.emergencyContact,
-            isLeader: prev.length === 0,
-            addedAt: Date.now(),
-          };
-      return [...prev, nextMember];
+      return [...prev, buildDraftMemberFromCandidate(candidate)];
     });
   };
 
-  const toggleLeaderInDraft = (candidateKey: string) => {
-    setDraftMembers((prev) =>
-      prev.map((m) => ({
-        ...m,
-        isLeader: buildCandidateKey(m) === candidateKey ? !m.isLeader : false,
-      }))
-    );
+  const handleSelectAllVisibleCandidates = () => {
+    setDraftMembers((prev) => {
+      const existingKeys = new Set(prev.map((m) => getCrewMemberIdentityKey(m)));
+      const additions = workerCandidates
+        .filter((cand) => !existingKeys.has(cand.key))
+        .map((cand) => buildDraftMemberFromCandidate(cand));
+      return [...prev, ...additions];
+    });
   };
 
-  const handleAddManualWorker = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!assigningCrew) return;
-    const cleanName = manualName.trim();
-    const rawManualRut = manualRut.trim();
-    if (!cleanName || !rawManualRut) {
-      setWorkersModalError('El nombre y RUT del trabajador son obligatorios.');
-      return;
+  const handleClearVisibleCandidates = () => {
+    const visibleKeys = new Set(workerCandidates.map((c) => c.key));
+    setDraftMembers((prev) => prev.filter((m) => !visibleKeys.has(getCrewMemberIdentityKey(m))));
+  };
+
+  // MS-04: Unmarking a crew leader ONLY toggles `isLeader` and NEVER removes the worker from the crew.
+  const toggleLeaderInDraft = (candidateKey: string, e?: React.MouseEvent) => {
+    if (e) {
+      e.preventDefault();
+      e.stopPropagation();
     }
-
-    const rutCheck = validateChileanRut(rawManualRut);
-    if (!rutCheck.valid) {
-      setWorkersModalError(rutCheck.error || 'El RUT del trabajador no es válido según Módulo 11.');
-      return;
-    }
-    const cleanRut = rutCheck.formatted!;
-
-    const key = buildCandidateKey({ rut: cleanRut, name: cleanName });
-    if (draftMembers.some((m) => buildCandidateKey(m) === key)) {
-      setWorkersModalError(`"${cleanName}" ya está incluido en esta cuadrilla.`);
-      return;
-    }
-
-    const newMember: CrewMember = {
-      id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
-      name: cleanName,
-      rut: cleanRut,
-      role: manualRole.trim() || 'Operador Subterráneo',
-      assignedDeviceCode: manualDeviceCode || undefined,
-      emergencyContact: manualContact.trim() || undefined,
-      isLeader: draftMembers.length === 0,
-      addedAt: Date.now(),
-    };
-
-    if (manualDeviceCode && onAddAssignment) {
-      const dev = orgDevicesForAssigningCrew.find((d) => d.code === manualDeviceCode);
-      if (dev) {
-        try {
-          await onAddAssignment({
-            organizationId: assigningCrew.organizationId,
-            crewId: assigningCrew.id,
-            workerName: newMember.name,
-            workerRut: newMember.rut,
-            role: newMember.role,
-            crew: assigningCrew.name,
-            sectorName: assigningCrew.sectorName || 'Faena Central',
-            assignedDeviceId: dev.id,
-            assignedDeviceCode: dev.code,
-            assignmentDate: new Date().toISOString().split('T')[0],
-            deviceBattery: dev.batteryPct,
-            emergencyContact: newMember.emergencyContact || 'Sin registro',
-          });
-        } catch {
-          // Proceed adding worker to crew even if sensor assignment fails
+    setDraftMembers((prev) =>
+      prev.map((m) => {
+        const key = getCrewMemberIdentityKey(m);
+        if (key === candidateKey) {
+          return { ...m, isLeader: !m.isLeader };
         }
-      }
-    }
-
-    setDraftMembers((prev) => [...prev, newMember]);
-    setManualName('');
-    setManualRut('');
-    setManualDeviceCode('');
-    setManualContact('');
-    setShowManualForm(false);
-    setWorkersModalError(null);
-    soundAlert.playFeedbackBeep();
+        return { ...m, isLeader: false };
+      })
+    );
   };
 
   const handleSaveAssignedWorkers = async () => {
@@ -574,6 +499,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
       const remaining = (crew.members || []).filter((m) => m.id !== memberId);
       const updated = assignWorkersToCrew(crew, remaining);
       await onSaveCrew(updated);
+      setConfirmRemoveMemberKey(null);
       soundAlert.playFeedbackBeep();
       showTempNotice(`Trabajador desvinculado de "${crew.name}".`, 'success');
     } catch (err: any) {
@@ -828,14 +754,33 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                             </div>
 
                             {canEditCrews && (
-                              <button
-                                type="button"
-                                onClick={() => handleQuickRemoveMember(crew, m.id)}
-                                title="Quitar trabajador de la cuadrilla"
-                                className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
+                              confirmRemoveMemberKey === `${crew.id}:${m.id}` ? (
+                                <div className="flex items-center gap-1 bg-rose-950 border border-rose-700 rounded px-1.5 py-0.5 shrink-0">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleQuickRemoveMember(crew, m.id)}
+                                    className="text-[10px] font-bold text-rose-200 hover:text-white px-0.5"
+                                  >
+                                    Quitar
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmRemoveMemberKey(null)}
+                                    className="text-[10px] text-slate-400 hover:text-white px-0.5"
+                                  >
+                                    No
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmRemoveMemberKey(`${crew.id}:${m.id}`)}
+                                  title="Quitar trabajador de la cuadrilla"
+                                  className="text-slate-500 hover:text-rose-400 p-0.5 shrink-0"
+                                >
+                                  <X className="w-3.5 h-3.5" />
+                                </button>
+                              )
                             )}
                           </div>
                         ))}
@@ -1091,140 +1036,56 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
             </div>
 
             <div className="p-6 space-y-4 text-xs overflow-y-auto flex-1">
-              {/* Search & Manual Add Toggle */}
+              {/* Search & Quick Selection Controls */}
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <div className="relative flex-1 min-w-[200px]">
                   <Search className="w-3.5 h-3.5 text-slate-400 absolute left-3 top-1/2 -translate-y-1/2" />
                   <input
                     type="text"
-                    placeholder="Filtrar trabajadores de la empresa por nombre, RUT o cargo..."
+                    placeholder="Filtrar trabajadores registrados por nombre, RUT o cargo..."
                     value={workerSearch}
                     onChange={(e) => setWorkerSearch(e.target.value)}
                     className="w-full pl-8 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
                   />
                 </div>
-                <button
-                  type="button"
-                  onClick={() => {
-                    setShowManualForm((prev) => !prev);
-                    setWorkersModalError(null);
-                  }}
-                  className="px-3 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-emerald-300 border border-emerald-700/60 font-semibold flex items-center gap-1.5"
-                >
-                  <Plus className="w-3.5 h-3.5" />
-                  {showManualForm ? 'Ocultar Registro Manual' : 'Agregar Trabajador Manual'}
-                </button>
-              </div>
-
-              {/* Optional Manual Worker Form */}
-              {showManualForm && (
-                <form
-                  onSubmit={handleAddManualWorker}
-                  className="p-4 rounded-xl bg-slate-950 border border-emerald-800/70 space-y-3"
-                >
-                  <div className="font-bold text-emerald-300 flex items-center gap-1.5">
-                    <UserPlus className="w-3.5 h-3.5" />
-                    Incorporar Trabajador Nuevo a la Cuadrilla
-                  </div>
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
-                    <div>
-                      <label className="text-slate-300 block mb-1">Nombre Completo *</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Ej: Jorge Tapia Fuentes"
-                        value={manualName}
-                        onChange={(e) => setManualName(e.target.value)}
-                        className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-slate-300 block mb-1">RUT Trabajador * (Módulo 11)</label>
-                      <input
-                        type="text"
-                        required
-                        placeholder="Ej: 17.456.789-1"
-                        value={manualRut}
-                        onChange={(e) => setManualRut(e.target.value)}
-                        onBlur={() => {
-                          const res = validateChileanRut(manualRut);
-                          if (res.valid && res.formatted) setManualRut(res.formatted);
-                        }}
-                        className={`w-full px-3 py-1.5 bg-slate-900 border rounded-lg text-white font-mono ${
-                          manualRut.trim()
-                            ? validateChileanRut(manualRut).valid
-                              ? 'border-emerald-500/70 focus:border-emerald-400'
-                              : 'border-rose-500/80 focus:border-rose-400'
-                            : 'border-slate-800'
-                        }`}
-                      />
-                      {manualRut.trim() && (() => {
-                        const res = validateChileanRut(manualRut);
-                        return (
-                          <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
-                            {res.valid
-                              ? `✓ RUT válido (${res.formatted})`
-                              : res.expectedVerifierDigit
-                              ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
-                              : `✗ ${res.error}`}
-                          </p>
-                        );
-                      })()}
-                    </div>
-                    <div>
-                      <label className="text-slate-300 block mb-1">Cargo / Especialidad</label>
-                      <input
-                        type="text"
-                        value={manualRole}
-                        onChange={(e) => setManualRole(e.target.value)}
-                        className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white"
-                      />
-                    </div>
-                    <div>
-                      <label className="text-slate-300 block mb-1">Sensor IoT (Opcional)</label>
-                      <select
-                        value={manualDeviceCode}
-                        onChange={(e) => setManualDeviceCode(e.target.value)}
-                        className="w-full px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white"
-                      >
-                        <option value="">-- Sin sensor asignado --</option>
-                        {orgDevicesForAssigningCrew.map((d) => (
-                          <option key={d.id} value={d.code}>
-                            {d.code} - {d.name}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  </div>
-                  <div className="flex items-center justify-between gap-2">
-                    <input
-                      type="text"
-                      placeholder="Contacto emergencia (Opcional: +56 9 ...)"
-                      value={manualContact}
-                      onChange={(e) => setManualContact(e.target.value)}
-                      className="flex-1 px-3 py-1.5 bg-slate-900 border border-slate-800 rounded-lg text-white"
-                    />
+                {workerCandidates.length > 0 && (
+                  <div className="flex items-center gap-1.5">
                     <button
-                      type="submit"
-                      className="px-3 py-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-semibold"
+                      type="button"
+                      onClick={handleSelectAllVisibleCandidates}
+                      className="px-2.5 py-2 rounded-lg bg-slate-800 hover:bg-slate-700 text-cyan-300 border border-slate-700 font-semibold text-[11px]"
                     >
-                      Añadir a Lista
+                      Seleccionar visibles
+                    </button>
+                    <button
+                      type="button"
+                      onClick={handleClearVisibleCandidates}
+                      className="px-2.5 py-2 rounded-lg bg-slate-900 hover:bg-slate-800 text-slate-300 border border-slate-700 text-[11px]"
+                    >
+                      Limpiar visibles
                     </button>
                   </div>
-                </form>
-              )}
+                )}
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-[11px] text-slate-400 flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                <span>
+                  Solo pueden vincularse trabajadores con cuenta registrada en la empresa. Para incorporar personal nuevo con credenciales válidas, créalo primero en <strong className="text-slate-200">Usuarios y Roles</strong>. La entrega de sensores IoT se gestiona desde <strong className="text-slate-200">Asignar Sensor a Operador</strong>.
+                </span>
+              </div>
 
               {/* Candidates Selection List */}
               <div className="space-y-2 max-h-72 overflow-y-auto pr-1">
                 {workerCandidates.length === 0 ? (
                   <div className="p-6 rounded-xl bg-slate-950/60 border border-slate-800 text-center text-slate-400">
-                    No hay trabajadores registrados disponibles en esta empresa. Usa{' '}
-                    <strong className="text-emerald-300">"Agregar Trabajador Manual"</strong> o crea operadores en Usuarios.
+                    No hay trabajadores registrados disponibles en esta empresa. Crea cuentas activas desde el módulo{' '}
+                    <strong className="text-cyan-300">Usuarios y Roles</strong> para asignarlos a esta cuadrilla.
                   </div>
                 ) : (
                   workerCandidates.map((cand) => {
                     const matchedMember = draftMembers.find(
-                      (m) => buildCandidateKey(m) === cand.key
+                      (m) => getCrewMemberIdentityKey(m) === cand.key
                     );
                     const isSelected = Boolean(matchedMember);
 
@@ -1255,7 +1116,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                                   ? 'Usuario'
                                   : cand.source === 'asignacion'
                                   ? 'Asignación'
-                                  : 'Manual'}
+                                  : 'Miembro'}
                               </span>
                             </div>
                             <p className="text-[11px] text-slate-400 mt-0.5 truncate">
@@ -1274,13 +1135,13 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                         {isSelected && (
                           <button
                             type="button"
-                            onClick={() => toggleLeaderInDraft(cand.key)}
+                            onClick={(e) => toggleLeaderInDraft(cand.key, e)}
                             className={`px-2.5 py-1 rounded-lg text-[10px] font-bold border transition-colors flex items-center gap-1 shrink-0 ${
                               matchedMember?.isLeader
                                 ? 'bg-amber-950 text-amber-300 border-amber-600'
                                 : 'bg-slate-900 text-slate-400 border-slate-700 hover:text-amber-300'
                             }`}
-                            title="Marcar o desmarcar como jefe/líder de la cuadrilla"
+                            title="Marcar o desmarcar como jefe/líder de la cuadrilla (no quita al trabajador)"
                           >
                             <Crown className="w-3 h-3" />
                             {matchedMember?.isLeader ? 'Jefe Cuadrilla' : 'Hacer Jefe'}

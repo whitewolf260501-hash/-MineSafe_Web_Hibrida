@@ -48,6 +48,7 @@ import {
   isSectionVisibleForUser,
 } from '../services/firebase';
 import { AlertResolutionModal } from './AlertResolutionModal';
+import { getTodayIsoDate, validateDateRange } from '../utils/dateRange';
 
 interface AlertsViewProps {
   alerts: SafetyAlert[];
@@ -136,30 +137,38 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     (a, b) => (b.timestampServer || 0) - (a.timestampServer || 0)
   );
 
-  // Filter audit records (including Fecha Desde / Fecha Hasta)
+  // Filter audit records (including Fecha Desde / Fecha Hasta with MS-08 validation)
+  const todayIso = getTodayIsoDate();
+  const auditDateValidation = validateDateRange(auditDateFrom, auditDateTo, {
+    maxDays: 90,
+    allowFuture: false,
+    allowEmpty: true,
+  });
   const fromMs = auditDateFrom ? new Date(`${auditDateFrom}T00:00:00`).getTime() : null;
   const toMs = auditDateTo ? new Date(`${auditDateTo}T23:59:59.999`).getTime() : null;
 
-  const filteredAuditRecords = allAuditRecords.filter((rec) => {
-    const matchesDevice = filterAuditDevice === 'all' || rec.deviceId === filterAuditDevice;
-    const matchesOrigin = filterAuditOrigin === 'all' || rec.origen === filterAuditOrigin;
-    const recMs = parseRecordDateMs(rec);
-    const matchesDateFrom = fromMs === null || (recMs > 0 && recMs >= fromMs);
-    const matchesDateTo = toMs === null || (recMs > 0 && recMs <= toMs);
-    const q = searchAudit.toLowerCase();
-    const matchesSearch =
-      !q ||
-      rec.id.toLowerCase().includes(q) ||
-      rec.deviceName.toLowerCase().includes(q) ||
-      rec.deviceId.toLowerCase().includes(q) ||
-      rec.descripcion.toLowerCase().includes(q) ||
-      (rec.alertTitle || '').toLowerCase().includes(q) ||
-      (rec.correctiveActions || '').toLowerCase().includes(q) ||
-      (rec.resolvedBy || '').toLowerCase().includes(q) ||
-      rec.fecha.includes(searchAudit) ||
-      rec.hora.includes(searchAudit);
-    return matchesDevice && matchesOrigin && matchesDateFrom && matchesDateTo && matchesSearch;
-  });
+  const filteredAuditRecords = !auditDateValidation.valid
+    ? []
+    : allAuditRecords.filter((rec) => {
+        const matchesDevice = filterAuditDevice === 'all' || rec.deviceId === filterAuditDevice;
+        const matchesOrigin = filterAuditOrigin === 'all' || rec.origen === filterAuditOrigin;
+        const recMs = parseRecordDateMs(rec);
+        const matchesDateFrom = fromMs === null || (recMs > 0 && recMs >= fromMs);
+        const matchesDateTo = toMs === null || (recMs > 0 && recMs <= toMs);
+        const q = searchAudit.toLowerCase();
+        const matchesSearch =
+          !q ||
+          rec.id.toLowerCase().includes(q) ||
+          rec.deviceName.toLowerCase().includes(q) ||
+          rec.deviceId.toLowerCase().includes(q) ||
+          rec.descripcion.toLowerCase().includes(q) ||
+          (rec.alertTitle || '').toLowerCase().includes(q) ||
+          (rec.correctiveActions || '').toLowerCase().includes(q) ||
+          (rec.resolvedBy || '').toLowerCase().includes(q) ||
+          rec.fecha.includes(searchAudit) ||
+          rec.hora.includes(searchAudit);
+        return matchesDevice && matchesOrigin && matchesDateFrom && matchesDateTo && matchesSearch;
+      });
 
   // Recency window for active alerts
   const nowMs = Date.now();
@@ -233,6 +242,10 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
 
   // 1. Exportar a Excel (.csv con UTF-8 BOM respetando el rango de fechas y filtros activos)
   const handleExportAuditExcel = () => {
+    if (!auditDateValidation.valid) {
+      showExportToast(auditDateValidation.error || 'Rango de fechas inválido.');
+      return;
+    }
     soundAlert.playFeedbackBeep();
     const rowsToExport = filteredAuditRecords;
     if (rowsToExport.length === 0) {
@@ -301,6 +314,14 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
 
   // 2. Exportar / Imprimir PDF Oficial (Vista Imprimible In-App para compatibilidad iFrame)
   const handleExportAuditPDF = () => {
+    if (!auditDateValidation.valid) {
+      showExportToast(auditDateValidation.error || 'Rango de fechas inválido.');
+      return;
+    }
+    if (filteredAuditRecords.length === 0) {
+      showExportToast('No existen registros dentro del rango de fechas y filtros seleccionados para imprimir.');
+      return;
+    }
     soundAlert.playFeedbackBeep();
     setShowPrintPreview(true);
     showExportToast('Vista de impresión preparada. Presiona "Imprimir / Guardar PDF" dentro del reporte.');
@@ -725,11 +746,12 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                         <span>Ver Detalle</span>
                       </button>
 
-                      {!isOperadorReadOnly && !alert.acknowledged && (
+                      {!isOperadorReadOnly && !alert.resolved && (
                         <button
                           type="button"
                           onClick={() => onAcknowledgeAlert(alert.id)}
-                          className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors"
+                          className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+                          title="Reconocer y quitar esta alarma completamente"
                         >
                           Reconocer
                         </button>
@@ -804,8 +826,15 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               <button
                 type="button"
                 onClick={handleExportAuditExcel}
-                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-md shadow-emerald-950 cursor-pointer"
-                title="Descargar tabla filtrada en Excel / CSV con formato UTF-8"
+                disabled={!auditDateValidation.valid || filteredAuditRecords.length === 0}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs transition-colors shadow-md shadow-emerald-950 cursor-pointer"
+                title={
+                  !auditDateValidation.valid
+                    ? auditDateValidation.error
+                    : filteredAuditRecords.length === 0
+                    ? 'Sin registros para exportar con los filtros actuales'
+                    : 'Descargar tabla filtrada en Excel / CSV con formato UTF-8'
+                }
               >
                 <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
                 <span>Exportar a Excel (.csv)</span>
@@ -814,8 +843,15 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               <button
                 type="button"
                 onClick={handleExportAuditPDF}
-                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition-colors shadow-md shadow-cyan-950 cursor-pointer"
-                title="Generar e imprimir informe oficial en PDF respetando las fechas seleccionadas"
+                disabled={!auditDateValidation.valid || filteredAuditRecords.length === 0}
+                className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white font-bold text-xs transition-colors shadow-md shadow-cyan-950 cursor-pointer"
+                title={
+                  !auditDateValidation.valid
+                    ? auditDateValidation.error
+                    : filteredAuditRecords.length === 0
+                    ? 'Sin registros para imprimir con los filtros actuales'
+                    : 'Generar e imprimir informe oficial en PDF respetando las fechas seleccionadas'
+                }
               >
                 <Printer className="w-4 h-4 text-cyan-100" />
                 <span>Exportar a PDF / Imprimir</span>
@@ -881,9 +917,14 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 <input
                   type="date"
                   value={auditDateFrom}
+                  max={auditDateTo && auditDateTo <= todayIso ? auditDateTo : todayIso}
                   onChange={(e) => setAuditDateFrom(e.target.value)}
                   aria-label="Fecha desde"
-                  className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`px-2.5 py-1 bg-slate-950 border rounded-lg text-xs text-slate-200 focus:outline-none ${
+                    auditDateValidation.valid
+                      ? 'border-slate-800 focus:border-cyan-500'
+                      : 'border-rose-600 focus:border-rose-400'
+                  }`}
                 />
               </label>
               <label className="flex items-center gap-1.5 text-slate-400">
@@ -891,9 +932,15 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 <input
                   type="date"
                   value={auditDateTo}
+                  min={auditDateFrom || undefined}
+                  max={todayIso}
                   onChange={(e) => setAuditDateTo(e.target.value)}
                   aria-label="Fecha hasta"
-                  className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                  className={`px-2.5 py-1 bg-slate-950 border rounded-lg text-xs text-slate-200 focus:outline-none ${
+                    auditDateValidation.valid
+                      ? 'border-slate-800 focus:border-cyan-500'
+                      : 'border-rose-600 focus:border-rose-400'
+                  }`}
                 />
               </label>
               {(auditDateFrom || auditDateTo) && (
@@ -912,6 +959,13 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 Mostrando <strong className="text-cyan-300">{filteredAuditRecords.length}</strong> de {allAuditRecords.length} registros
               </span>
             </div>
+
+            {!auditDateValidation.valid && auditDateValidation.error && (
+              <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-700 text-rose-200 text-xs flex items-center gap-2">
+                <AlertTriangle className="w-4 h-4 text-rose-400 shrink-0" />
+                <span>{auditDateValidation.error}</span>
+              </div>
+            )}
           </div>
 
           {/* Audit Records Table */}
@@ -1193,16 +1247,16 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
             )}
 
             <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
-              {!isOperadorReadOnly && !alertToInspect.acknowledged && (
+              {!isOperadorReadOnly && !alertToInspect.resolved && (
                 <button
                   type="button"
                   onClick={() => {
-                    onAcknowledgeAlert(alertToInspect.id);
-                    setAlertToInspect((prev) =>
-                      prev ? { ...prev, acknowledged: true, acknowledgedBy: currentUser?.name || 'Operación' } : null
-                    );
+                    const targetId = alertToInspect.id;
+                    setAlertToInspect(null);
+                    onAcknowledgeAlert(targetId);
                   }}
-                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700"
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700 cursor-pointer"
+                  title="Reconocer y quitar esta alarma completamente"
                 >
                   Reconocer
                 </button>

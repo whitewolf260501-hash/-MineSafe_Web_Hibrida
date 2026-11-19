@@ -46,6 +46,8 @@ import {
   updateProfile,
   updatePassword,
   deleteUser,
+  EmailAuthProvider,
+  reauthenticateWithCredential,
   User as FirebaseUser
 } from 'firebase/auth';
 
@@ -577,6 +579,58 @@ export async function updateCurrentUserPasswordWithPolicy(
   };
 }
 
+/**
+ * Permite a cualquier usuario autenticado cambiar su propia contraseña de forma voluntaria,
+ * reautenticándolo primero con su contraseña actual y aplicando la política vigente.
+ */
+export async function changeAuthenticatedUserPassword(
+  currentPassword: string,
+  newPassword: string,
+  user: UserProfile
+): Promise<UserProfile> {
+  if (!currentPassword) {
+    throw new Error('Debes ingresar tu contraseña actual para confirmar el cambio.');
+  }
+  const policyCheck = validatePasswordPolicy(newPassword);
+  if (!policyCheck.valid) {
+    throw new Error(policyCheck.errors[0] || 'La nueva contraseña no cumple la política de seguridad.');
+  }
+  if (currentPassword === newPassword) {
+    throw new Error('La nueva contraseña debe ser diferente a la contraseña actual.');
+  }
+
+  const fbUser = auth.currentUser;
+  if (!fbUser || !fbUser.email) {
+    throw new Error('Tu sesión de autenticación expiró. Inicia sesión nuevamente para cambiar tu contraseña.');
+  }
+
+  try {
+    const credential = EmailAuthProvider.credential(fbUser.email, currentPassword);
+    await reauthenticateWithCredential(fbUser, credential);
+    await updatePassword(fbUser, newPassword);
+  } catch (err: any) {
+    if (err?.code === 'auth/wrong-password' || err?.code === 'auth/invalid-credential') {
+      throw new Error('La contraseña actual ingresada es incorrecta.');
+    }
+    throw mapFirebaseAuthError(err);
+  }
+
+  const now = Date.now();
+  const targetUid = fbUser.uid || user.id;
+  await update(ref(rtdb, `usuarios/${targetUid}`), {
+    mustChangePassword: false,
+    passwordPolicyVersion: CURRENT_PASSWORD_POLICY_VERSION,
+    passwordUpdatedAt: now,
+  }).catch(() => {});
+
+  return {
+    ...user,
+    mustChangePassword: false,
+    passwordPolicyVersion: CURRENT_PASSWORD_POLICY_VERSION,
+    passwordUpdatedAt: now,
+  };
+}
+
 let isAccountRecreationInProgress = false;
 
 async function claimPendingProfileForAuthUser(
@@ -795,8 +849,15 @@ export async function createUserAccountByAdmin(params: {
 }): Promise<UserProfile> {
   const cleanEmail = params.email.trim().toLowerCase();
   const cleanName = params.name.trim();
-  if (!cleanName || !cleanEmail || params.password.length < 8) {
-    throw new Error('Nombre, correo válido y contraseña inicial (mínimo 8 caracteres) son obligatorios.');
+  if (!cleanName || !cleanEmail) {
+    throw new Error('Nombre y correo electrónico válido son obligatorios.');
+  }
+  const passwordPolicy = validatePasswordPolicy(params.password || '');
+  if (!passwordPolicy.valid) {
+    throw new Error(
+      passwordPolicy.errors[0] ||
+        'La contraseña inicial debe tener al menos 8 caracteres, una mayúscula, una minúscula y un número.'
+    );
   }
 
   let normalizedRut = 'No registrado';
@@ -2743,35 +2804,139 @@ export async function broadcastAlertToRTDB(alert: SafetyAlert): Promise<void> {
   }
 }
 
-export async function acknowledgeAlertInRTDB(
+export function isAlertDismissedOnAcknowledge(data: any, bit: any = {}): boolean {
+  if (data?.eliminada_al_reconocer === true) return true;
+  const hasFormalResolution = Boolean(
+    data?.resuelta ||
+      data?.status === 'resuelta' ||
+      data?.descripcion_cierre ||
+      data?.tipo_resolucion ||
+      bit?.descripcion ||
+      bit?.tipoResolucion
+  );
+  // Cualquier alarma reconocida sin bitácora de resolución formal queda descartada por completo
+  return Boolean(data?.atendida) && !hasFormalResolution;
+}
+
+export function buildAtomicAlertAcknowledgeDismissUpdates(
   alertOrId: SafetyAlert | string,
   acknowledgedBy: string,
-  relatedAlertIds: string[] = []
-): Promise<void> {
+  relatedAlertIds: string[] = [],
+  nowMs: number = Date.now(),
+  options?: {
+    isExistingThresholdEvent?: boolean;
+    existingRelatedThresholdEventIds?: string[];
+    clearEmergencyIfNone?: boolean;
+    organizationId?: string;
+  }
+): Record<string, any> {
   const alertId = typeof alertOrId === 'string' ? alertOrId : alertOrId.id;
-  const now = Date.now();
-  const baseFields =
-    typeof alertOrId === 'object' && alertOrId !== null
-      ? buildAlertBasePayload(alertOrId, alertOrId.timestampMs || now)
-      : {};
+  const resolvedAt = formatAlertTimestamp(nowMs);
+  const orgId =
+    options?.organizationId ||
+    (typeof alertOrId === 'object' && alertOrId?.organizationId) ||
+    DEFAULT_ORGANIZATION.id;
 
-  const updates: Record<string, any> = {
-    [`alertas/${alertId}`]: {
+  const updates: Record<string, any> = {};
+
+  if (typeof alertOrId === 'object' && alertOrId !== null) {
+    const baseFields = buildAlertBasePayload(alertOrId, alertOrId.timestampMs || nowMs);
+    updates[`alertas/${alertId}`] = {
       ...baseFields,
       id: alertId,
+      organizationId: orgId,
+      status: 'resuelta',
+      resuelta: true,
       atendida: true,
       atendida_por: acknowledgedBy,
-      timestamp_atendida: now,
-    },
-  };
+      timestamp_atendida: nowMs,
+      eliminada_al_reconocer: true,
+      resuelto_por: acknowledgedBy,
+      resuelto_en: resolvedAt,
+      timestamp_cierre: nowMs,
+    };
+  } else {
+    updates[`alertas/${alertId}/status`] = 'resuelta';
+    updates[`alertas/${alertId}/resuelta`] = true;
+    updates[`alertas/${alertId}/atendida`] = true;
+    updates[`alertas/${alertId}/atendida_por`] = acknowledgedBy;
+    updates[`alertas/${alertId}/timestamp_atendida`] = nowMs;
+    updates[`alertas/${alertId}/eliminada_al_reconocer`] = true;
+    updates[`alertas/${alertId}/resuelto_por`] = acknowledgedBy;
+    updates[`alertas/${alertId}/resuelto_en`] = resolvedAt;
+    updates[`alertas/${alertId}/timestamp_cierre`] = nowMs;
+  }
 
+  if (options?.isExistingThresholdEvent) {
+    updates[`eventos_umbrales/${alertId}/estado`] = 'recuperada';
+    updates[`eventos_umbrales/${alertId}/recuperada_en`] = nowMs;
+  }
+
+  const relatedThresholdSet = new Set(options?.existingRelatedThresholdEventIds || []);
   relatedAlertIds
     .filter((id) => id && id !== alertId)
     .forEach((relId) => {
+      updates[`alertas/${relId}/status`] = 'resuelta';
+      updates[`alertas/${relId}/resuelta`] = true;
       updates[`alertas/${relId}/atendida`] = true;
       updates[`alertas/${relId}/atendida_por`] = acknowledgedBy;
-      updates[`alertas/${relId}/timestamp_atendida`] = now;
+      updates[`alertas/${relId}/timestamp_atendida`] = nowMs;
+      updates[`alertas/${relId}/eliminada_al_reconocer`] = true;
+      updates[`alertas/${relId}/resuelto_por`] = acknowledgedBy;
+      updates[`alertas/${relId}/resuelto_en`] = resolvedAt;
+      updates[`alertas/${relId}/timestamp_cierre`] = nowMs;
+      if (relatedThresholdSet.has(relId)) {
+        updates[`eventos_umbrales/${relId}/estado`] = 'recuperada';
+        updates[`eventos_umbrales/${relId}/recuperada_en`] = nowMs;
+      }
     });
+
+  if (options?.clearEmergencyIfNone) {
+    updates[`emergencia/${orgId}/activa`] = false;
+    updates[`emergencia/${orgId}/recuperado_en`] = nowMs;
+    updates[`emergencia/${orgId}/timestamp`] = nowMs;
+  }
+
+  return updates;
+}
+
+export async function acknowledgeAlertInRTDB(
+  alertOrId: SafetyAlert | string,
+  acknowledgedBy: string,
+  relatedAlertIds: string[] = [],
+  options?: { clearEmergencyIfNone?: boolean; organizationId?: string }
+): Promise<void> {
+  const alertId = typeof alertOrId === 'string' ? alertOrId : alertOrId.id;
+  const now = Date.now();
+
+  let isExistingThresholdEvent = false;
+  if (alertId.startsWith('evt_')) {
+    const evtSnap = await get(ref(rtdb, `eventos_umbrales/${alertId}`)).catch(() => null);
+    isExistingThresholdEvent = Boolean(evtSnap?.exists());
+  }
+
+  const existingRelatedThresholdEventIds: string[] = [];
+  for (const relId of relatedAlertIds) {
+    if (relId && relId !== alertId && relId.startsWith('evt_')) {
+      const relSnap = await get(ref(rtdb, `eventos_umbrales/${relId}`)).catch(() => null);
+      if (relSnap?.exists()) {
+        existingRelatedThresholdEventIds.push(relId);
+      }
+    }
+  }
+
+  const updates = buildAtomicAlertAcknowledgeDismissUpdates(
+    alertOrId,
+    acknowledgedBy,
+    relatedAlertIds,
+    now,
+    {
+      isExistingThresholdEvent,
+      existingRelatedThresholdEventIds,
+      clearEmergencyIfNone: options?.clearEmergencyIfNone,
+      organizationId: options?.organizationId,
+    }
+  );
 
   await update(ref(rtdb), updates);
 }
@@ -2807,7 +2972,8 @@ export function deduplicateActiveSafetyAlerts(mapped: SafetyAlert[]): SafetyAler
 
 export function subscribeToRTDBAlerts(
   callback: (alerts: SafetyAlert[]) => void,
-  scope?: RTDBSubscriptionScope
+  scope?: RTDBSubscriptionScope,
+  onDismissedAlerts?: (dismissed: SafetyAlert[]) => void
 ): () => void {
   let rawAlertas: Record<string, any> = {};
   let rawBitacora: Record<string, any> = {};
@@ -2817,14 +2983,23 @@ export function subscribeToRTDBAlerts(
     if (!alertasReady) return;
     const allIds = new Set([...Object.keys(rawAlertas), ...Object.keys(rawBitacora)]);
     const mapped: SafetyAlert[] = [];
+    const dismissed: SafetyAlert[] = [];
 
     allIds.forEach((id) => {
       const data = rawAlertas[id] || {};
       const bit = rawBitacora[id] || {};
       if (!data && !bit) return;
-      mapped.push(mapRTDBAlertRecord(id, data, bit));
+      const record = mapRTDBAlertRecord(id, data, bit);
+      if (isAlertDismissedOnAcknowledge(data, bit)) {
+        dismissed.push(record);
+        return;
+      }
+      mapped.push(record);
     });
 
+    if (onDismissedAlerts && dismissed.length > 0) {
+      onDismissedAlerts(dismissed);
+    }
     callback(deduplicateActiveSafetyAlerts(mapped));
   };
 
@@ -3271,17 +3446,42 @@ export async function saveThresholdConfig(
     throw new Error('Permisos insuficientes: Solo el SuperAdministrador puede modificar la configuración global de umbrales. Seleccione un dispositivo de su empresa.');
   }
 
-  // Validación de consistencia matemática: preventivo < advertencia < critico
+  // Validación estricta de rangos físicos y orden matemático (preventivo < advertencia < critico)
+  const physicalBounds: Record<'pm25' | 'mq2' | 'temperatura' | 'humedad', { min: number; max: number }> = {
+    mq2: { min: 0, max: 4095 },
+    pm25: { min: 0, max: 4095 },
+    temperatura: { min: -40, max: 100 },
+    humedad: { min: 0, max: 100 },
+  };
   const variables: ('pm25' | 'mq2' | 'temperatura' | 'humedad')[] = ['pm25', 'mq2', 'temperatura', 'humedad'];
   for (const v of variables) {
     const cfg = config[v];
-    if (cfg.activo) {
-      if (cfg.preventivo >= cfg.advertencia) {
-        throw new Error(`En la variable ${cfg.label}: El umbral preventivo (${cfg.preventivo}) debe ser menor que el umbral de advertencia (${cfg.advertencia}).`);
+    if (!cfg) {
+      throw new Error(`Falta la configuración de la variable ${v}.`);
+    }
+    const bounds = physicalBounds[v];
+    const minAllowed = typeof cfg.minVal === 'number' && Number.isFinite(cfg.minVal) ? Math.max(bounds.min, cfg.minVal) : bounds.min;
+    const maxAllowed = typeof cfg.maxVal === 'number' && Number.isFinite(cfg.maxVal) ? Math.min(bounds.max, cfg.maxVal) : bounds.max;
+    const values = [
+      { name: 'Preventivo', val: cfg.preventivo },
+      { name: 'Advertencia', val: cfg.advertencia },
+      { name: 'Crítico', val: cfg.critico },
+    ];
+    for (const item of values) {
+      if (typeof item.val !== 'number' || !Number.isFinite(item.val)) {
+        throw new Error(`En la variable ${cfg.label}: el umbral ${item.name} debe ser un número válido.`);
       }
-      if (cfg.advertencia >= cfg.critico) {
-        throw new Error(`En la variable ${cfg.label}: El umbral de advertencia (${cfg.advertencia}) debe ser menor que el umbral crítico (${cfg.critico}).`);
+      if (item.val < minAllowed || item.val > maxAllowed) {
+        throw new Error(
+          `En la variable ${cfg.label}: el umbral ${item.name} (${item.val}) debe estar entre ${minAllowed} y ${maxAllowed} ${cfg.unidad}.`
+        );
       }
+    }
+    if (cfg.preventivo >= cfg.advertencia) {
+      throw new Error(`En la variable ${cfg.label}: el umbral Preventivo (${cfg.preventivo}) debe ser estrictamente menor que Advertencia (${cfg.advertencia}).`);
+    }
+    if (cfg.advertencia >= cfg.critico) {
+      throw new Error(`En la variable ${cfg.label}: el umbral Advertencia (${cfg.advertencia}) debe ser estrictamente menor que Crítico (${cfg.critico}).`);
     }
   }
 

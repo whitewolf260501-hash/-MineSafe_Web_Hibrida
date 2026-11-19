@@ -3,11 +3,18 @@ export interface RutValidationResult {
   formatted?: string;
   body?: string;
   verifierDigit?: string;
-  expectedVerifierDigit?: string;
   error?: string;
 }
 
-const PLACEHOLDER_RUTS = new Set(['', 'no registrado', 'sin rut', 'sin registro', 'n/a', 'na', '-']);
+const PLACEHOLDER_RUTS = new Set([
+  '',
+  'no registrado',
+  'sin rut',
+  'sin registro',
+  'n/a',
+  'na',
+  '-',
+]);
 
 export function isPlaceholderRut(rawRut?: string | null): boolean {
   const normalized = String(rawRut ?? '').trim().toLowerCase();
@@ -15,12 +22,8 @@ export function isPlaceholderRut(rawRut?: string | null): boolean {
 }
 
 /**
- * Calcula el dígito verificador de un RUT chileno usando el algoritmo Módulo 11:
- * 1. Lee los dígitos del cuerpo de derecha a izquierda.
- * 2. Multiplica cada dígito por la serie cíclica 2, 3, 4, 5, 6, 7, 2, 3...
- * 3. Suma todos los productos obtenidos.
- * 4. Calcula resto = suma % 11 y resultado = 11 - resto.
- * 5. Asigna DV: 11 -> '0', 10 -> 'K', 1..9 -> dígito directo.
+ * Calcula el dígito verificador de un RUT chileno usando el algoritmo Módulo 11.
+ * Uso estrictamente interno para validación — nunca exponer el DV calculado al usuario final.
  */
 export function computeRutVerifierDigit(bodyDigits: string): string {
   const cleanDigits = bodyDigits.replace(/\D/g, '');
@@ -50,6 +53,26 @@ export function formatRutBodyWithDots(bodyDigits: string): string {
   return clean.replace(/\B(?=(\d{3})+(?!\d))/g, '.');
 }
 
+/**
+ * Formatea un RUT en tiempo real mientras el usuario escribe (ej: 12.345.678-9).
+ * Elimina caracteres inválidos y limita el largo a 9 dígitos de cuerpo + 1 DV.
+ */
+export function formatRutLive(rawInput: string): string {
+  const cleaned = String(rawInput ?? '')
+    .toUpperCase()
+    .replace(/[^0-9K]/g, '');
+
+  if (!cleaned) return '';
+  if (cleaned.length === 1) return cleaned;
+
+  const limited = cleaned.slice(0, 10);
+  const bodyRaw = limited.slice(0, -1).replace(/K/g, '');
+  const dvRaw = limited.slice(-1);
+
+  if (!bodyRaw) return dvRaw;
+  return `${formatRutBodyWithDots(bodyRaw)}-${dvRaw}`;
+}
+
 export function validateChileanRut(rawRut: string): RutValidationResult {
   const trimmed = String(rawRut ?? '').trim();
   if (!trimmed) {
@@ -68,7 +91,7 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
   if (hyphenCount > 1) {
     return {
       valid: false,
-      error: 'Formato de RUT inválido: no uses más de un guion.',
+      error: 'Formato de RUT inválido: utiliza solo un guion antes del dígito verificador.',
     };
   }
 
@@ -82,7 +105,7 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
     if (!dvRaw || dvRaw.length !== 1) {
       return {
         valid: false,
-        error: 'Formato de RUT inválido: después del guion debe ir exactamente un dígito verificador (0-9 o K).',
+        error: 'Formato de RUT inválido: ingresa el formato XX.XXX.XXX-X.',
       };
     }
     if (/[kK]/.test(bodyRaw)) {
@@ -96,7 +119,7 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
     if (compact.length < 2) {
       return {
         valid: false,
-        error: 'El RUT es demasiado corto. Ingresa el cuerpo numérico y su dígito verificador (ej: 18.321.654-3).',
+        error: 'El RUT está incompleto. Ingresa el número completo con su dígito verificador (ej: 18.321.654-3).',
       };
     }
     bodyRaw = compact.slice(0, -1);
@@ -109,7 +132,15 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
   if (!/^\d{6,9}$/.test(cleanBody) || Number(cleanBody) <= 0) {
     return {
       valid: false,
-      error: 'El cuerpo del RUT debe tener entre 6 y 9 dígitos numéricos válidos.',
+      error: 'El RUT debe contener entre 6 y 9 dígitos numéricos antes del dígito verificador.',
+    };
+  }
+
+  // Rechazar secuencias repetidas artificiales (ej: 11.111.111-1, 22.222.222-2)
+  if (/^(\d)\1+$/.test(cleanBody)) {
+    return {
+      valid: false,
+      error: 'El RUT ingresado no es válido. Verifica los dígitos ingresados.',
     };
   }
 
@@ -126,8 +157,7 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
       valid: false,
       body: cleanBody,
       verifierDigit: dv,
-      expectedVerifierDigit: expectedDv,
-      error: `RUT inválido según Módulo 11: el dígito verificador "${dv}" no coincide con el calculado ("${expectedDv}").`,
+      error: 'El RUT ingresado no es válido según validación Módulo 11. Verifica los dígitos ingresados.',
     };
   }
 
@@ -136,12 +166,66 @@ export function validateChileanRut(rawRut: string): RutValidationResult {
     valid: true,
     body: normalizedBody,
     verifierDigit: dv,
-    expectedVerifierDigit: expectedDv,
-    formatted: `${formatRutBodyWithDots(normalizedBody)}-${expectedDv}`,
+    formatted: `${formatRutBodyWithDots(normalizedBody)}-${dv}`,
   };
 }
 
 export function formatChileanRut(rawRut: string): string {
   const res = validateChileanRut(rawRut);
   return res.valid && res.formatted ? res.formatted : String(rawRut ?? '').trim();
+}
+
+export interface EmergencyPhoneValidationResult {
+  valid: boolean;
+  formatted?: string;
+  error?: string;
+}
+
+/**
+ * Valida un número telefónico de emergencia (chileno +56 9 XXXX XXXX o internacional 8-15 dígitos).
+ * Rechaza nombres o texto arbitrario en el campo telefónico.
+ */
+export function validateEmergencyPhone(rawPhone: string): EmergencyPhoneValidationResult {
+  const trimmed = String(rawPhone ?? '').trim();
+  if (!trimmed) {
+    return { valid: false, error: 'El teléfono de emergencia es obligatorio.' };
+  }
+  if (/[a-zA-Z]/.test(trimmed)) {
+    return {
+      valid: false,
+      error: 'Ingresa solo el número telefónico (sin letras ni nombres). Ej: +56 9 8765 4321.',
+    };
+  }
+  const digits = trimmed.replace(/\D/g, '');
+  if (digits.length < 8 || digits.length > 15) {
+    return {
+      valid: false,
+      error: 'El teléfono debe tener entre 8 y 15 dígitos (ej: +56 9 8765 4321).',
+    };
+  }
+
+  // Formato chileno estándar: +56 9 XXXX XXXX o 9 XXXX XXXX
+  if (digits.length === 9 && digits.startsWith('9')) {
+    return {
+      valid: true,
+      formatted: `+56 ${digits[0]} ${digits.slice(1, 5)} ${digits.slice(5)}`,
+    };
+  }
+  if (digits.length === 11 && digits.startsWith('569')) {
+    return {
+      valid: true,
+      formatted: `+56 9 ${digits.slice(3, 7)} ${digits.slice(7)}`,
+    };
+  }
+  if (digits.length === 10 && digits.startsWith('56')) {
+    return {
+      valid: true,
+      formatted: `+56 ${digits.slice(2, 4)} ${digits.slice(4, 7)} ${digits.slice(7)}`,
+    };
+  }
+
+  return {
+    valid: true,
+    formatted: trimmed.startsWith('+') ? `+${digits}` : `+${digits}`,
+  };
 }

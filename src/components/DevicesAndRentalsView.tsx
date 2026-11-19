@@ -42,11 +42,16 @@ import {
   isEquiposSubTabVisibleForUser,
   isSectionVisibleForUser,
 } from '../services/firebase';
-import { assignWorkersToCrew, canManageContractsAndPayments } from '../utils/accessControl';
+import {
+  assignWorkersToCrew,
+  canManageContractsAndPayments,
+  isGlobalMineSafeAdmin,
+} from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
 import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
 import { OrganizationsManagerPanel } from './OrganizationsManagerPanel';
-import { validateChileanRut } from '../utils/rut';
+import { validateChileanRut, validateEmergencyPhone } from '../utils/rut';
+import { RutInput } from './RutInput';
 
 interface DevicesAndRentalsViewProps {
   rentals: DeviceRental[];
@@ -121,12 +126,18 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const [showNewContractModal, setShowNewContractModal] = useState(false);
   const [editingContract, setEditingContract] = useState<DeviceRental | null>(null);
 
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser?.role);
+
   const allowedSubTabs = useMemo<EquiposSubTab[]>(() => {
     if (!currentUser) return EQUIPOS_SUBTAB_ORDER;
-    return EQUIPOS_SUBTAB_ORDER.filter((tab) =>
-      isEquiposSubTabVisibleForUser(tab, currentUser, platformConfig)
-    );
-  }, [currentUser, platformConfig]);
+    return EQUIPOS_SUBTAB_ORDER.filter((tab) => {
+      // MS-07: Global device catalog & multi-company manager are strictly for MineSafe global admins.
+      if ((tab === 'dispositivos' || tab === 'empresas') && !isGlobalAdmin) {
+        return false;
+      }
+      return isEquiposSubTabVisibleForUser(tab, currentUser, platformConfig);
+    });
+  }, [currentUser, platformConfig, isGlobalAdmin]);
 
   useEffect(() => {
     if (allowedSubTabs.length > 0 && !allowedSubTabs.includes(activeSubTab)) {
@@ -139,6 +150,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const showSubtabBar = isSectionVisibleForUser('eq_subtab_bar', currentUser, platformConfig);
 
   // New assignment form state
+  const [selectedExistingUserId, setSelectedExistingUserId] = useState('');
   const [newWorkerName, setNewWorkerName] = useState('');
   const [newWorkerRut, setNewWorkerRut] = useState('');
   const [newRole, setNewRole] = useState('Operador Subterráneo');
@@ -146,7 +158,8 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   const [newCrewSelectMode, setNewCrewSelectMode] = useState<string>('Cuadrilla Alfa - Turno A');
   const [newSector, setNewSector] = useState('Socavón Norte Frente de Avance');
   const [newSelectedDeviceCode, setNewSelectedDeviceCode] = useState(devices[0]?.code || 'MS-GAS-101');
-  const [newEmergencyContact, setNewEmergencyContact] = useState('+56 9 8765 4321');
+  const [newEmergencyContactName, setNewEmergencyContactName] = useState('');
+  const [newEmergencyContactPhone, setNewEmergencyContactPhone] = useState('');
 
   const crewSelectOptions = useMemo(() => {
     const seen = new Set<string>();
@@ -212,6 +225,28 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       ? activeOrganizationId
       : DEFAULT_ORGANIZATION.id;
 
+  const orgAssignableUsers = useMemo(
+    () =>
+      usersList.filter(
+        (u) =>
+          u.status === 'activo' &&
+          u.role !== 'superadmin' &&
+          (activeOrganizationId === 'all' ||
+            (u.organizationId || DEFAULT_ORGANIZATION.id) === effectiveOrgId)
+      ),
+    [usersList, activeOrganizationId, effectiveOrgId]
+  );
+
+  const assignedDeviceByCode = useMemo(() => {
+    const map = new Map<string, WorkerAssignment>();
+    assignments.forEach((a) => {
+      if (a.assignedDeviceCode) {
+        map.set(a.assignedDeviceCode.trim().toLowerCase(), a);
+      }
+    });
+    return map;
+  }, [assignments]);
+
   const showTempNotice = (text: string, tone: 'error' | 'success') => {
     setActionNotice({ text, tone });
     setTimeout(() => {
@@ -221,7 +256,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
 
   const handleCreateAssignment = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!newWorkerName.trim() || !newWorkerRut.trim()) return;
+    if (!newWorkerName.trim() || !newWorkerRut.trim()) {
+      setModalError('El nombre completo y RUT del trabajador son obligatorios.');
+      return;
+    }
     if (!canManageContracts) {
       setModalError('Solo un Administrador o SuperAdministrador autorizado puede asignar equipos.');
       return;
@@ -243,6 +281,28 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
       }
       const formattedWorkerRut = rutCheck.formatted!;
 
+      const phoneCheck = validateEmergencyPhone(newEmergencyContactPhone);
+      if (!phoneCheck.valid) {
+        setModalError(phoneCheck.error || 'El teléfono de emergencia debe ser un número válido.');
+        return;
+      }
+
+      const existingDevHolder = assignedDeviceByCode.get(selectedDev.code.trim().toLowerCase());
+      if (
+        existingDevHolder &&
+        (existingDevHolder.workerRut || '').trim().toLowerCase() !== formattedWorkerRut.toLowerCase()
+      ) {
+        setModalError(
+          `El sensor "${selectedDev.code}" ya se encuentra asignado a ${existingDevHolder.workerName} (${existingDevHolder.workerRut}). Selecciona otro dispositivo libre.`
+        );
+        return;
+      }
+
+      const cleanEmergencyName = newEmergencyContactName.trim();
+      const formattedEmergencyContact = cleanEmergencyName
+        ? `${cleanEmergencyName} · ${phoneCheck.formatted}`
+        : phoneCheck.formatted!;
+
       const chosenCrewName =
         (newCrewSelectMode === '__custom__' ? newCrew : newCrewSelectMode).trim() ||
         'Cuadrilla General';
@@ -252,6 +312,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
 
       await onAddAssignment({
         organizationId: effectiveOrgId,
+        userId: selectedExistingUserId || undefined,
         crewId: matchedCrew?.id,
         workerName: newWorkerName.trim(),
         workerRut: formattedWorkerRut,
@@ -262,25 +323,27 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
         assignedDeviceCode: selectedDev.code,
         assignmentDate: new Date().toISOString().split('T')[0],
         deviceBattery: selectedDev.batteryPct,
-        emergencyContact: newEmergencyContact.trim(),
+        emergencyContact: formattedEmergencyContact,
       });
 
       if (matchedCrew && onSaveCrew) {
         const cleanRut = formattedWorkerRut.toLowerCase();
         const alreadyMember = (matchedCrew.members || []).some(
           (m) =>
+            (selectedExistingUserId && m.userId === selectedExistingUserId) ||
             (cleanRut && (m.rut || '').trim().toLowerCase() === cleanRut) ||
             m.name.trim().toLowerCase() === newWorkerName.trim().toLowerCase()
         );
         if (!alreadyMember) {
           const newMember: CrewMember = {
             id: `mbr-${Date.now()}-${Math.random().toString(36).slice(2, 6)}`,
+            userId: selectedExistingUserId || undefined,
             name: newWorkerName.trim(),
             rut: formattedWorkerRut,
             role: newRole.trim() || 'Operador Subterráneo',
             assignedDeviceCode: selectedDev.code,
-            emergencyContact: newEmergencyContact.trim() || undefined,
-            isLeader: (matchedCrew.members || []).length === 0,
+            emergencyContact: formattedEmergencyContact,
+            isLeader: false,
             addedAt: Date.now(),
           };
           await onSaveCrew(
@@ -291,8 +354,11 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
 
       soundAlert.playFeedbackBeep();
       setShowAssignModal(false);
+      setSelectedExistingUserId('');
       setNewWorkerName('');
       setNewWorkerRut('');
+      setNewEmergencyContactName('');
+      setNewEmergencyContactPhone('');
       showTempNotice('Asignación de equipo guardada en Firebase RTDB.', 'success');
     } catch (err: any) {
       setModalError(err?.message || 'No se pudo guardar la asignación.');
@@ -972,8 +1038,37 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             </div>
 
             <form onSubmit={handleCreateAssignment} className="space-y-3 text-xs">
+              {orgAssignableUsers.length > 0 && (
+                <div>
+                  <label className="text-slate-300 block mb-1">
+                    Seleccionar Trabajador Registrado (Recomendado)
+                  </label>
+                  <select
+                    value={selectedExistingUserId}
+                    onChange={(e) => {
+                      const uid = e.target.value;
+                      setSelectedExistingUserId(uid);
+                      const matched = orgAssignableUsers.find((u) => u.id === uid);
+                      if (matched) {
+                        setNewWorkerName(matched.name);
+                        setNewWorkerRut(matched.rut || '');
+                        setNewRole(matched.roleLabel || matched.role);
+                      }
+                    }}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  >
+                    <option value="">-- Ingresar o elegir trabajador registrado --</option>
+                    {orgAssignableUsers.map((u) => (
+                      <option key={u.id} value={u.id}>
+                        {u.name} {u.rut ? `(${u.rut})` : ''} · {u.roleLabel || u.role}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               <div>
-                <label className="text-slate-300 block mb-1">Nombre Completo del Operador</label>
+                <label className="text-slate-300 block mb-1">Nombre Completo del Operador *</label>
                 <input
                   type="text"
                   required
@@ -985,37 +1080,13 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
               </div>
 
               <div>
-                <label className="text-slate-300 block mb-1">RUT Operador * (Módulo 11)</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="Ej: 17.456.789-1"
+                <label className="text-slate-300 block mb-1">RUT Operador *</label>
+                <RutInput
                   value={newWorkerRut}
-                  onChange={(e) => setNewWorkerRut(e.target.value)}
-                  onBlur={() => {
-                    const res = validateChileanRut(newWorkerRut);
-                    if (res.valid && res.formatted) setNewWorkerRut(res.formatted);
-                  }}
-                  className={`w-full px-3 py-2 bg-slate-950 border rounded-lg text-white font-mono ${
-                    newWorkerRut.trim()
-                      ? validateChileanRut(newWorkerRut).valid
-                        ? 'border-emerald-500/70 focus:border-emerald-400'
-                        : 'border-rose-500/80 focus:border-rose-400'
-                      : 'border-slate-800'
-                  }`}
+                  onChange={setNewWorkerRut}
+                  required
+                  placeholder="Ej: 17.456.789-K"
                 />
-                {newWorkerRut.trim() && (() => {
-                  const res = validateChileanRut(newWorkerRut);
-                  return (
-                    <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
-                      {res.valid
-                        ? `✓ RUT válido (${res.formatted})`
-                        : res.expectedVerifierDigit
-                        ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
-                        : `✗ ${res.error}`}
-                    </p>
-                  );
-                })()}
               </div>
 
               <div className="grid grid-cols-2 gap-2">
@@ -1067,20 +1138,54 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                   onChange={(e) => setNewSelectedDeviceCode(e.target.value)}
                   className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                 >
-                  {activeInventoryDevices.map(d => (
-                    <option key={d.id} value={d.code}>{d.code} - {d.name} ({d.batteryPct}% bat)</option>
-                  ))}
+                  {activeInventoryDevices.map((d) => {
+                    const holder = assignedDeviceByCode.get(d.code.trim().toLowerCase());
+                    return (
+                      <option key={d.id} value={d.code}>
+                        {d.code} - {d.name} ({d.batteryPct}% bat)
+                        {holder ? ` [Asignado a ${holder.workerName}]` : ''}
+                      </option>
+                    );
+                  })}
                 </select>
               </div>
 
-              <div>
-                <label className="text-slate-300 block mb-1">Contacto de Emergencia</label>
-                <input
-                  type="text"
-                  value={newEmergencyContact}
-                  onChange={(e) => setNewEmergencyContact(e.target.value)}
-                  className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
-                />
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label className="text-slate-300 block mb-1">Nombre Contacto Emergencia</label>
+                  <input
+                    type="text"
+                    placeholder="Ej: María Castro (Cónyuge)"
+                    value={newEmergencyContactName}
+                    onChange={(e) => setNewEmergencyContactName(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
+                  />
+                </div>
+                <div>
+                  <label className="text-slate-300 block mb-1">Teléfono Emergencia *</label>
+                  <input
+                    type="tel"
+                    required
+                    placeholder="+56 9 8765 4321"
+                    value={newEmergencyContactPhone}
+                    onChange={(e) => setNewEmergencyContactPhone(e.target.value)}
+                    className={`w-full px-3 py-2 bg-slate-950 border rounded-lg text-white font-mono ${
+                      newEmergencyContactPhone.trim()
+                        ? validateEmergencyPhone(newEmergencyContactPhone).valid
+                          ? 'border-emerald-500/70'
+                          : 'border-rose-500/80'
+                        : 'border-slate-800'
+                    }`}
+                  />
+                  {newEmergencyContactPhone.trim() && (() => {
+                    const res = validateEmergencyPhone(newEmergencyContactPhone);
+                    return (
+                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
+                        {res.valid ? `✓ ${res.formatted}` : `✗ ${res.error}`}
+                      </p>
+                    );
+                  })()}
+                </div>
               </div>
 
               {modalError && (

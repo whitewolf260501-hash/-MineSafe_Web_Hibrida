@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import {
+  buildAtomicAlertAcknowledgeDismissUpdates,
   buildAtomicAlertResolutionUpdates,
   buildAtomicPaymentUpdates,
   buildOrgScopedAttachmentPath,
@@ -9,6 +10,7 @@ import {
   DEFAULT_PLATFORM_CONFIG,
   evaluateWatchedUserStatusSnapshots,
   fetchPaginatedTelemetryHistory,
+  isAlertDismissedOnAcknowledge,
   isEquiposSubTabVisibleForUser,
   isSectionVisibleForUser,
   isTabVisibleForUser,
@@ -81,9 +83,13 @@ import {
 import {
   computeRutVerifierDigit,
   formatChileanRut,
+  formatRutLive,
   isPlaceholderRut,
   validateChileanRut,
+  validateEmergencyPhone,
 } from '../src/utils/rut';
+import { validateDateRange } from '../src/utils/dateRange';
+import { getCrewMemberIdentityKey } from '../src/utils/accessControl';
 import { ROOT_MARKDOWN_FILES } from '../src/data/generatedDocs';
 import { MiningCrew, Organization, PlatformConfig, SafetyAlert, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
 
@@ -1615,12 +1621,14 @@ async function runTests() {
 
   const badCheckDigit = validateChileanRut('17.456.789-2');
   assert.equal(badCheckDigit.valid, false);
-  assert.equal(badCheckDigit.expectedVerifierDigit, '1');
+  assert.equal('expectedVerifierDigit' in badCheckDigit, false, 'MS-05: Never leaks expected verifier digit');
+  assert.equal(badCheckDigit.error?.includes('esperado'), false, 'MS-05: Error text never discloses DV');
   assert.ok(badCheckDigit.error?.includes('Módulo 11'));
 
   assert.equal(validateChileanRut('12345').valid, false, 'Rejects too-short RUT');
   assert.equal(validateChileanRut('17.456.K89-1').valid, false, 'Rejects K in body');
   assert.equal(validateChileanRut('00.000.000-0').valid, false, 'Rejects all-zero RUT');
+  assert.equal(validateChileanRut('11.111.111-1').valid, false, 'MS-05: Rejects repeated-digit artificial RUT');
 
   // Bulk import rejects invalid Módulo 11 RUTs in users, assignments, and org bundles
   const bulkInvalidRutUsers = parseBulkInput(
@@ -1660,15 +1668,16 @@ async function runTests() {
   assert.equal(badOrgBundle.organization?.valid, false);
   assert.ok(badOrgBundle.organization?.errors[0].includes('Módulo 11'));
 
-  // Static audit of UI & service RUT validation integration
+  // Static audit of UI & service RUT validation integration (MS-05: standardized RutInput + zero DV leak)
+  const orgsPanelSrc = readRepoFile('src/components/OrganizationsManagerPanel.tsx');
   assert.ok(
     firebaseSvcSrc.includes('validateChileanRut') &&
-      usersViewSrc.includes('validateChileanRut') &&
-      bulkViewSrc.includes('validateChileanRut') &&
-      controlViewSrc.includes('validateChileanRut') &&
-      crewMgmtSrc.includes('validateChileanRut') &&
-      devicesViewSrc.includes('validateChileanRut'),
-    'All RUT inputs across UI forms and firebase.ts enforce Módulo 11 validation'
+      usersViewSrc.includes('<RutInput') &&
+      bulkViewSrc.includes('<RutInput') &&
+      controlViewSrc.includes('<RutInput') &&
+      devicesViewSrc.includes('<RutInput') &&
+      orgsPanelSrc.includes('<RutInput'),
+    'All RUT inputs across UI forms use standardized RutInput and firebase.ts enforces Módulo 11 validation'
   );
 
   console.log('✅ 21. Chilean RUT Módulo 11 validation & formatting passed');
@@ -1693,13 +1702,13 @@ async function runTests() {
   const envExampleSrc = readRepoFile('.env.example');
   const passwordModalSrc = readRepoFile('src/components/PasswordPolicyModal.tsx');
   assert.ok(
-    firebaseSvcSrc.includes('params.password.length < 8') &&
+    firebaseSvcSrc.includes('validatePasswordPolicy(params.password') &&
       firebaseSvcSrc.includes('params.newPassword.length < 8') &&
-      usersViewSrc.includes('newPassword.length < 8') &&
-      bulkViewSrc.includes('defaultAuthPassword.length < 8') &&
+      usersViewSrc.includes('validatePasswordPolicy(newPassword)') &&
+      bulkViewSrc.includes('validatePasswordPolicy(defaultAuthPassword)') &&
       loginViewSrc.includes('validatePasswordPolicy') &&
       passwordModalSrc.includes('validatePasswordPolicy'),
-    'All password creation/reset/bulk-import/policy paths enforce minimum 8-character policy'
+    'All password creation/reset/bulk-import/policy paths enforce full security password policy'
   );
   assert.ok(
     landingPageSrc.includes('minesafe99@gmail.com') &&
@@ -2377,6 +2386,188 @@ async function runTests() {
   );
 
   console.log('✅ 28. SuperAdmin Vistas y Bloques + Live Preview (Per-Role & Per-User) passed');
+
+  // ---------------------------------------------------------------------------
+  // 29. RECONOCER ALARMA LA QUITA COMPLETAMENTE (RTDB + SUPRESIÓN + LIMPIEZA)
+  // ---------------------------------------------------------------------------
+  assert.equal(
+    isAlertDismissedOnAcknowledge({ eliminada_al_reconocer: true, resuelta: true, atendida: true }, {}),
+    true,
+    'Alert flagged with eliminada_al_reconocer=true is completely dismissed'
+  );
+  assert.equal(
+    isAlertDismissedOnAcknowledge({ atendida: true, resuelta: false }, {}),
+    true,
+    'Previously acknowledged alert without formal resolution is dismissed completely'
+  );
+  assert.equal(
+    isAlertDismissedOnAcknowledge({ atendida: false, resuelta: false }, {}),
+    false,
+    'Unacknowledged active alert remains visible'
+  );
+  assert.equal(
+    isAlertDismissedOnAcknowledge(
+      { atendida: true, resuelta: true, status: 'resuelta', descripcion_cierre: 'Resuelta formalmente' },
+      { descripcion: 'Resuelta formalmente', tipoResolucion: 'emergencia_real' }
+    ),
+    false,
+    'Formally documented resolved alert remains visible in bitácora/resueltas'
+  );
+
+  const ackTargetAlert: SafetyAlert = {
+    id: 'evt_device_38A839E81F84_mq2_1763500000000',
+    code: 'EVT-MQ2-726118',
+    organizationId: 'org-alpha',
+    title: 'Umbral CRITICO: Gases Combustibles y Humos (MQ-2 ADC)',
+    severity: 'critico',
+    variableName: 'Gases Combustibles y Humos (MQ-2 ADC)',
+    sensorId: 'device_38A839E81F84',
+    sensorCode: 'Nodo Sensor & Gateway Principal (1F84)',
+    sectorName: 'Mina Chuquicamata - Rampa Principal',
+    recordedValue: '4095 ADC raw',
+    safeLimit: '< 1200 ADC',
+    timestamp: '18/11, 09:38:46 p. m.',
+    timestampMs: 1763500000000,
+    acknowledged: false,
+    resolved: false,
+    suggestedAction: 'Evacuar el área inmediata.',
+  };
+
+  const dismissUpdates = buildAtomicAlertAcknowledgeDismissUpdates(
+    ackTargetAlert,
+    'Manuel Crisostomo',
+    ['evt_device_38A839E81F84_mq2_1763499000000'],
+    1763501000000,
+    {
+      isExistingThresholdEvent: true,
+      existingRelatedThresholdEventIds: ['evt_device_38A839E81F84_mq2_1763499000000'],
+      clearEmergencyIfNone: true,
+      organizationId: 'org-alpha',
+    }
+  );
+
+  const mainAlertPayload = dismissUpdates[`alertas/${ackTargetAlert.id}`];
+  assert.ok(mainAlertPayload, 'Includes canonical alert record update');
+  assert.equal(mainAlertPayload.eliminada_al_reconocer, true);
+  assert.equal(mainAlertPayload.atendida, true);
+  assert.equal(mainAlertPayload.resuelta, true);
+  assert.equal(mainAlertPayload.status, 'resuelta');
+  assert.equal(mainAlertPayload.organizationId, 'org-alpha');
+  assert.equal(mainAlertPayload.title, ackTargetAlert.title);
+  assert.equal(mainAlertPayload.severity, 'critico');
+  assert.equal(dismissUpdates[`eventos_umbrales/${ackTargetAlert.id}/estado`], 'recuperada');
+  assert.equal(dismissUpdates['alertas/evt_device_38A839E81F84_mq2_1763499000000/eliminada_al_reconocer'], true);
+  assert.equal(dismissUpdates['eventos_umbrales/evt_device_38A839E81F84_mq2_1763499000000/estado'], 'recuperada');
+  assert.equal(dismissUpdates['emergencia/org-alpha/activa'], false);
+  assert.equal(dismissUpdates[`bitacora_contingencias/${ackTargetAlert.id}`], undefined, 'Acknowledge dismiss does not create a bitacora closure card');
+
+  const appAckUpdatedSrc = readRepoFile('src/App.tsx');
+  assert.ok(
+    appAckUpdatedSrc.includes('setAlerts((prev) => prev.filter((a) => !affectedIds.has(a.id)))') &&
+      appAckUpdatedSrc.includes('clearEmergencyIfNone: !hasOtherCriticalInOrg') &&
+      appAckUpdatedSrc.includes('processedDismissedAlertIdsRef'),
+    'App.tsx completely removes acknowledged alerts, suppresses them in alertEngine, and clears emergency when none remain'
+  );
+
+  console.log('✅ 29. Acknowledge Alert Completely Removes Alarm (RTDB + Suppression + Cleanup) passed');
+
+  // ---------------------------------------------------------------------------
+  // 30. MineSafe Technical Audit Hardening (MS-01 through MS-09)
+  // ---------------------------------------------------------------------------
+  // MS-04: Unmarking crew leader never removes the worker; identity keys match 1:1
+  const keyA = getCrewMemberIdentityKey({ userId: 'u-1', rut: '17.456.789-1', name: 'Carlos' });
+  const keyB = getCrewMemberIdentityKey({ userId: 'u-1', rut: '174567891', name: 'Carlos Soto' });
+  assert.equal(keyA, keyB, 'MS-04: Unified crew member identity key matches by userId');
+
+  const crewForLeaderTest: MiningCrew = {
+    id: 'crew-ms04',
+    organizationId: 'org-alpha',
+    name: 'Cuadrilla MS-04',
+    code: 'CUA-04',
+    shift: 'Turno Día',
+    status: 'activa',
+    members: [
+      { id: 'm1', userId: 'u-1', name: 'Ana', rut: '17.456.789-1', role: 'Operador', isLeader: true, addedAt: 1 },
+      { id: 'm2', userId: 'u-2', name: 'Luis', rut: '18.901.234-9', role: 'Operador', isLeader: false, addedAt: 2 },
+    ],
+    leaderName: 'Ana',
+    createdAt: 1,
+    updatedAt: 1,
+  };
+  const unmarkedLeaderCrew = assignWorkersToCrew(crewForLeaderTest, [
+    { ...crewForLeaderTest.members[0], isLeader: false },
+    { ...crewForLeaderTest.members[1], isLeader: false },
+  ]);
+  assert.equal(unmarkedLeaderCrew.members.length, 2, 'MS-04: Unmarking leader keeps all workers in crew');
+  assert.equal(unmarkedLeaderCrew.leaderName, undefined, 'MS-04: Crew can cleanly have no leader');
+
+  // MS-04 / MS-05: Emergency phone validation & live RUT formatting
+  assert.equal(validateEmergencyPhone('Juan Perez').valid, false, 'MS-04: Rejects text-only emergency contact');
+  assert.equal(validateEmergencyPhone('+56 9 8765 4321').valid, true, 'MS-04: Accepts valid Chilean mobile phone');
+  assert.equal(formatRutLive('174567891'), '17.456.789-1', 'MS-05: Live formats RUT with dots and hyphen');
+  assert.equal(formatRutLive('19333444k'), '19.333.444-K', 'MS-05: Live formats K verifier uppercase');
+
+  // MS-08: Date range validation
+  assert.equal(
+    validateDateRange('2026-05-10', '2026-05-01', { maxDays: 90, allowFuture: false }).valid,
+    false,
+    'MS-08: Rejects inverted date range'
+  );
+  assert.equal(
+    validateDateRange('2099-01-01', '2099-01-05', { maxDays: 90, allowFuture: false }).valid,
+    false,
+    'MS-08: Rejects future dates'
+  );
+  assert.equal(
+    validateDateRange('2025-01-01', '2025-06-01', { maxDays: 90, allowFuture: false }).valid,
+    false,
+    'MS-08: Rejects ranges exceeding maxDays'
+  );
+  assert.equal(
+    validateDateRange('2025-05-01', '2025-05-15', { maxDays: 90, allowFuture: false }).valid,
+    true,
+    'MS-08: Accepts valid past range within 90 days'
+  );
+
+  // Static audit of MS-01, MS-02, MS-03, MS-06, MS-07, MS-08, MS-09
+  const msAlertConfigSrc = readRepoFile('src/components/AlertConfigurationView.tsx');
+  const msDualCardsSrc = readRepoFile('src/components/DualReadingSensorCards.tsx');
+  const msChangePwModalSrc = readRepoFile('src/components/ChangePasswordModal.tsx');
+  const msNavbarSrc = readRepoFile('src/components/Navbar.tsx');
+  const msHistReportsSrc = readRepoFile('src/components/HistoricalReportsView.tsx');
+  const msAlertsViewSrc = readRepoFile('src/components/AlertsView.tsx');
+
+  assert.ok(
+    msAlertConfigSrc.includes('isDirty') && msAlertConfigSrc.includes('pendingSilenceAction'),
+    'MS-01/MS-02: AlertConfigurationView protects dirty drafts and requires confirmation modal before silencing'
+  );
+  assert.ok(
+    msDualCardsSrc.includes('Gateway Desconectado (Sin Transmisión)') && !msDualCardsSrc.includes('device.batteryPct ?? 95'),
+    'MS-03: DualReadingSensorCards accurately reports offline DHT11 and removes fake 95% battery default'
+  );
+  assert.ok(
+    msChangePwModalSrc.includes('changeAuthenticatedUserPassword') &&
+      msNavbarSrc.includes('onOpenChangePassword') &&
+      !bulkViewSrc.includes("'MineSafe2026*'"),
+    'MS-06: Authenticated password change modal wired and hardcoded bulk password removed'
+  );
+  assert.ok(
+    msNavbarSrc.includes('Mi Organización') &&
+      devicesViewSrc.includes('isGlobalMineSafeAdmin') &&
+      orgsPanelSrc.includes('isGlobalMineSafeAdmin'),
+    'MS-07: Company admin UI labels and global subtabs strictly gated'
+  );
+  assert.ok(
+    msHistReportsSrc.includes('validateDateRange') && msAlertsViewSrc.includes('validateDateRange'),
+    'MS-08: Both HistoricalReportsView and AlertsView enforce dateRange validation'
+  );
+  assert.ok(
+    appAckUpdatedSrc.includes('MODO SIMULACRO ACTIVO · NO ES UNA EMERGENCIA REAL') &&
+      !appAckUpdatedSrc.includes('const mockById = new Map(INITIAL_ALERTS'),
+    'MS-09: Mock alert enrichment removed and drill banner clearly distinguished'
+  );
+
+  console.log('✅ 30. MineSafe Technical Audit Hardening (MS-01 through MS-09) passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

@@ -37,6 +37,8 @@ import {
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import { validatePasswordPolicy } from '../utils/passwordPolicy';
+import { RutInput } from './RutInput';
 
 interface UsersManagementViewProps {
   currentUser: UserProfile;
@@ -77,7 +79,6 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [newRut, setNewRut] = useState('');
   const [newRole, setNewRole] = useState<UserRole>('operador');
   const [newShift, setNewShift] = useState('Turno Mañana (07:00 - 15:30)');
-  const [createRealAuth, setCreateRealAuth] = useState(true);
   const [newPassword, setNewPassword] = useState('');
   const [sendResetEmail, setSendResetEmail] = useState(true);
   const [newOrganizationId, setNewOrganizationId] = useState<string>(
@@ -262,83 +263,42 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       normalizedNewRut = rutCheck.formatted!;
     }
 
-    if (createRealAuth) {
-      if (newPassword.length < 8) {
-        setCreateError('La contraseña inicial debe tener al menos 8 caracteres.');
-        return;
-      }
-      setIsCreating(true);
-      try {
-        const created = await createUserAccountByAdmin({
-          name: newName,
-          email: newEmail,
-          password: newPassword,
-          role: safeRole,
-          rut: normalizedNewRut,
-          shift: newShift,
-          assignedSector: 'Faena Minera Central',
-          organizationId: targetOrgId,
-          sendResetEmail,
-          actingUser: currentUser,
-          organizations,
-          existingUsersInOrg: usersList,
-        });
-        soundAlert.playFeedbackBeep();
-        if (created.pendingActivation) {
-          showToast(
-            'success',
-            `Perfil habilitado para ${created.name} (${created.email}). Como su correo pertenecía a otra empresa, el trabajador debe entrar a Acceso → "Nueva cuenta (correo anterior)" para crear su nueva cuenta con ese correo.`
-          );
-        } else {
-          showToast(
-            'success',
-            `Cuenta Firebase Auth y perfil RTDB creados para ${created.name} (${safeRole}).`
-          );
-        }
-        setShowAddModal(false);
-        setNewName('');
-        setNewEmail('');
-        setNewRut('');
-        setNewPassword('');
-        setNewRole('operador');
-      } catch (err: any) {
-        setCreateError(err?.message || 'Error al crear usuario en Firebase Auth.');
-      } finally {
-        setIsCreating(false);
-      }
+    const policyCheck = validatePasswordPolicy(newPassword);
+    if (!policyCheck.valid) {
+      setCreateError(
+        `La contraseña inicial no cumple la política de seguridad: ${policyCheck.errors.join(' ')}`
+      );
       return;
     }
 
-    const roleLabels: Record<UserRole, string> = {
-      superadmin: 'Super Administrador de Seguridad Minera',
-      admin_minesafe: 'Admin Corporativo MineSafe',
-      admin: 'Administrador de Empresa',
-      supervisor: 'Supervisor Ambiental',
-      operador: 'Usuario Normal / Operador de Faena',
-    };
-
-    const created: UserProfile = {
-      id: `usr-${Date.now()}`,
-      organizationId: targetOrgId,
-      name: newName.trim(),
-      email: newEmail.trim().toLowerCase(),
-      role: safeRole,
-      roleLabel: roleLabels[safeRole],
-      rut: normalizedNewRut,
-      shift: newShift,
-      status: 'activo',
-      pendingActivation: true,
-      lastLogin: 'Pendiente crear nueva cuenta (/acceso)',
-    };
-
     setIsCreating(true);
     try {
-      await onAddUser(created);
+      const created = await createUserAccountByAdmin({
+        name: newName,
+        email: newEmail,
+        password: newPassword,
+        role: safeRole,
+        rut: normalizedNewRut,
+        shift: newShift,
+        assignedSector: '',
+        organizationId: targetOrgId,
+        sendResetEmail,
+        actingUser: currentUser,
+        organizations,
+        existingUsersInOrg: usersList,
+      });
       soundAlert.playFeedbackBeep();
-      showToast(
-        'success',
-        `Ficha creada para ${created.name} (${safeRole}). El trabajador puede activar su cuenta nueva en /acceso usando su correo.`
-      );
+      if (created.pendingActivation) {
+        showToast(
+          'success',
+          `Perfil habilitado para ${created.name} (${created.email}). Como su correo pertenecía a otra empresa, el trabajador debe entrar a Acceso → "Nueva cuenta (correo anterior)" para activar su acceso.`
+        );
+      } else {
+        showToast(
+          'success',
+          `Cuenta Firebase Auth y perfil RTDB creados para ${created.name} (${safeRole}).`
+        );
+      }
       setShowAddModal(false);
       setNewName('');
       setNewEmail('');
@@ -346,7 +306,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
       setNewPassword('');
       setNewRole('operador');
     } catch (err: any) {
-      setCreateError(err?.message || 'Error al registrar perfil en Firebase RTDB.');
+      setCreateError(err?.message || 'Error al crear usuario en Firebase Auth.');
     } finally {
       setIsCreating(false);
     }
@@ -744,36 +704,13 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
               <div className="grid grid-cols-2 gap-2">
                 <div>
-                  <label className="text-slate-300 block mb-1">RUT (Módulo 11)</label>
-                  <input
-                    type="text"
-                    placeholder="18.321.654-K"
+                  <label className="text-slate-300 block mb-1">RUT</label>
+                  <RutInput
                     value={newRut}
-                    onChange={(e) => setNewRut(e.target.value)}
-                    onBlur={() => {
-                      const res = validateChileanRut(newRut);
-                      if (res.valid && res.formatted) setNewRut(res.formatted);
-                    }}
-                    className={`w-full px-3 py-2 bg-slate-950 border rounded-lg text-white font-mono ${
-                      newRut.trim() && !isPlaceholderRut(newRut)
-                        ? validateChileanRut(newRut).valid
-                          ? 'border-emerald-500/70 focus:border-emerald-400'
-                          : 'border-rose-500/80 focus:border-rose-400'
-                        : 'border-slate-800'
-                    }`}
+                    onChange={setNewRut}
+                    allowEmpty
+                    placeholder="18.321.654-K"
                   />
-                  {newRut.trim() && !isPlaceholderRut(newRut) && (() => {
-                    const res = validateChileanRut(newRut);
-                    return (
-                      <p className={`mt-1 text-[10px] ${res.valid ? 'text-emerald-400' : 'text-rose-400'}`}>
-                        {res.valid
-                          ? `✓ RUT válido (${res.formatted})`
-                          : res.expectedVerifierDigit
-                          ? `✗ DV inválido (esperado: ${res.expectedVerifierDigit})`
-                          : `✗ ${res.error}`}
-                      </p>
-                    );
-                  })()}
                 </div>
                 <div>
                   <label className="text-slate-300 block mb-1">Rol en Faena</label>
@@ -836,45 +773,58 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               )}
 
               <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 space-y-2.5">
-                <label className="flex items-center gap-2 cursor-pointer text-slate-200 font-semibold">
-                  <input
-                    type="checkbox"
-                    checked={createRealAuth}
-                    onChange={(e) => setCreateRealAuth(e.target.checked)}
-                    className="rounded border-slate-600 bg-slate-900 text-cyan-500"
-                  />
-                  <span>Crear credenciales reales en Firebase Authentication</span>
-                </label>
+                <div className="flex items-center gap-2 text-slate-200 font-semibold">
+                  <Lock className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                  <span>Credenciales Reales en Firebase Authentication (Obligatorio)</span>
+                </div>
 
-                {createRealAuth ? (
-                  <div className="space-y-2 pt-1">
-                    <div>
-                      <label className="text-slate-300 block mb-1">Contraseña Inicial (mín. 8 caracteres)</label>
-                      <input
-                        type="password"
-                        required
-                        minLength={8}
-                        placeholder="••••••••"
-                        value={newPassword}
-                        onChange={(e) => setNewPassword(e.target.value)}
-                        className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white"
-                      />
-                    </div>
-                    <label className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-400">
-                      <input
-                        type="checkbox"
-                        checked={sendResetEmail}
-                        onChange={(e) => setSendResetEmail(e.target.checked)}
-                        className="rounded border-slate-600 bg-slate-900 text-cyan-500"
-                      />
-                      <span>Enviar correo automático de activación / cambio de clave</span>
-                    </label>
+                <div className="space-y-2 pt-0.5">
+                  <div>
+                    <label className="text-slate-300 block mb-1">Contraseña Inicial Segura *</label>
+                    <input
+                      type="password"
+                      required
+                      minLength={8}
+                      placeholder="Mín. 8 chars, mayúscula, minúscula y número"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white"
+                    />
                   </div>
-                ) : (
-                  <p className="text-[11px] text-amber-300">
-                    Modo solo perfil RTDB: el usuario requerirá alta de credenciales en Firebase Authentication por parte del administrador antes de poder iniciar sesión.
-                  </p>
-                )}
+                  {(() => {
+                    const check = validatePasswordPolicy(newPassword);
+                    const items = [
+                      { label: 'Mín. 8 caracteres', ok: check.checks.minLength },
+                      { label: 'Mayúscula', ok: check.checks.hasUppercase },
+                      { label: 'Minúscula', ok: check.checks.hasLowercase },
+                      { label: 'Número', ok: check.checks.hasNumber },
+                    ];
+                    return (
+                      <div className="grid grid-cols-2 gap-1 pt-0.5">
+                        {items.map((item) => (
+                          <span
+                            key={item.label}
+                            className={`text-[10px] flex items-center gap-1 ${
+                              item.ok ? 'text-emerald-400' : 'text-slate-500'
+                            }`}
+                          >
+                            <span>{item.ok ? '✓' : '○'}</span>
+                            <span>{item.label}</span>
+                          </span>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                  <label className="flex items-center gap-2 cursor-pointer text-[11px] text-slate-400 pt-1">
+                    <input
+                      type="checkbox"
+                      checked={sendResetEmail}
+                      onChange={(e) => setSendResetEmail(e.target.checked)}
+                      className="rounded border-slate-600 bg-slate-900 text-cyan-500"
+                    />
+                    <span>Enviar correo automático de activación / cambio de clave</span>
+                  </label>
+                </div>
               </div>
 
               {createError && (

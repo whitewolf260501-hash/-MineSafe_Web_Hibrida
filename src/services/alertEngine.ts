@@ -124,11 +124,24 @@ class AlertEngine {
 
     let highestSeverity: AlertThresholdLevel = 'normal';
 
+    const nowEvalMs = Date.now();
+
     for (const item of variablesToCheck) {
       const { key, val } = item;
       const varConfig = config[key];
 
-      if (!varConfig || !varConfig.activo || typeof val !== 'number' || Number.isNaN(val)) {
+      const silenceExpired =
+        typeof varConfig?.silencedUntilMs === 'number' &&
+        varConfig.silencedUntilMs > 0 &&
+        nowEvalMs >= varConfig.silencedUntilMs;
+      const effectiveActivo = varConfig ? (varConfig.activo || silenceExpired) : false;
+
+      if (!varConfig || !effectiveActivo || typeof val !== 'number' || Number.isNaN(val)) {
+        continue;
+      }
+
+      // Evitar falsas alarmas de gas/polvo cuando el pin analógico está flotante (4095 ADC = falla física de sensor)
+      if ((key === 'mq2' || key === 'pm25') && val === 4095) {
         continue;
       }
 
@@ -228,7 +241,8 @@ class AlertEngine {
 
           newEvents.push(eventRecord);
 
-          if (varConfig.notificaciones && (currentLevel === 'advertencia' || currentLevel === 'critico')) {
+          const effectiveNotifications = varConfig.notificaciones || silenceExpired;
+          if (effectiveNotifications && (currentLevel === 'advertencia' || currentLevel === 'critico')) {
             this.persistenceHandlers.playSound(currentLevel === 'critico' ? 'critico' : 'advertencia');
           }
 

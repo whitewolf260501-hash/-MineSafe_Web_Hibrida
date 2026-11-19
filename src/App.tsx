@@ -11,6 +11,7 @@ import { AlertConfigurationView } from './components/AlertConfigurationView';
 import { SuperAdminControlView } from './components/SuperAdminControlView';
 import { SuperAdminViewsCustomizerView } from './components/SuperAdminViewsCustomizerView';
 import { LoginModal } from './components/LoginModal';
+import { ChangePasswordModal } from './components/ChangePasswordModal';
 import { EmergencyModal, DrillType } from './components/EmergencyModal';
 import { alertEngine } from './services/alertEngine';
 
@@ -191,6 +192,7 @@ export default function App({
   const [alerts, setAlerts] = useState<SafetyAlert[]>([]);
   const alertsRef = React.useRef<SafetyAlert[]>([]);
   alertsRef.current = alerts;
+  const processedDismissedAlertIdsRef = React.useRef<Set<string>>(new Set());
   const rawDevicesRef = React.useRef<Record<string, any>>({});
   const timeoutSecondsRef = React.useRef<number>(DEFAULT_PLATFORM_CONFIG.metrics.gatewayTimeoutSeconds || 20);
   const [organizations, setOrganizations] = useState<Organization[]>([]);
@@ -238,6 +240,7 @@ export default function App({
   );
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
+  const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
   const [showEmergencyModal, setShowEmergencyModal] = useState<boolean>(false);
   const [evacuationActive, setEvacuationActive] = useState<boolean>(false);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean>(false);
@@ -473,37 +476,23 @@ export default function App({
     }, subscriptionScope);
 
     const unsubAlerts = subscribeToRTDBAlerts((remoteAlerts) => {
-      const mockById = new Map(INITIAL_ALERTS.map((m) => [m.id, m]));
-      const enrichedRemote = remoteAlerts.map((a) => {
-        const mock = mockById.get(a.id);
-        if (!mock) return a;
-        const isFallbackTitle =
-          a.title === 'Alerta de Seguridad' || a.title.startsWith('Contingencia Registrada (');
-        return {
-          ...a,
-          code: a.code === a.id ? mock.code : a.code,
-          title: isFallbackTitle ? mock.title : a.title,
-          severity: a.severity === 'advertencia' && mock.severity ? mock.severity : a.severity,
-          variableName: a.variableName === 'Variable Ambiental' ? mock.variableName : a.variableName,
-          sensorId: a.sensorId === 'device_38A839E81F84' && mock.sensorId ? mock.sensorId : a.sensorId,
-          sensorCode: a.sensorCode === 'device_38A839E81F84' || a.sensorCode === 'ESP32' ? mock.sensorCode : a.sensorCode,
-          sectorName: a.sectorName === 'Mina Chuquicamata - Rampa Principal' && mock.sectorName ? mock.sectorName : a.sectorName,
-          recordedValue: a.recordedValue === '-' ? mock.recordedValue : a.recordedValue,
-          safeLimit: a.safeLimit === '-' ? mock.safeLimit : a.safeLimit,
-          suggestedAction:
-            a.suggestedAction === 'Verificar condiciones del sector y registrar medidas de control.'
-              ? mock.suggestedAction
-              : a.suggestedAction,
-        };
+      // MS-09: Never overwrite real RTDB alerts with mock INITIAL_ALERTS data.
+      alertEngine.syncExistingActiveAlerts(remoteAlerts);
+      setAlerts(remoteAlerts);
+    }, subscriptionScope, (dismissedAlerts) => {
+      dismissedAlerts.forEach((dismissed) => {
+        if (!processedDismissedAlertIdsRef.current.has(dismissed.id)) {
+          processedDismissedAlertIdsRef.current.add(dismissed.id);
+          alertEngine.markIncidentManuallyResolved(dismissed);
+        }
       });
-      alertEngine.syncExistingActiveAlerts(enrichedRemote);
-      setAlerts(enrichedRemote);
-    }, subscriptionScope);
+    });
 
     const unsubSites = subscribeToRTDBSites((remoteSites) => {
       const targetOrgId = subscriptionScope.organizationId || DEFAULT_ORGANIZATION.id;
       const allowPrincipalPresets =
-        targetOrgId === 'all' || targetOrgId === DEFAULT_ORGANIZATION.id;
+        remoteSites.length === 0 &&
+        (targetOrgId === 'all' || targetOrgId === DEFAULT_ORGANIZATION.id);
       setSites((prev) => {
         const otherOrgSites =
           targetOrgId === 'all'
@@ -1063,21 +1052,43 @@ export default function App({
     }
     soundAlert.playFeedbackBeep();
     const ackBy = currentUser?.name || 'Operador';
-    const targetAlert = alertsRef.current.find((a) => a.id === alertId);
+    const prevAlerts = alertsRef.current;
+    const targetAlert = prevAlerts.find((a) => a.id === alertId);
     const relatedIds = getRelatedActiveAlertIds(targetAlert);
     const affectedIds = new Set([alertId, ...relatedIds]);
 
-    setAlerts((prev) =>
-      prev.map((a) =>
-        affectedIds.has(a.id)
-          ? { ...a, acknowledged: true, acknowledgedBy: ackBy }
-          : a
-      )
+    affectedIds.forEach((id) => {
+      processedDismissedAlertIdsRef.current.add(id);
+      const alertObj = prevAlerts.find((a) => a.id === id);
+      if (alertObj) {
+        alertEngine.markIncidentManuallyResolved(alertObj);
+      }
+    });
+
+    const targetOrgId = targetAlert?.organizationId || DEFAULT_ORGANIZATION.id;
+    const hasOtherCriticalInOrg = prevAlerts.some(
+      (a) =>
+        !a.resolved &&
+        !affectedIds.has(a.id) &&
+        a.severity === 'critico' &&
+        (a.organizationId || DEFAULT_ORGANIZATION.id) === targetOrgId
     );
+
+    if (!hasOtherCriticalInOrg) {
+      soundAlert.stopContinuousAlarm();
+    }
+
+    setAlerts((prev) => prev.filter((a) => !affectedIds.has(a.id)));
+
     try {
-      await acknowledgeAlertInRTDB(targetAlert || alertId, ackBy, relatedIds);
+      await acknowledgeAlertInRTDB(targetAlert || alertId, ackBy, relatedIds, {
+        clearEmergencyIfNone: !hasOtherCriticalInOrg,
+        organizationId: targetOrgId,
+      });
+      showAlarmFeedback('Alarma reconocida y eliminada completamente.', 'success');
     } catch (err: any) {
-      showAlarmFeedback(err?.message || 'Error al registrar reconocimiento en Firebase RTDB.', 'error');
+      setAlerts(prevAlerts);
+      showAlarmFeedback(err?.message || 'Error al reconocer y eliminar la alarma en Firebase RTDB.', 'error');
     }
   }, [currentUser, getRelatedActiveAlertIds, showAlarmFeedback]);
 
@@ -2045,6 +2056,7 @@ export default function App({
   const handleLogout = useCallback(async () => {
     soundAlert.stopContinuousAlarm();
     alertEngine.clearActiveIncidents();
+    processedDismissedAlertIdsRef.current.clear();
     rawDevicesRef.current = {};
     setShowLoginModal(false);
     setShowEmergencyModal(false);
@@ -2183,6 +2195,7 @@ export default function App({
         activeAlertCount={activeAlerts.length}
         currentUser={currentUser}
         onChangeUser={() => setShowLoginModal(true)}
+        onOpenChangePassword={() => setShowChangePasswordModal(true)}
         onLogout={handleLogout}
         onTriggerEmergency={() => {
           if (currentUser?.role !== 'operador') {
@@ -2280,13 +2293,13 @@ export default function App({
               <span className="text-xs sm:text-sm md:text-base tracking-wide uppercase font-black drop-shadow">
                 {isDrillActive ? (
                   <>
-                    <span className="bg-black/40 px-2 py-0.5 rounded mr-2 border border-white/40">
-                      MODO SIMULACRO DS 132 ACTIVO (ENTRENAMIENTO)
+                    <span className="bg-black/60 px-2.5 py-0.5 rounded mr-2 border-2 border-amber-200 text-amber-200">
+                      MODO SIMULACRO ACTIVO · NO ES UNA EMERGENCIA REAL
                     </span>
-                    Simulación de Emergencia en faena: sirenas y sensores forzados para validación operativa
+                    Entrenamiento DS 132: sirenas y lecturas forzadas temporalmente solo para validación operativa
                   </>
                 ) : (
-                  '¡ALERTA EN TERRENO: Baliza estroboscópica y sirena acústica activadas en el nodo sensor!'
+                  '¡ALERTA REAL EN TERRENO: Baliza estroboscópica y sirena acústica activadas en el nodo sensor!'
                 )}
               </span>
             </div>
@@ -2767,6 +2780,15 @@ export default function App({
           onClose={() => setShowLoginModal(false)}
           theme={theme}
           onToggleTheme={handleToggleTheme}
+        />
+      )}
+
+      {/* Authenticated Change Password Modal (MS-06) */}
+      {showChangePasswordModal && (
+        <ChangePasswordModal
+          user={currentUser}
+          onClose={() => setShowChangePasswordModal(false)}
+          onPasswordChanged={(updated) => setCurrentUser(updated)}
         />
       )}
 

@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { 
   Sliders, 
   ShieldAlert, 
@@ -98,10 +98,71 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
 
   // Estados de interfaz y acción
   const [isSaving, setIsSaving] = useState(false);
+  const [isDirty, setIsDirty] = useState(false);
+  const [hasRemoteUpdate, setHasRemoteUpdate] = useState(false);
   const [saveSuccessMessage, setSaveSuccessMessage] = useState<string | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
   const [showResetConfirmModal, setShowResetConfirmModal] = useState(false);
   const [isResetting, setIsResetting] = useState(false);
+
+  // Borrador de texto para inputs numéricos (evita saltos a 0 al borrar y valida rangos extremos)
+  type VarKey = 'pm25' | 'mq2' | 'temperatura' | 'humedad';
+  type LevelField = 'preventivo' | 'advertencia' | 'critico';
+  type NumericDraftMap = Record<VarKey, Record<LevelField, string>>;
+
+  const buildDraftMapFromConfig = (cfg: DeviceThresholdsConfig): NumericDraftMap => ({
+    mq2: {
+      preventivo: String(cfg.mq2?.preventivo ?? DEFAULT_GLOBAL_THRESHOLDS.mq2.preventivo),
+      advertencia: String(cfg.mq2?.advertencia ?? DEFAULT_GLOBAL_THRESHOLDS.mq2.advertencia),
+      critico: String(cfg.mq2?.critico ?? DEFAULT_GLOBAL_THRESHOLDS.mq2.critico),
+    },
+    pm25: {
+      preventivo: String(cfg.pm25?.preventivo ?? DEFAULT_GLOBAL_THRESHOLDS.pm25.preventivo),
+      advertencia: String(cfg.pm25?.advertencia ?? DEFAULT_GLOBAL_THRESHOLDS.pm25.advertencia),
+      critico: String(cfg.pm25?.critico ?? DEFAULT_GLOBAL_THRESHOLDS.pm25.critico),
+    },
+    temperatura: {
+      preventivo: String(cfg.temperatura?.preventivo ?? DEFAULT_GLOBAL_THRESHOLDS.temperatura.preventivo),
+      advertencia: String(cfg.temperatura?.advertencia ?? DEFAULT_GLOBAL_THRESHOLDS.temperatura.advertencia),
+      critico: String(cfg.temperatura?.critico ?? DEFAULT_GLOBAL_THRESHOLDS.temperatura.critico),
+    },
+    humedad: {
+      preventivo: String(cfg.humedad?.preventivo ?? DEFAULT_GLOBAL_THRESHOLDS.humedad.preventivo),
+      advertencia: String(cfg.humedad?.advertencia ?? DEFAULT_GLOBAL_THRESHOLDS.humedad.advertencia),
+      critico: String(cfg.humedad?.critico ?? DEFAULT_GLOBAL_THRESHOLDS.humedad.critico),
+    },
+  });
+
+  const [numericDrafts, setNumericDrafts] = useState<NumericDraftMap>(() =>
+    buildDraftMapFromConfig(DEFAULT_GLOBAL_THRESHOLDS)
+  );
+
+  // Modal de confirmación auditable al desactivar monitoreo o notificaciones
+  const [pendingSilenceAction, setPendingSilenceAction] = useState<{
+    variableKey: VarKey;
+    variableName: string;
+    field: 'activo' | 'notificaciones';
+  } | null>(null);
+  const [silenceReason, setSilenceReason] = useState('');
+  const [silenceDurationHours, setSilenceDurationHours] = useState<number>(4);
+
+  const devicesRef = useRef<SensorDevice[]>(devices);
+  useEffect(() => {
+    devicesRef.current = devices;
+  }, [devices]);
+
+  const lastLoadedTargetRef = useRef<string>('');
+  const isDirtyRef = useRef<boolean>(false);
+  useEffect(() => {
+    isDirtyRef.current = isDirty;
+  }, [isDirty]);
+
+  const PHYSICAL_BOUNDS: Record<VarKey, { min: number; max: number }> = {
+    mq2: { min: 0, max: 4095 },
+    pm25: { min: 0, max: 4095 },
+    temperatura: { min: -40, max: 100 },
+    humedad: { min: 0, max: 100 },
+  };
 
   // Permisos: Administradores (local o MineSafe) y SuperAdmin pueden guardar/restaurar umbrales por dispositivo
   const isAuthorized = isAnyAdminRole(currentUser.role);
@@ -157,59 +218,165 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
     return () => unsub();
   }, [subscriptionScope]);
 
-  // 3. Cuando cambia el dispositivo seleccionado o el mapa de configuraciones, cargar los datos en el editor
-  useEffect(() => {
-    const targetConfig = configsMap[selectedTargetId];
+  // 3. Hidratar el formulario SOLO cuando cambia el objetivo seleccionado o llega una actualización remota SIN edición local pendiente
+  const hydrateFromRemote = (targetId: string, map: Record<string, DeviceThresholdsConfig>) => {
+    const targetConfig = map[targetId];
+    let resolved: DeviceThresholdsConfig;
     if (targetConfig) {
-      setCurrentConfig(JSON.parse(JSON.stringify(targetConfig)));
+      resolved = JSON.parse(JSON.stringify(targetConfig));
     } else {
-      // Si el dispositivo específico aún no tiene configuración propia, hereda la global
-      const baseGlobal = configsMap['global'] || DEFAULT_GLOBAL_THRESHOLDS;
-      const deviceObj = devices.find(d => d.id === selectedTargetId);
-      setCurrentConfig({
+      const baseGlobal = map['global'] || DEFAULT_GLOBAL_THRESHOLDS;
+      const deviceObj = devicesRef.current.find((d) => d.id === targetId);
+      resolved = {
         ...JSON.parse(JSON.stringify(baseGlobal)),
-        dispositivo_id: selectedTargetId,
-        dispositivo_nombre: deviceObj ? deviceObj.name : `Dispositivo ${selectedTargetId}`,
-        actualizado_por: 'Heredado de Plantilla Global'
-      });
+        dispositivo_id: targetId,
+        dispositivo_nombre: deviceObj ? deviceObj.name : `Dispositivo ${targetId}`,
+        actualizado_por: 'Heredado de Plantilla Global',
+      };
     }
-    setSaveSuccessMessage(null);
+    setCurrentConfig(resolved);
+    setNumericDrafts(buildDraftMapFromConfig(resolved));
+    setIsDirty(false);
+    setHasRemoteUpdate(false);
     setErrorMessage(null);
-  }, [selectedTargetId, configsMap, devices]);
+  };
 
-  // Manejador de cambios numéricos y booleanos en las variables
-  const handleVariableChange = (
-    variableKey: 'pm25' | 'mq2' | 'temperatura' | 'humedad',
-    field: keyof ThresholdVariableConfig,
-    value: any
+  useEffect(() => {
+    if (!selectedTargetId) return;
+    const targetChanged = lastLoadedTargetRef.current !== selectedTargetId;
+    if (targetChanged) {
+      lastLoadedTargetRef.current = selectedTargetId;
+      hydrateFromRemote(selectedTargetId, configsMap);
+      setSaveSuccessMessage(null);
+      return;
+    }
+    if (isDirtyRef.current) {
+      setHasRemoteUpdate(true);
+      return;
+    }
+    hydrateFromRemote(selectedTargetId, configsMap);
+  }, [selectedTargetId, configsMap]);
+
+  // Manejador de cambios numéricos controlados (mantiene borrador de texto para evitar saltos a 0)
+  const handleNumericInputChange = (
+    variableKey: VarKey,
+    field: LevelField,
+    rawValue: string
   ) => {
-    setCurrentConfig((prev) => {
-      const updatedVar = {
+    setNumericDrafts((prev) => ({
+      ...prev,
+      [variableKey]: {
         ...prev[variableKey],
-        [field]: value
-      };
-      return {
-        ...prev,
-        [variableKey]: updatedVar
-      };
-    });
+        [field]: rawValue,
+      },
+    }));
+    const trimmed = rawValue.trim();
+    const parsed = trimmed === '' ? NaN : Number(trimmed);
+    setCurrentConfig((prev) => ({
+      ...prev,
+      [variableKey]: {
+        ...prev[variableKey],
+        [field]: Number.isFinite(parsed) ? parsed : NaN,
+      },
+    }));
+    setIsDirty(true);
     setSaveSuccessMessage(null);
     setErrorMessage(null);
   };
 
-  // Validación de umbrales
+  // Manejador de cambios booleanos en monitoreo/notificaciones con confirmación de seguridad al desactivar
+  const handleToggleBoolean = (
+    variableKey: VarKey,
+    variableName: string,
+    field: 'activo' | 'notificaciones',
+    nextValue: boolean
+  ) => {
+    if (!nextValue) {
+      setPendingSilenceAction({ variableKey, variableName, field });
+      setSilenceReason('');
+      setSilenceDurationHours(4);
+      return;
+    }
+    setCurrentConfig((prev) => ({
+      ...prev,
+      [variableKey]: {
+        ...prev[variableKey],
+        [field]: true,
+        silencedReason: undefined,
+        silencedUntilMs: undefined,
+        silencedBy: undefined,
+      },
+    }));
+    setIsDirty(true);
+    setSaveSuccessMessage(null);
+    setErrorMessage(null);
+  };
+
+  const handleConfirmSilence = () => {
+    if (!pendingSilenceAction) return;
+    const cleanReason = silenceReason.trim();
+    if (cleanReason.length < 8) return;
+    const silencedUntilMs =
+      silenceDurationHours > 0 ? Date.now() + silenceDurationHours * 60 * 60 * 1000 : undefined;
+    const { variableKey, field } = pendingSilenceAction;
+    setCurrentConfig((prev) => ({
+      ...prev,
+      [variableKey]: {
+        ...prev[variableKey],
+        [field]: false,
+        silencedReason: cleanReason,
+        silencedUntilMs,
+        silencedBy: currentUser.name || currentUser.email,
+      },
+    }));
+    setIsDirty(true);
+    setPendingSilenceAction(null);
+    setSaveSuccessMessage(null);
+    setErrorMessage(null);
+  };
+
+  // Validación estricta de rangos físicos [min, max] y orden matemático preventivo < advertencia < critico
   const validationErrors = useMemo(() => {
     const errors: Record<string, string> = {};
-    const vars: ('pm25' | 'mq2' | 'temperatura' | 'humedad')[] = ['pm25', 'mq2', 'temperatura', 'humedad'];
+    const vars: VarKey[] = ['pm25', 'mq2', 'temperatura', 'humedad'];
 
     for (const v of vars) {
       const cfg = currentConfig[v];
-      if (cfg && cfg.activo) {
-        if (cfg.preventivo >= cfg.advertencia) {
-          errors[v] = `El umbral Preventivo (${cfg.preventivo}) debe ser estrictamente menor que Advertencia (${cfg.advertencia}).`;
-        } else if (cfg.advertencia >= cfg.critico) {
-          errors[v] = `El umbral Advertencia (${cfg.advertencia}) debe ser estrictamente menor que Crítico (${cfg.critico}).`;
+      if (!cfg) continue;
+      const bounds = PHYSICAL_BOUNDS[v];
+      const minAllowed =
+        typeof cfg.minVal === 'number' && Number.isFinite(cfg.minVal)
+          ? Math.max(bounds.min, cfg.minVal)
+          : bounds.min;
+      const maxAllowed =
+        typeof cfg.maxVal === 'number' && Number.isFinite(cfg.maxVal)
+          ? Math.min(bounds.max, cfg.maxVal)
+          : bounds.max;
+
+      const checks: Array<{ label: string; value: number }> = [
+        { label: 'Preventivo', value: cfg.preventivo },
+        { label: 'Advertencia', value: cfg.advertencia },
+        { label: 'Crítico', value: cfg.critico },
+      ];
+
+      let rangeErr: string | null = null;
+      for (const item of checks) {
+        if (typeof item.value !== 'number' || !Number.isFinite(item.value)) {
+          rangeErr = `Ingresa un valor numérico válido para ${item.label}.`;
+          break;
         }
+        if (item.value < minAllowed || item.value > maxAllowed) {
+          rangeErr = `El umbral ${item.label} (${item.value}) está fuera del rango permitido (${minAllowed} a ${maxAllowed} ${cfg.unidad}).`;
+          break;
+        }
+      }
+
+      if (rangeErr) {
+        errors[v] = rangeErr;
+      } else if (cfg.preventivo >= cfg.advertencia) {
+        errors[v] = `El umbral Preventivo (${cfg.preventivo}) debe ser estrictamente menor que Advertencia (${cfg.advertencia}).`;
+      } else if (cfg.advertencia >= cfg.critico) {
+        errors[v] = `El umbral Advertencia (${cfg.advertencia}) debe ser estrictamente menor que Crítico (${cfg.critico}).`;
       }
     }
     return errors;
@@ -219,13 +386,14 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
 
   // Guardar configuración en Firebase
   const handleSaveConfig = async () => {
+    if (isSaving) return;
     if (!isAuthorized) {
       setErrorMessage('Permisos insuficientes: Requiere rol Administrador o SuperAdmin para aplicar cambios.');
       return;
     }
 
     if (hasValidationErrors) {
-      setErrorMessage('Corrija las inconsistencias de umbrales marcadas en rojo antes de guardar.');
+      setErrorMessage('Corrija los rangos inválidos o inconsistencias marcadas en rojo antes de guardar.');
       return;
     }
 
@@ -239,20 +407,23 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
     setSaveSuccessMessage(null);
 
     try {
-      const targetDevice = devices.find((d) => d.id === selectedTargetId);
+      const targetDevice = devicesRef.current.find((d) => d.id === selectedTargetId);
       const targetOrgId =
         targetDevice?.organizationId ||
         (effectiveOrgId !== 'all' ? effectiveOrgId : currentUser.organizationId);
-      await saveThresholdConfig(selectedTargetId, currentConfig, currentUser, targetOrgId);
+      const cleanSnapshot: DeviceThresholdsConfig = JSON.parse(JSON.stringify(currentConfig));
+      await saveThresholdConfig(selectedTargetId, cleanSnapshot, currentUser, targetOrgId);
       
       // Actualizar en el motor local inmediatamente
       if (selectedTargetId === 'global') {
-        alertEngine.setGlobalConfig(currentConfig);
+        alertEngine.setGlobalConfig(cleanSnapshot);
       } else {
-        alertEngine.setDeviceConfig(selectedTargetId, currentConfig);
+        alertEngine.setDeviceConfig(selectedTargetId, cleanSnapshot);
       }
 
-      setSaveSuccessMessage(`Configuración guardada en Firebase exitosamente para ${selectedTargetId === 'global' ? 'todos los dispositivos (Global)' : currentConfig.dispositivo_nombre || selectedTargetId}.`);
+      setIsDirty(false);
+      setHasRemoteUpdate(false);
+      setSaveSuccessMessage(`Configuración guardada en Firebase exitosamente para ${selectedTargetId === 'global' ? 'todos los dispositivos (Global)' : cleanSnapshot.dispositivo_nombre || selectedTargetId}.`);
       setTimeout(() => setSaveSuccessMessage(null), 5000);
     } catch (err: any) {
       setErrorMessage(err.message || 'Error al guardar la configuración en Firebase RTDB.');
@@ -270,6 +441,9 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
     try {
       const restored = await resetThresholdConfigToDefault(selectedTargetId, currentUser);
       setCurrentConfig(restored);
+      setNumericDrafts(buildDraftMapFromConfig(restored));
+      setIsDirty(false);
+      setHasRemoteUpdate(false);
       if (selectedTargetId === 'global') {
         alertEngine.setGlobalConfig(restored);
       } else {
@@ -477,6 +651,26 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
       </div>
       )}
 
+      {/* AVISO DE EDICIÓN PENDIENTE / ACTUALIZACIÓN REMOTA */}
+      {isDirty && (
+        <div className="p-3 bg-amber-950/50 border border-amber-700/70 rounded-xl flex flex-wrap items-center justify-between gap-3 text-amber-200 text-xs">
+          <div className="flex items-center gap-2">
+            <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0" />
+            <span>
+              <strong>Tienes cambios sin guardar.</strong> La sincronización en vivo de telemetría está pausada sobre este formulario para evitar que tus valores se reviertan.
+              {hasRemoteUpdate ? ' Se detectó una actualización remota en otro cliente.' : ''}
+            </span>
+          </div>
+          <button
+            type="button"
+            onClick={() => hydrateFromRemote(selectedTargetId, configsMap)}
+            className="px-2.5 py-1 rounded-lg bg-slate-900 hover:bg-slate-800 border border-amber-700/60 text-amber-200 font-semibold cursor-pointer"
+          >
+            Descartar cambios
+          </button>
+        </div>
+      )}
+
       {/* FEEDBACK BANNERS */}
       {saveSuccessMessage && (
         <div className="p-3 bg-emerald-950/60 border border-emerald-600/80 rounded-xl flex items-center gap-3 text-emerald-200 text-sm shadow-md animate-fade-in">
@@ -528,7 +722,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                         type="checkbox"
                         checked={varCfg.activo}
                         disabled={!isAuthorized}
-                        onChange={(e) => handleVariableChange(vMeta.key, 'activo', e.target.checked)}
+                        onChange={(e) => handleToggleBoolean(vMeta.key, vMeta.name, 'activo', e.target.checked)}
                         className="w-4 h-4 accent-amber-500 rounded cursor-pointer disabled:cursor-not-allowed"
                       />
                     </label>
@@ -536,12 +730,12 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                 </div>
 
                 {/* INTERRUPTOR DE NOTIFICACIONES */}
-                <div className="flex items-center justify-between py-2 px-3 bg-slate-950/60 rounded-lg border border-slate-800/80 mb-4 text-xs">
+                <div className="flex items-center justify-between py-2 px-3 bg-slate-950/60 rounded-lg border border-slate-800/80 mb-3 text-xs">
                   <div className="flex items-center gap-2 text-slate-300">
                     {varCfg.notificaciones ? (
                       <Bell className="w-3.5 h-3.5 text-amber-400" />
                     ) : (
-                      <BellOff className="w-3.5 h-3.5 text-slate-500" />
+                      <BellOff className="w-3.5 h-3.5 text-rose-400" />
                     )}
                     <span>Notificaciones sonoras y sirena en faena</span>
                   </div>
@@ -550,12 +744,33 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                       type="checkbox"
                       checked={varCfg.notificaciones}
                       disabled={!isAuthorized || !varCfg.activo}
-                      onChange={(e) => handleVariableChange(vMeta.key, 'notificaciones', e.target.checked)}
+                      onChange={(e) => handleToggleBoolean(vMeta.key, vMeta.name, 'notificaciones', e.target.checked)}
                       className="sr-only peer"
                     />
                     <div className="w-9 h-5 bg-slate-800 peer-focus:outline-none rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-slate-300 after:border after:rounded-full after:h-4 after:w-4 after:transition-all peer-checked:bg-amber-500 disabled:opacity-40" />
                   </label>
                 </div>
+
+                {/* ESTADO DE SILENCIAMIENTO AUDITADO */}
+                {(!varCfg.activo || !varCfg.notificaciones) && (
+                  <div className="p-2 mb-3 bg-amber-950/50 border border-amber-700/70 rounded-lg text-amber-200 text-[11px] space-y-0.5">
+                    <div className="font-bold flex items-center gap-1.5">
+                      <AlertTriangle className="w-3.5 h-3.5 text-amber-400 shrink-0" />
+                      <span>
+                        {!varCfg.activo ? 'Monitoreo pausado' : 'Notificaciones silenciadas'} para{' '}
+                        {selectedTargetId === 'global' ? 'Plantilla Global' : `ID ${selectedTargetId}`}
+                      </span>
+                    </div>
+                    {varCfg.silencedReason && (
+                      <p className="text-amber-200/90">Motivo: {varCfg.silencedReason}</p>
+                    )}
+                    {varCfg.silencedUntilMs && (
+                      <p className="text-amber-300/80 font-mono text-[10px]">
+                        Reactivación automática: {new Date(varCfg.silencedUntilMs).toLocaleString('es-CL')}
+                      </p>
+                    )}
+                  </div>
+                )}
 
                 {/* ADVERTENCIA DE ERROR DE VALIDACIÓN */}
                 {hasError && (
@@ -564,6 +779,17 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                     <span>{validationErrors[vMeta.key]}</span>
                   </div>
                 )}
+
+                {/* RANGO FÍSICO PERMITIDO */}
+                <div className="text-[10px] text-slate-400 mb-2 flex items-center justify-between">
+                  <span>
+                    Rango físico permitido:{' '}
+                    <strong className="text-slate-200 font-mono">
+                      {PHYSICAL_BOUNDS[vMeta.key].min} – {PHYSICAL_BOUNDS[vMeta.key].max} {varCfg.unidad}
+                    </strong>
+                  </span>
+                  <span className="font-mono text-slate-500">Prev &lt; Adv &lt; Crít</span>
+                </div>
 
                 {/* INPUTS DE LOS 3 NIVELES DE UMBRAL */}
                 <div className="grid grid-cols-3 gap-3 mb-4">
@@ -577,16 +803,16 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                       <input
                         type="number"
                         step={vMeta.step}
-                        min={varCfg.minVal}
-                        max={varCfg.maxVal}
+                        min={PHYSICAL_BOUNDS[vMeta.key].min}
+                        max={PHYSICAL_BOUNDS[vMeta.key].max}
                         disabled={!isAuthorized || !varCfg.activo}
-                        value={varCfg.preventivo}
-                        onChange={(e) => handleVariableChange(vMeta.key, 'preventivo', parseFloat(e.target.value) || 0)}
+                        value={numericDrafts[vMeta.key]?.preventivo ?? ''}
+                        onChange={(e) => handleNumericInputChange(vMeta.key, 'preventivo', e.target.value)}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-yellow-300 font-mono focus:outline-none focus:border-yellow-500 disabled:opacity-40"
                       />
                     </div>
                     <div className="text-[10px] text-slate-400 mt-1">
-                      ≥ {varCfg.preventivo} {varCfg.unidad}
+                      ≥ {Number.isFinite(varCfg.preventivo) ? varCfg.preventivo : '--'} {varCfg.unidad}
                     </div>
                   </div>
 
@@ -600,16 +826,16 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                       <input
                         type="number"
                         step={vMeta.step}
-                        min={varCfg.minVal}
-                        max={varCfg.maxVal}
+                        min={PHYSICAL_BOUNDS[vMeta.key].min}
+                        max={PHYSICAL_BOUNDS[vMeta.key].max}
                         disabled={!isAuthorized || !varCfg.activo}
-                        value={varCfg.advertencia}
-                        onChange={(e) => handleVariableChange(vMeta.key, 'advertencia', parseFloat(e.target.value) || 0)}
+                        value={numericDrafts[vMeta.key]?.advertencia ?? ''}
+                        onChange={(e) => handleNumericInputChange(vMeta.key, 'advertencia', e.target.value)}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-orange-300 font-mono focus:outline-none focus:border-orange-500 disabled:opacity-40"
                       />
                     </div>
                     <div className="text-[10px] text-slate-400 mt-1">
-                      ≥ {varCfg.advertencia} {varCfg.unidad}
+                      ≥ {Number.isFinite(varCfg.advertencia) ? varCfg.advertencia : '--'} {varCfg.unidad}
                     </div>
                   </div>
 
@@ -623,16 +849,16 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                       <input
                         type="number"
                         step={vMeta.step}
-                        min={varCfg.minVal}
-                        max={varCfg.maxVal}
+                        min={PHYSICAL_BOUNDS[vMeta.key].min}
+                        max={PHYSICAL_BOUNDS[vMeta.key].max}
                         disabled={!isAuthorized || !varCfg.activo}
-                        value={varCfg.critico}
-                        onChange={(e) => handleVariableChange(vMeta.key, 'critico', parseFloat(e.target.value) || 0)}
+                        value={numericDrafts[vMeta.key]?.critico ?? ''}
+                        onChange={(e) => handleNumericInputChange(vMeta.key, 'critico', e.target.value)}
                         className="w-full bg-slate-900 border border-slate-700 rounded px-2 py-1 text-sm text-rose-300 font-mono focus:outline-none focus:border-rose-500 disabled:opacity-40"
                       />
                     </div>
                     <div className="text-[10px] text-slate-400 mt-1">
-                      ≥ {varCfg.critico} {varCfg.unidad}
+                      ≥ {Number.isFinite(varCfg.critico) ? varCfg.critico : '--'} {varCfg.unidad}
                     </div>
                   </div>
                 </div>
@@ -874,6 +1100,92 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
                 className="px-4 py-2 bg-amber-500 hover:bg-amber-400 text-slate-950 text-xs font-bold rounded-lg shadow-md transition"
               >
                 Confirmar Restauración
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      {/* MODAL DE CONFIRMACIÓN AUDITABLE AL PAUSAR MONITOREO O SILENCIAR NOTIFICACIONES */}
+      {pendingSilenceAction && (
+        <div className="fixed inset-0 z-50 bg-black/80 backdrop-blur-sm flex items-center justify-center p-4">
+          <div className="bg-slate-900 border border-rose-700/70 rounded-xl max-w-md w-full p-6 shadow-2xl space-y-4">
+            <div className="flex items-center gap-3 text-rose-400">
+              <div className="p-2 bg-rose-500/10 rounded-lg">
+                <ShieldAlert className="w-6 h-6" />
+              </div>
+              <div>
+                <h3 className="text-base font-bold text-slate-100">
+                  Confirmar Pausa de Seguridad Operacional
+                </h3>
+                <p className="text-xs text-slate-400">
+                  {pendingSilenceAction.field === 'activo'
+                    ? 'Desactivar monitoreo ambiental'
+                    : 'Silenciar notificaciones y sirena'}
+                </p>
+              </div>
+            </div>
+
+            <div className="p-3 rounded-lg bg-rose-950/50 border border-rose-800/70 text-xs text-rose-200 space-y-1">
+              <p>
+                <strong>Variable:</strong> {pendingSilenceAction.variableName}
+              </p>
+              <p>
+                <strong>Objetivo exacto:</strong>{' '}
+                {selectedTargetId === 'global'
+                  ? '⚠ PLANTILLA GLOBAL (afecta a todos los dispositivos sin perfil propio)'
+                  : `ID único ${selectedTargetId} (${currentConfig.dispositivo_nombre || selectedTargetId})`}
+              </p>
+              <p className="text-[11px] text-rose-300/90 pt-1">
+                Nota: Los pines desconectados (4095 ADC) ya son filtrados automáticamente como falla de sensor; no necesitas silenciar alertas de gas por una falla física.
+              </p>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <div>
+                <label className="block font-semibold text-slate-300 mb-1">
+                  Duración máxima de la pausa (reactivación automática)
+                </label>
+                <select
+                  value={silenceDurationHours}
+                  onChange={(e) => setSilenceDurationHours(Number(e.target.value))}
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-amber-500"
+                >
+                  <option value={1}>1 hora (recomendado para calibración)</option>
+                  <option value={4}>4 horas (mantención programada)</option>
+                  <option value={8}>8 horas (1 turno completo)</option>
+                  <option value={24}>24 horas (reemplazo de sensor)</option>
+                </select>
+              </div>
+
+              <div>
+                <label className="block font-semibold text-slate-300 mb-1">
+                  Motivo operacional auditable * (mínimo 8 caracteres)
+                </label>
+                <textarea
+                  rows={2}
+                  value={silenceReason}
+                  onChange={(e) => setSilenceReason(e.target.value)}
+                  placeholder="Ej: Sensor MQ-2 en calibración técnica programada por mantenimiento..."
+                  className="w-full px-3 py-2 bg-slate-950 border border-slate-700 rounded-lg text-white focus:outline-none focus:border-amber-500"
+                />
+              </div>
+            </div>
+
+            <div className="flex items-center justify-end gap-3 pt-2">
+              <button
+                type="button"
+                onClick={() => setPendingSilenceAction(null)}
+                className="px-4 py-2 bg-slate-800 hover:bg-slate-700 text-slate-300 text-xs font-semibold rounded-lg transition cursor-pointer"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={silenceReason.trim().length < 8}
+                onClick={handleConfirmSilence}
+                className="px-4 py-2 bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-white text-xs font-bold rounded-lg shadow-md transition cursor-pointer"
+              >
+                Confirmar y aplicar al borrador
               </button>
             </div>
           </div>

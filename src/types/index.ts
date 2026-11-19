@@ -577,6 +577,9 @@ export interface ThresholdVariableConfig {
   maxVal: number;
   label: string;
   descripcion?: string;
+  silencedReason?: string;
+  silencedUntilMs?: number;
+  silencedBy?: string;
 }
 
 export interface DeviceThresholdsConfig {

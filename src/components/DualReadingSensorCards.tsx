@@ -120,6 +120,12 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   if (tempFault || humFault || tempVal === undefined || humVal === undefined) {
     thermalFriendlyLabel = 'Falla Lectura DHT11 (null/NaN)';
     thermalStatusColor = 'amarillo';
+  } else if (!isOnline) {
+    thermalFriendlyLabel = 'Gateway Desconectado (Sin Transmisión)';
+    thermalStatusColor = 'amarillo';
+  } else if (tempVal === 0 && humVal === 0) {
+    thermalFriendlyLabel = 'Sin Lectura DHT11 (En Espera)';
+    thermalStatusColor = 'amarillo';
   } else if (tempVal > 30) {
     thermalFriendlyLabel = 'Calor Excesivo';
     thermalStatusColor = 'rojo';
@@ -330,7 +336,7 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
             <span className="text-[11px]">Dato Técnico:</span>
             <div className="text-right">
               <span className="font-mono font-bold text-white text-sm">
-                {tempFault ? '--' : tempVal} °C y {humFault ? '--' : humVal} % Humedad
+                {!isOnline || tempFault ? '--' : tempVal} °C y {!isOnline || humFault ? '--' : humVal} % Humedad
               </span>
               <span className="text-[10px] text-slate-400 block font-mono">
                 Sensor Digital DHT11
@@ -354,51 +360,57 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
         const batVar = findVar('kwh');
         const airVar = findVar('air_flow');
 
+        const hasAirFlowSensor =
+          isOnline &&
+          typeof device.metrics?.flujoAire === 'number' &&
+          Number.isFinite(device.metrics.flujoAire) &&
+          device.metrics.flujoAire > 0;
+
         const quickCards = [
           ...(showQuickCore
             ? [
                 {
                   id: 'temp',
                   title: 'TEMPERATURA AMBIENTE',
-                  value: tempFault ? '--' : (tempVar?.value ?? tempVal ?? 0),
+                  value: !isOnline || tempFault ? '--' : (tempVar?.value ?? tempVal ?? '--'),
                   unit: '°C',
-                  trendLabel: tempVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
-                  isAlertTrend: tempVar?.trend === 'alza critica',
-                  statusLabel: tempVar?.statusLabel || 'Estable',
-                  statusTone: tempVar?.status || 'normal',
+                  trendLabel: !isOnline ? 'Sin señal' : tempVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
+                  isAlertTrend: isOnline && tempVar?.trend === 'alza critica',
+                  statusLabel: !isOnline ? 'Offline' : (tempVar?.statusLabel || 'Estable'),
+                  statusTone: !isOnline ? 'desconectado' : (tempVar?.status || 'normal'),
                   icon: <Thermometer className="w-4 h-4 text-cyan-400" />,
                 },
-          {
-            id: 'hum',
-            title: 'HUMEDAD RELATIVA',
-            value: humFault ? '--' : (humVar?.value ?? humVal ?? 0),
-            unit: '%',
-            trendLabel: 'Estable',
-            isAlertTrend: false,
-            statusLabel: humVar?.statusLabel || 'Normal',
-            statusTone: humVar?.status || 'normal',
-            icon: <Droplets className="w-4 h-4 text-cyan-400" />,
-          },
-          {
-            id: 'co',
-            title: 'GASES / CO (MQ-2 ADC)',
-            value: coFault ? '--' : (coVal ?? gasVar?.value ?? 0),
-            unit: 'ADC',
-            trendLabel: (coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
-            isAlertTrend: (coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica',
-            statusLabel: gasVar?.statusLabel || (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico'),
-            statusTone: gasVar?.status || (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
-            icon: <CloudRain className="w-4 h-4 text-cyan-400" />,
-          },
-          {
-            id: 'pm25',
-            title: 'MATERIAL PARTICULADO (PM2.5)',
-            value: pmFault ? '--' : (pmVal ?? pmVar?.value ?? 0),
-            unit: 'ADC',
-            trendLabel: (pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
-            isAlertTrend: (pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica',
-            statusLabel: pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico'),
-            statusTone: pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
+                {
+                  id: 'hum',
+                  title: 'HUMEDAD RELATIVA',
+                  value: !isOnline || humFault ? '--' : (humVar?.value ?? humVal ?? '--'),
+                  unit: '%',
+                  trendLabel: !isOnline ? 'Sin señal' : 'Estable',
+                  isAlertTrend: false,
+                  statusLabel: !isOnline ? 'Offline' : (humVar?.statusLabel || 'Normal'),
+                  statusTone: !isOnline ? 'desconectado' : (humVar?.status || 'normal'),
+                  icon: <Droplets className="w-4 h-4 text-cyan-400" />,
+                },
+                {
+                  id: 'co',
+                  title: 'GASES / CO (MQ-2 ADC)',
+                  value: !isOnline || coFault ? '--' : (coVal ?? gasVar?.value ?? '--'),
+                  unit: 'ADC',
+                  trendLabel: !isOnline ? 'Sin señal' : ((coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica'),
+                  statusLabel: !isOnline ? 'Offline' : (gasVar?.statusLabel || (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico')),
+                  statusTone: !isOnline ? 'desconectado' : (gasVar?.status || (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
+                  icon: <CloudRain className="w-4 h-4 text-cyan-400" />,
+                },
+                {
+                  id: 'pm25',
+                  title: 'MATERIAL PARTICULADO (PM2.5)',
+                  value: !isOnline || pmFault ? '--' : (pmVal ?? pmVar?.value ?? '--'),
+                  unit: 'ADC',
+                  trendLabel: !isOnline ? 'Sin señal' : ((pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica'),
+                  statusLabel: !isOnline ? 'Offline' : (pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico')),
+                  statusTone: !isOnline ? 'desconectado' : (pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
                   icon: <Sun className="w-4 h-4 text-cyan-400" />,
                 },
               ]
@@ -408,31 +420,31 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                 {
                   id: 'bat',
                   title: 'BATERÍA DISPOSITIVO IoT',
-                  value: device.batteryReported ? (batVar?.value ?? device.batteryPct) : (device.batteryPct ?? 95),
-                  unit: '%',
-                  trendLabel: (device.batteryPct ?? 95) >= 30 ? 'Óptima' : 'Baja',
-                  isAlertTrend: (device.batteryPct ?? 95) < 30,
-                  statusLabel: batVar?.statusLabel || 'Eficiente',
-                  statusTone: (device.batteryPct ?? 95) < 25 ? 'advertencia' : 'normal',
+                  value: isOnline && device.batteryReported ? (batVar?.value ?? device.batteryPct) : '--',
+                  unit: isOnline && device.batteryReported ? '%' : '',
+                  trendLabel: !isOnline ? 'Sin señal' : !device.batteryReported ? 'Sin sensor' : (device.batteryPct >= 30 ? 'Óptima' : 'Baja'),
+                  isAlertTrend: isOnline && Boolean(device.batteryReported) && device.batteryPct < 30,
+                  statusLabel: !isOnline ? 'Offline' : !device.batteryReported ? 'Sin reporte' : (batVar?.statusLabel || 'Eficiente'),
+                  statusTone: !isOnline || !device.batteryReported ? 'desconectado' : (device.batteryPct < 25 ? 'advertencia' : 'normal'),
                   icon: <Battery className="w-4 h-4 text-cyan-400" />,
                 },
                 {
                   id: 'air',
                   title: 'FLUJO DE VENTILACIÓN',
-                  value: airVar?.value ?? device.metrics?.flujoAire ?? 0,
-                  unit: 'm/s',
-                  trendLabel: 'Estable',
+                  value: hasAirFlowSensor ? (airVar?.value ?? device.metrics.flujoAire) : '--',
+                  unit: hasAirFlowSensor ? 'm/s' : '',
+                  trendLabel: !isOnline ? 'Sin señal' : hasAirFlowSensor ? 'Estable' : 'Sin sensor',
                   isAlertTrend: false,
-                  statusLabel: airVar?.statusLabel || 'Circulación OK',
-                  statusTone: airVar?.status || 'normal',
+                  statusLabel: !isOnline ? 'Offline' : hasAirFlowSensor ? (airVar?.statusLabel || 'Circulación OK') : 'Sin sensor flujo',
+                  statusTone: hasAirFlowSensor ? (airVar?.status || 'normal') : 'desconectado',
                   icon: <Wind className="w-4 h-4 text-cyan-400" />,
                 },
               ]
             : []),
         ];
 
-        const o2Val = device.metrics?.o2 ?? 20.9;
-        const noiseVal = device.metrics?.ruido ?? 0;
+        const o2Val = isOnline && typeof device.metrics?.o2 === 'number' && device.metrics.o2 > 0 ? device.metrics.o2 : null;
+        const noiseVal = isOnline && typeof device.metrics?.ruido === 'number' && device.metrics.ruido > 0 ? device.metrics.ruido : null;
 
         return (
           <div className="space-y-3 pt-1">
@@ -489,6 +501,8 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                           ? 'text-rose-400'
                           : card.statusTone === 'advertencia' || card.statusTone === 'preventivo'
                           ? 'text-amber-400'
+                          : card.statusTone === 'desconectado'
+                          ? 'text-slate-400'
                           : 'text-emerald-400'
                       }`}
                     >
@@ -512,10 +526,20 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-2 font-mono">
-                    <span className={`font-black text-sm ${o2Val < 19.5 ? 'text-rose-400' : 'text-emerald-300'}`}>
-                      {o2Val}%
+                    <span
+                      className={`font-black text-sm ${
+                        o2Val === null
+                          ? 'text-slate-400'
+                          : o2Val < 19.5
+                          ? 'text-rose-400'
+                          : 'text-emerald-300'
+                      }`}
+                    >
+                      {o2Val === null ? 'N/D' : `${o2Val}%`}
                     </span>
-                    <span className="text-[10px] text-slate-400">(DS 132 ≥ 19.5%)</span>
+                    <span className="text-[10px] text-slate-400">
+                      {o2Val === null ? '(Sin sensor instalado)' : '(DS 132 ≥ 19.5%)'}
+                    </span>
                   </div>
                 </div>
 
@@ -528,10 +552,20 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                     </span>
                   </div>
                   <div className="flex items-center gap-2 font-mono">
-                    <span className={`font-black text-sm ${noiseVal >= 85 ? 'text-rose-400' : 'text-amber-300'}`}>
-                      {noiseVal} dB
+                    <span
+                      className={`font-black text-sm ${
+                        noiseVal === null
+                          ? 'text-slate-400'
+                          : noiseVal >= 85
+                          ? 'text-rose-400'
+                          : 'text-amber-300'
+                      }`}
+                    >
+                      {noiseVal === null ? 'N/D' : `${noiseVal} dB`}
                     </span>
-                    <span className="text-[10px] text-slate-400">(Límite 8h &lt; 85 dB)</span>
+                    <span className="text-[10px] text-slate-400">
+                      {noiseVal === null ? '(Sin sensor instalado)' : '(Límite 8h < 85 dB)'}
+                    </span>
                   </div>
                 </div>
               </div>

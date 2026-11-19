@@ -316,7 +316,7 @@ export function canProvisionUserInOrganization(
     if (!isOrgAuthorizedForUser(actingUser, normalizedTargetOrg, organizations)) {
       return {
         allowed: false,
-        reason: 'Un Administrador solo puede asociar usuarios a su organización asignada o a empresas creadas por él.',
+        reason: 'Un Administrador de Empresa solo puede asociar usuarios a su organización asignada.',
       };
     }
   }
@@ -704,6 +704,25 @@ export function buildCrewMemberFromUser(
   };
 }
 
+export function getCrewMemberIdentityKey(
+  member: Partial<Pick<CrewMember, 'id' | 'userId' | 'rut' | 'email' | 'name'>>
+): string {
+  if (member.userId && member.userId.trim()) {
+    return `uid:${member.userId.trim()}`;
+  }
+  const cleanRut = (member.rut || '').trim().toLowerCase().replace(/[^0-9k]/g, '');
+  if (cleanRut && cleanRut.length >= 7) {
+    return `rut:${cleanRut}`;
+  }
+  if (member.email && member.email.trim()) {
+    return `email:${member.email.trim().toLowerCase()}`;
+  }
+  if (member.id && member.id.trim()) {
+    return `id:${member.id.trim()}`;
+  }
+  return `name:${(member.name || '').trim().toLowerCase()}`;
+}
+
 export function assignWorkersToCrew(
   crew: MiningCrew,
   members: CrewMember[],
@@ -713,19 +732,15 @@ export function assignWorkersToCrew(
   let designatedLeaderKey: string | null = null;
 
   members.forEach((member) => {
-    const key = member.userId
-      ? `uid:${member.userId}`
-      : member.email
-      ? `email:${member.email.trim().toLowerCase()}`
-      : `id:${member.id}`;
+    const key = getCrewMemberIdentityKey(member);
     const prev = dedupedMap.get(key);
-    const mergedLeader = Boolean(member.isLeader || prev?.isLeader);
-    if (member.isLeader) {
+    const nextIsLeader = Boolean(member.isLeader);
+    if (nextIsLeader) {
       designatedLeaderKey = key;
-    } else if (!designatedLeaderKey && prev?.isLeader) {
-      designatedLeaderKey = key;
+    } else if (designatedLeaderKey === key) {
+      designatedLeaderKey = null;
     }
-    dedupedMap.set(key, prev ? { ...prev, ...member, isLeader: mergedLeader } : member);
+    dedupedMap.set(key, prev ? { ...prev, ...member, isLeader: nextIsLeader } : { ...member, isLeader: nextIsLeader });
   });
 
   const nextMembers = Array.from(dedupedMap.entries()).map(([key, member]) => ({

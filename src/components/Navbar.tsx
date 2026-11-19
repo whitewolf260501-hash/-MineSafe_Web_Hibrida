@@ -30,7 +30,8 @@ import {
   BookOpen,
   Eye,
   ShieldCheck,
-  LayoutGrid
+  LayoutGrid,
+  KeyRound
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -48,6 +49,7 @@ interface NavbarProps {
   activeAlertCount: number;
   currentUser: UserProfile;
   onChangeUser: () => void;
+  onOpenChangePassword?: () => void;
   onLogout?: () => void;
   onTriggerEmergency: () => void;
   onRefreshData: () => void;
@@ -75,6 +77,7 @@ export const Navbar: React.FC<NavbarProps> = ({
   activeAlertCount,
   currentUser,
   onChangeUser,
+  onOpenChangePassword,
   onLogout,
   onTriggerEmergency,
   onRefreshData,
@@ -136,7 +139,12 @@ export const Navbar: React.FC<NavbarProps> = ({
     { id: 'reportes', label: 'Historial y Reportes', shortLabel: 'Reportes', icon: <FileText className="w-4 h-4 shrink-0" /> },
     { id: 'faenas', label: 'Faenas y Sectores', shortLabel: 'Sectores', icon: <MapPin className="w-4 h-4 shrink-0" /> },
     { id: 'usuarios', label: 'Usuarios y Roles', shortLabel: 'Usuarios', icon: <Users className="w-4 h-4 shrink-0" /> },
-    { id: 'empresas', label: 'Empresas y Carga', shortLabel: 'Empresas', icon: <Building2 className="w-4 h-4 shrink-0 text-cyan-400" /> },
+    {
+      id: 'empresas',
+      label: isGlobalAdmin ? 'Empresas y Carga' : 'Mi Organización',
+      shortLabel: isGlobalAdmin ? 'Empresas' : 'Mi Org.',
+      icon: <Building2 className="w-4 h-4 shrink-0 text-cyan-400" />,
+    },
     {
       id: 'visor_3d',
       label: 'Inspector 3D',
@@ -380,6 +388,19 @@ export const Navbar: React.FC<NavbarProps> = ({
               <ChevronDown className="w-3 h-3 text-slate-400 shrink-0" />
             </button>
 
+            {/* Change Password button (MS-06) */}
+            {onOpenChangePassword && (
+              <button
+                type="button"
+                onClick={onOpenChangePassword}
+                className="flex items-center gap-1 px-2 py-1 rounded-lg border border-slate-800 bg-slate-900/80 hover:bg-cyan-950/50 hover:border-cyan-700/60 text-slate-300 hover:text-cyan-200 text-xs transition-colors shrink-0"
+                title="Cambiar contraseña de tu cuenta"
+              >
+                <KeyRound className="w-3.5 h-3.5 text-cyan-400" />
+                <span className="text-[11px] font-medium">Clave</span>
+              </button>
+            )}
+
             {/* Logout button */}
             {onLogout && (
               <button
@@ -579,6 +600,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               )}
             </div>
+
+            {onOpenChangePassword && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onOpenChangePassword();
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2 px-3 text-xs font-bold rounded-lg border border-cyan-800 bg-cyan-950/60 text-cyan-200 hover:bg-cyan-900"
+              >
+                <KeyRound className="w-4 h-4" />
+                <span>Cambiar Contraseña</span>
+              </button>
+            )}
 
             {onLogout && (
               <button

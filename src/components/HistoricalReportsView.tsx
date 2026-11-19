@@ -19,6 +19,7 @@ import {
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import { isSectionVisibleForUser } from '../services/firebase';
+import { getTodayIsoDate, validateDateRange } from '../utils/dateRange';
 
 export interface TelemetryRangeWindow {
   key: TelemetryRangeKey;
@@ -242,13 +243,25 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   const [isExportingCsv, setIsExportingCsv] = useState(false);
 
   const currentVar = variables.find((v) => v.id === selectedVarId) || variables[0];
+  const todayIso = getTodayIsoDate();
+
+  const customRangeValidation = useMemo(() => {
+    if (timeRange !== 'custom') return { valid: true as const };
+    return validateDateRange(customStartDate, customEndDate, {
+      maxDays: 90,
+      allowFuture: false,
+      allowEmpty: false,
+    });
+  }, [timeRange, customStartDate, customEndDate]);
 
   useEffect(() => {
     if (!onRangeChange) return;
+    if (!customRangeValidation.valid) return;
     onRangeChange(computeTelemetryWindow(timeRange, customStartDate, customEndDate));
-  }, [timeRange, customStartDate, customEndDate, onRangeChange]);
+  }, [timeRange, customStartDate, customEndDate, customRangeValidation.valid, onRangeChange]);
 
   const fullSeries = useMemo(() => {
+    if (!customRangeValidation.valid) return [];
     const windowBounds = computeTelemetryWindow(timeRange, customStartDate, customEndDate);
     const filtered = telemetryHistory
       .filter((pt) => pt.timestamp >= windowBounds.startMs && pt.timestamp <= windowBounds.endMs)
@@ -301,16 +314,17 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
         value: Number((currentVar?.value ?? 0).toFixed(1)),
       },
     ];
-  }, [telemetryHistory, timeRange, customStartDate, customEndDate, currentVar]);
+  }, [telemetryHistory, timeRange, customStartDate, customEndDate, currentVar, customRangeValidation.valid]);
 
   // Muestra completa para cálculos estadísticos/CSV; submuestreo equilibrado solo para la curva SVG
   const chartSeries = useMemo(() => downsampleChartPoints(fullSeries, 48), [fullSeries]);
 
   const isSufficientHistory = fullSeries.length >= 3;
   const values = fullSeries.map((s) => s.value);
-  const minVal = Math.min(...values);
-  const maxVal = Math.max(...values);
-  const avgVal = (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1);
+  const minVal = values.length > 0 ? Math.min(...values) : 0;
+  const maxVal = values.length > 0 ? Math.max(...values) : 0;
+  const avgVal =
+    values.length > 0 ? (values.reduce((a, b) => a + b, 0) / values.length).toFixed(1) : '0.0';
 
   const width = 800;
   const height = 260;
@@ -386,7 +400,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   }, [alertEvents, alerts]);
 
   const handleExportCSV = async () => {
-    if (isExportingCsv) return;
+    if (isExportingCsv || !customRangeValidation.valid || fullSeries.length === 0) return;
     setIsExportingCsv(true);
     soundAlert.playFeedbackBeep();
     try {
@@ -437,8 +451,15 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
             <div className="flex flex-wrap items-center gap-2">
               <button
                 onClick={handleExportCSV}
-                disabled={isExportingCsv}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-lg transition-colors cursor-pointer"
+                disabled={isExportingCsv || !customRangeValidation.valid || fullSeries.length === 0}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed text-white rounded-lg transition-colors cursor-pointer"
+                title={
+                  !customRangeValidation.valid
+                    ? customRangeValidation.error
+                    : fullSeries.length === 0
+                    ? 'Sin muestras para exportar en el rango seleccionado'
+                    : 'Exportar serie histórica a CSV'
+                }
               >
                 <Download className="w-4 h-4" />
                 {isExportingCsv
@@ -515,11 +536,16 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
             </div>
 
             {timeRange === 'custom' && (
-              <div className="flex items-center gap-1.5 text-xs bg-slate-950 px-2.5 py-1 rounded-lg border border-slate-800">
+              <div
+                className={`flex items-center gap-1.5 text-xs bg-slate-950 px-2.5 py-1 rounded-lg border ${
+                  customRangeValidation.valid ? 'border-slate-800' : 'border-rose-600'
+                }`}
+              >
                 <Calendar className="w-3.5 h-3.5 text-cyan-400" />
                 <input
                   type="date"
                   value={customStartDate}
+                  max={customEndDate && customEndDate <= todayIso ? customEndDate : todayIso}
                   onChange={(e) => setCustomStartDate(e.target.value)}
                   className="bg-transparent text-slate-200 focus:outline-none text-xs"
                   aria-label="Fecha inicio"
@@ -528,6 +554,8 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
                 <input
                   type="date"
                   value={customEndDate}
+                  min={customStartDate || undefined}
+                  max={todayIso}
                   onChange={(e) => setCustomEndDate(e.target.value)}
                   className="bg-transparent text-slate-200 focus:outline-none text-xs"
                   aria-label="Fecha término"
@@ -536,6 +564,13 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
             )}
           </div>
         </div>
+
+        {!customRangeValidation.valid && customRangeValidation.error && (
+          <div className="mt-3 p-2.5 bg-rose-950/80 border border-rose-700 text-rose-200 rounded-lg text-xs flex items-center gap-2">
+            <Info className="w-4 h-4 text-rose-400 shrink-0" />
+            <span>{customRangeValidation.error}</span>
+          </div>
+        )}
       </div>
 
       {showChartCard && (

@@ -87,6 +87,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   showSectorChart = true,
   showExtendedChartVars,
   sites = [],
+  crews = [],
   organizations = [],
   activeOrganizationId = 'all',
   onSelectOrganization,
@@ -175,17 +176,47 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [sites, devices]);
 
-  // Role-filtered device pool before Sector/Faena selection
-  const roleScopedDevices = useMemo(() => {
+  // Role-filtered device pool before Sector/Faena selection (sin fallback a sensores ajenos si el usuario no tiene asignación)
+  const { roleScopedDevices, isUserUnassigned } = useMemo(() => {
+    const cleanUserId = (currentUser?.id || '').trim();
+    const cleanEmail = (currentUser?.email || '').trim().toLowerCase();
+    const cleanRut = (currentUser?.rut || '').trim().toLowerCase().replace(/[^0-9k]/g, '');
+
+    const userCrews = crews.filter((c) =>
+      (c.members || []).some(
+        (m) =>
+          (cleanUserId && m.userId === cleanUserId) ||
+          (cleanEmail && (m.email || '').trim().toLowerCase() === cleanEmail) ||
+          (cleanRut && cleanRut.length >= 7 && (m.rut || '').trim().toLowerCase().replace(/[^0-9k]/g, '') === cleanRut)
+      )
+    );
+
     if (isOperador) {
-      const assigned = (currentUser?.assignedSector || '').trim().toLowerCase();
-      if (assigned) {
-        const matched = devices.filter(
-          (d) => (d.sectorName || '').trim().toLowerCase() === assigned
-        );
-        if (matched.length > 0) return matched;
+      const allowedSectors = new Set<string>();
+      const assignedSector = (currentUser?.assignedSector || '').trim().toLowerCase();
+      if (assignedSector && assignedSector !== 'sin asignar' && assignedSector !== 'faena minera central') {
+        allowedSectors.add(assignedSector);
       }
-      return devices.slice(0, 1);
+      userCrews.forEach((c) => {
+        if (c.sectorName?.trim()) allowedSectors.add(c.sectorName.trim().toLowerCase());
+      });
+      const assignedCode = (currentUser?.assignedDeviceCode || '').trim().toLowerCase();
+      const crewIds = new Set(userCrews.map((c) => c.id));
+
+      const hasAnyAssignment = allowedSectors.size > 0 || Boolean(assignedCode) || crewIds.size > 0;
+      if (!hasAnyAssignment) {
+        return { roleScopedDevices: [] as SensorDevice[], isUserUnassigned: true };
+      }
+
+      const matched = devices.filter(
+        (d) =>
+          (assignedCode &&
+            ((d.code || '').trim().toLowerCase() === assignedCode ||
+              (d.id || '').trim().toLowerCase() === assignedCode)) ||
+          (d.crewId && crewIds.has(d.crewId)) ||
+          allowedSectors.has((d.sectorName || '').trim().toLowerCase())
+      );
+      return { roleScopedDevices: matched, isUserUnassigned: matched.length === 0 };
     }
 
     if (isSupervisor) {
@@ -193,19 +224,30 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
       (currentUser?.assignedSectors || []).forEach((s) => {
         if (s.trim()) allowedSectors.add(s.trim().toLowerCase());
       });
-      if (currentUser?.assignedSector?.trim()) {
+      if (
+        currentUser?.assignedSector?.trim() &&
+        currentUser.assignedSector.trim().toLowerCase() !== 'sin asignar' &&
+        currentUser.assignedSector.trim().toLowerCase() !== 'faena minera central'
+      ) {
         allowedSectors.add(currentUser.assignedSector.trim().toLowerCase());
       }
-      if (allowedSectors.size > 0) {
-        const matched = devices.filter((d) =>
-          allowedSectors.has((d.sectorName || '').trim().toLowerCase())
+      userCrews.forEach((c) => {
+        if (c.sectorName?.trim()) allowedSectors.add(c.sectorName.trim().toLowerCase());
+      });
+      const crewIds = new Set(userCrews.map((c) => c.id));
+      if (allowedSectors.size > 0 || crewIds.size > 0) {
+        const matched = devices.filter(
+          (d) =>
+            (d.crewId && crewIds.has(d.crewId)) ||
+            allowedSectors.has((d.sectorName || '').trim().toLowerCase())
         );
-        if (matched.length > 0) return matched;
+        return { roleScopedDevices: matched, isUserUnassigned: matched.length === 0 };
       }
+      return { roleScopedDevices: devices, isUserUnassigned: devices.length === 0 };
     }
 
-    return devices;
-  }, [devices, isOperador, isSupervisor, currentUser]);
+    return { roleScopedDevices: devices, isUserUnassigned: false };
+  }, [devices, crews, isOperador, isSupervisor, currentUser]);
 
   // Available sectors for dropdown (filtered by selected Faena if applicable)
   const availableSectors = useMemo(() => {
@@ -294,6 +336,10 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
     let reportingNodes = 0;
 
     for (const dev of chartDevices) {
+      // Omitir dispositivos desconectados para no promediar ceros falsos como lecturas reales
+      if (dev.status === 'desconectado' || dev.gatewayOnline === false) {
+        continue;
+      }
       const faults = new Set(dev.faultFields || []);
       let hasAnyReading = false;
 
@@ -312,42 +358,43 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
         }
       }
       if (!faults.has('CO')) {
-        if (typeof dev.rawCO === 'number' && Number.isFinite(dev.rawCO)) {
+        if (typeof dev.rawCO === 'number' && Number.isFinite(dev.rawCO) && dev.rawCO !== 4095) {
           cos.push(dev.rawCO);
           rawCOCount += 1;
           hasAnyReading = true;
-        } else if (typeof dev.metrics?.co === 'number' && Number.isFinite(dev.metrics.co)) {
+        } else if (typeof dev.metrics?.co === 'number' && Number.isFinite(dev.metrics.co) && dev.metrics.co !== 4095) {
           cos.push(dev.metrics.co);
           hasAnyReading = true;
         }
       }
-      if (typeof dev.metrics?.co2 === 'number' && Number.isFinite(dev.metrics.co2)) {
+      // Sensores opcionales: solo considerar si reportan valor real (> 0) para no mostrar falsas alertas "Bajo O2" o "Bajo Flujo"
+      if (typeof dev.metrics?.co2 === 'number' && Number.isFinite(dev.metrics.co2) && dev.metrics.co2 > 0) {
         co2s.push(dev.metrics.co2);
         hasAnyReading = true;
       }
       if (!faults.has('PM2_5')) {
-        if (typeof dev.rawPM25 === 'number' && Number.isFinite(dev.rawPM25)) {
+        if (typeof dev.rawPM25 === 'number' && Number.isFinite(dev.rawPM25) && dev.rawPM25 !== 4095) {
           pm25s.push(dev.rawPM25);
           rawPMCount += 1;
           hasAnyReading = true;
-        } else if (typeof dev.metrics?.polvoPM === 'number' && Number.isFinite(dev.metrics.polvoPM)) {
+        } else if (typeof dev.metrics?.polvoPM === 'number' && Number.isFinite(dev.metrics.polvoPM) && dev.metrics.polvoPM !== 4095) {
           pm25s.push(dev.metrics.polvoPM);
           hasAnyReading = true;
         }
       }
-      if (typeof dev.metrics?.ch4 === 'number' && Number.isFinite(dev.metrics.ch4)) {
+      if (typeof dev.metrics?.ch4 === 'number' && Number.isFinite(dev.metrics.ch4) && dev.metrics.ch4 > 0) {
         ch4s.push(dev.metrics.ch4);
         hasAnyReading = true;
       }
-      if (typeof dev.metrics?.o2 === 'number' && Number.isFinite(dev.metrics.o2)) {
+      if (typeof dev.metrics?.o2 === 'number' && Number.isFinite(dev.metrics.o2) && dev.metrics.o2 > 0) {
         o2s.push(dev.metrics.o2);
         hasAnyReading = true;
       }
-      if (typeof dev.metrics?.flujoAire === 'number' && Number.isFinite(dev.metrics.flujoAire)) {
+      if (typeof dev.metrics?.flujoAire === 'number' && Number.isFinite(dev.metrics.flujoAire) && dev.metrics.flujoAire > 0) {
         airFlows.push(dev.metrics.flujoAire);
         hasAnyReading = true;
       }
-      if (typeof dev.metrics?.ruido === 'number' && Number.isFinite(dev.metrics.ruido)) {
+      if (typeof dev.metrics?.ruido === 'number' && Number.isFinite(dev.metrics.ruido) && dev.metrics.ruido > 0) {
         noises.push(dev.metrics.ruido);
         hasAnyReading = true;
       }
@@ -1203,9 +1250,24 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
               </span>
             </div>
 
-            {aggregatedMetrics.reportingNodes === 0 ? (
-              <div className="py-14 text-center text-xs text-slate-400">
-                Sin lecturas reportadas actualmente para el alcance seleccionado.
+            {isUserUnassigned ? (
+              <div className="py-12 px-4 text-center space-y-2 max-w-md mx-auto">
+                <MapPin className="w-8 h-8 text-amber-400/80 mx-auto" />
+                <p className="text-sm font-bold text-white">
+                  Aún no tienes una faena, sector o dispositivo asignado
+                </p>
+                <p className="text-xs text-slate-400 leading-relaxed">
+                  Para visualizar telemetría atmosférica en vivo, solicita al Administrador de tu empresa que te asigne a una cuadrilla o sector operativo con sensores activos.
+                </p>
+              </div>
+            ) : aggregatedMetrics.reportingNodes === 0 ? (
+              <div className="py-12 px-4 text-center space-y-1.5">
+                <p className="text-sm font-bold text-slate-200">
+                  Sin transmisión activa en los sensores del alcance seleccionado
+                </p>
+                <p className="text-xs text-slate-400">
+                  Los dispositivos asignados se encuentran desconectados o en espera de señal en tiempo real.
+                </p>
               </div>
             ) : (
               <div

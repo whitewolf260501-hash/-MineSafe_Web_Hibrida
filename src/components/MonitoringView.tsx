@@ -571,7 +571,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
             device.status === 'desconectado'
               ? '--'
               : device.rawPM25 !== undefined
-              ? `${device.rawPM25} ADC`
+              ? `${device.rawPM25} µg/m³`
               : `${device.metrics.polvoPM} µg/m³`;
 
           return (

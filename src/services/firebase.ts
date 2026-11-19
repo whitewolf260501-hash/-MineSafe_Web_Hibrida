@@ -185,16 +185,51 @@ export const db: Firestore = firebaseConfig.firestoreDatabaseId && firebaseConfi
   ? getFirestore(appletApp, firebaseConfig.firestoreDatabaseId)
   : getFirestore(appletApp);
 
-// Connection test for user's Realtime Database (respects org scope for non-superadmin)
+// Connection test for user's Realtime Database (respects org scope for non-superadmin,
+// with safe fallback when legacy RTDB lacks .indexOn or organizationId on device nodes)
 export async function testConnection(scope?: RTDBSubscriptionScope): Promise<boolean> {
   try {
     const testQuery = buildOrgScopedQuery('dispositivos', scope);
     const snapshot = await get(testQuery);
-    return snapshot.exists();
+    if (snapshot.exists()) return true;
   } catch (error) {
-    console.warn('RTDB connection error:', error);
-    return false;
+    console.warn('RTDB scoped connection test warning:', error);
   }
+
+  // Fallback 1: check first explicitly authorized device node (works even without .indexOn)
+  const explicitIds = Array.from(new Set((scope?.deviceIds || []).filter(Boolean)));
+  for (const devId of explicitIds.slice(0, 2)) {
+    try {
+      const snap = await get(ref(rtdb, `dispositivos/${devId}`));
+      if (snap.exists()) return true;
+    } catch {
+      // continue to next check
+    }
+  }
+
+  // Fallback 2: check RTDB WebSocket connection state directly
+  try {
+    const connSnap = await get(ref(rtdb, '.info/connected'));
+    if (connSnap.val() === true) return true;
+  } catch (error) {
+    console.warn('RTDB .info/connected error:', error);
+  }
+  return false;
+}
+
+export function subscribeToRTDBConnectionState(
+  callback: (connected: boolean) => void
+): () => void {
+  const connectedRef = ref(rtdb, '.info/connected');
+  return onValue(
+    connectedRef,
+    (snapshot) => {
+      callback(snapshot.val() === true);
+    },
+    () => {
+      callback(false);
+    }
+  );
 }
 
 // -------------------------------------------------------------
@@ -217,6 +252,8 @@ export function recordDevicePacketArrival(key: string, data?: any) {
     data.temperatura ?? data.temp ?? null,
     data.humedad ?? data.hum ?? null,
     data.last_update_server ?? data.timestamp_server ?? null,
+    data.msgId ?? null,
+    data.via_puente ?? null,
     data.alarma_activa ?? data.alarma ?? null,
     data.luz ?? null,
     data.estado_adquisicion ?? null,
@@ -1347,19 +1384,41 @@ export function subscribeToRTDBDevicesRaw(
     const explicitDevices: Record<string, any> = {};
     const emitScoped = () => {
       const merged: Record<string, any> = {};
-      const assignIfMatches = (devId: string, val: any) => {
+      const assignIfMatches = (devId: string, val: any, isExplicitAuthorized: boolean) => {
         if (!val || typeof val !== 'object') return;
-        const devOrg = val.organizationId || DEFAULT_ORGANIZATION_ID;
-        if (devOrg !== targetOrgId) return;
+        const explicitOrg = typeof val.organizationId === 'string' ? val.organizationId.trim() : '';
+        if (explicitOrg && explicitOrg !== targetOrgId) return;
+        if (!explicitOrg && !isExplicitAuthorized && targetOrgId !== DEFAULT_ORGANIZATION_ID) return;
         merged[devId] = val;
         recordDevicePacketArrival(devId, val);
       };
-      Object.entries(queryDevices).forEach(([k, v]) => assignIfMatches(k, v));
-      Object.entries(explicitDevices).forEach(([k, v]) => assignIfMatches(k, v));
+      Object.entries(queryDevices).forEach(([k, v]) => assignIfMatches(k, v, false));
+      Object.entries(explicitDevices).forEach(([k, v]) => assignIfMatches(k, v, true));
       callback(merged);
     };
 
     const unsubs: Array<() => void> = [];
+    let fallbackAttached = false;
+    const attachIndexFallbackIfAllowed = () => {
+      if (fallbackAttached) return;
+      fallbackAttached = true;
+      unsubs.push(
+        onValue(
+          ref(rtdb, 'dispositivos'),
+          (snap) => {
+            queryDevices = snap.exists() ? snap.val() || {} : {};
+            emitScoped();
+          },
+          (fallbackErr) => {
+            console.warn(
+              `Error in fallback RTDB /dispositivos listener (${targetOrgId}):`,
+              fallbackErr?.message || fallbackErr
+            );
+          }
+        )
+      );
+    };
+
     const scopedRef = buildOrgScopedQuery('dispositivos', scope);
     unsubs.push(
       onValue(
@@ -1369,9 +1428,14 @@ export function subscribeToRTDBDevicesRaw(
           emitScoped();
         },
         (err) => {
-          console.warn(`Error subscribing to scoped RTDB /dispositivos (${targetOrgId}):`, err?.message || err);
-          queryDevices = {};
-          emitScoped();
+          const msg = String(err?.message || err || '');
+          console.warn(`Error subscribing to scoped RTDB /dispositivos (${targetOrgId}):`, msg);
+          if (/index/i.test(msg)) {
+            attachIndexFallbackIfAllowed();
+          } else {
+            queryDevices = {};
+            emitScoped();
+          }
         }
       )
     );
@@ -1442,7 +1506,13 @@ export async function forceRefreshDevicesFromRTDB(
         : DEFAULT_ORGANIZATION_ID;
     const raw: Record<string, any> = {};
 
-    const scopedSnap = await get(buildOrgScopedQuery('dispositivos', scope)).catch(() => null);
+    let scopedFailedForIndex = false;
+    const scopedSnap = await get(buildOrgScopedQuery('dispositivos', scope)).catch((err) => {
+      if (/index/i.test(String(err?.message || err || ''))) {
+        scopedFailedForIndex = true;
+      }
+      return null;
+    });
     if (scopedSnap && scopedSnap.exists()) {
       const val = scopedSnap.val() || {};
       Object.keys(val).forEach((id) => {
@@ -1451,6 +1521,17 @@ export async function forceRefreshDevicesFromRTDB(
           raw[id] = val[id];
         }
       });
+    } else if (scopedFailedForIndex) {
+      const allSnap = await get(ref(rtdb, 'dispositivos')).catch(() => null);
+      if (allSnap && allSnap.exists()) {
+        const val = allSnap.val() || {};
+        Object.keys(val).forEach((id) => {
+          const devOrg = val[id]?.organizationId || DEFAULT_ORGANIZATION_ID;
+          if (devOrg === targetOrgId) {
+            raw[id] = val[id];
+          }
+        });
+      }
     }
 
     for (const id of Array.from(new Set((scope.deviceIds || []).filter(Boolean)))) {
@@ -1458,8 +1539,8 @@ export async function forceRefreshDevicesFromRTDB(
       const snap = await get(ref(rtdb, `dispositivos/${id}`)).catch(() => null);
       if (snap && snap.exists()) {
         const val = snap.val();
-        const devOrg = val?.organizationId || DEFAULT_ORGANIZATION_ID;
-        if (devOrg === targetOrgId) {
+        const explicitOrg = typeof val?.organizationId === 'string' ? val.organizationId.trim() : '';
+        if (!explicitOrg || explicitOrg === targetOrgId) {
           raw[id] = val;
         }
       }
@@ -4238,7 +4319,17 @@ function mergePlatformConfig(raw: any): PlatformConfig {
       heroTitleScale: normalizeHeroTitleScale(raw?.appearance?.heroTitleScale),
     },
     registeredDevices: Array.isArray(raw?.registeredDevices)
-      ? raw.registeredDevices
+      ? raw.registeredDevices.map((dev: any) => {
+          const rawOrg = typeof dev?.organizationId === 'string' ? dev.organizationId.trim() : '';
+          const isExplicitInventory =
+            rawOrg === UNASSIGNED_DEVICE_ORG_ID || dev?.assignmentStatus === 'en_inventario';
+          return {
+            ...dev,
+            organizationId: isExplicitInventory
+              ? UNASSIGNED_DEVICE_ORG_ID
+              : rawOrg || DEFAULT_ORGANIZATION.id,
+          };
+        })
       : DEFAULT_PLATFORM_CONFIG.registeredDevices,
     onlyShowRegisteredDevices:
       typeof raw?.onlyShowRegisteredDevices === 'boolean'

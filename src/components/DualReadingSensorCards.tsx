@@ -79,10 +79,10 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (coVal === 4095) {
     coStatusColor = 'amarillo';
     coFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
-  } else if (coVal >= 1000) {
+  } else if (coVal >= 500) {
     coStatusColor = 'rojo';
     coFriendlyLabel = '¡PELIGRO: Nivel Crítico! (Baliza y Alarma activadas)';
-  } else if (coVal >= 300) {
+  } else if (coVal >= 350) {
     coStatusColor = 'amarillo';
     coFriendlyLabel = 'Precaución: Presencia de gas';
   }
@@ -105,10 +105,10 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (pmVal === 4095) {
     pmStatusColor = 'amarillo';
     pmFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
-  } else if (pmVal >= 500) {
+  } else if (pmVal >= 150) {
     pmStatusColor = 'rojo';
     pmFriendlyLabel = '¡Atmósfera saturada / Peligro respiratorio!';
-  } else if (pmVal >= 150) {
+  } else if (pmVal >= 55) {
     pmStatusColor = 'amarillo';
     pmFriendlyLabel = 'Polvo moderado';
   }
@@ -278,12 +278,12 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
             <span className="text-[11px]">Dato Técnico:</span>
             <div className="text-right">
               <span className="font-mono font-bold text-white text-sm">
-                {pmFault || pmVal === undefined ? 'Sin lectura válida (null/NaN)' : `Lectura ADC 12-bit: ${pmVal}`}
+                {pmFault || pmVal === undefined ? 'Sin lectura válida (null/NaN)' : `Densidad PM2.5: ${pmVal} µg/m³`}
               </span>
               <span className="text-[10px] text-slate-400 block font-mono">
                 {pmFault || pmVal === undefined
                   ? 'Revisar sensor óptico de polvo'
-                  : 'Señal óptica bruta (sin conversión µg/m³)'}
+                  : 'Sharp GP2Y1010 · Precaución 55 · Crítico 150 µg/m³'}
               </span>
             </div>
           </div>
@@ -396,8 +396,8 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                   title: 'GASES / CO (MQ-2 ADC)',
                   value: !isOnline || coFault ? '--' : (coVal ?? gasVar?.value ?? '--'),
                   unit: 'ADC',
-                  trendLabel: !isOnline ? 'Sin señal' : ((coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
-                  isAlertTrend: isOnline && ((coVal ?? 0) >= 300 || gasVar?.trend === 'alza critica'),
+                  trendLabel: !isOnline ? 'Sin señal' : ((coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica'),
                   statusLabel: !isOnline ? 'Offline' : (gasVar?.statusLabel || (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico')),
                   statusTone: !isOnline ? 'desconectado' : (gasVar?.status || (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
                   icon: <CloudRain className="w-4 h-4 text-cyan-400" />,
@@ -406,9 +406,9 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                   id: 'pm25',
                   title: 'MATERIAL PARTICULADO (PM2.5)',
                   value: !isOnline || pmFault ? '--' : (pmVal ?? pmVar?.value ?? '--'),
-                  unit: 'ADC',
-                  trendLabel: !isOnline ? 'Sin señal' : ((pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
-                  isAlertTrend: isOnline && ((pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica'),
+                  unit: 'µg/m³',
+                  trendLabel: !isOnline ? 'Sin señal' : ((pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica'),
                   statusLabel: !isOnline ? 'Offline' : (pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico')),
                   statusTone: !isOnline ? 'desconectado' : (pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
                   icon: <Sun className="w-4 h-4 text-cyan-400" />,

@@ -79,6 +79,7 @@ export { createEmptyTelemetryVariables, resolveScopedCurrentSite };
 
 import { 
   testConnection, 
+  subscribeToRTDBConnectionState,
   subscribeToRTDBDevicesRaw,
   subscribeToDeviceCatalog,
   forceRefreshDevicesFromRTDB,
@@ -516,16 +517,20 @@ export default function App({
     };
   }, [subscriptionScope]);
 
-  // Verificación acotada de conexión y suscripción aislada por organización a simulacros
+  // Verificación acotada de conexión (.info/connected + testConnection) y suscripción aislada por organización a simulacros
   useEffect(() => {
     let cancelled = false;
+    const unsubConn = subscribeToRTDBConnectionState((connected) => {
+      if (!cancelled) {
+        setIsFirebaseConnected(connected);
+      }
+    });
+
     testConnection(subscriptionScope)
       .then((connected) => {
-        if (!cancelled) setIsFirebaseConnected(connected);
+        if (!cancelled && connected) setIsFirebaseConnected(true);
       })
-      .catch(() => {
-        if (!cancelled) setIsFirebaseConnected(false);
-      });
+      .catch(() => {});
 
     const drillOrgId = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
     const unsubDrill = subscribeToRTDBDrill((drillState) => {
@@ -545,6 +550,7 @@ export default function App({
 
     return () => {
       cancelled = true;
+      unsubConn();
       unsubDrill();
     };
   }, [subscriptionScope, effectiveOrgId]);
@@ -771,6 +777,11 @@ export default function App({
       };
     };
 
+    const primaryLiveFallback =
+      rtdbMap.get(INITIAL_SINGLE_DEVICE.id) ||
+      devices.find((d) => !isUnassignedDeviceOrg(d.organizationId) && matchesOrg(d.organizationId)) ||
+      INITIAL_SINGLE_DEVICE;
+
     if (platformConfig.onlyShowRegisteredDevices) {
       const enabledRegs = regList.filter(
         (r) => r.enabled !== false && !isUnassignedDeviceOrg(r.organizationId) && matchesOrg(r.organizationId)
@@ -784,7 +795,7 @@ export default function App({
       const mapped = effectiveRegs.map(buildFromRegistry);
       if (mapped.length > 0) return mapped;
       return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
-        ? [INITIAL_SINGLE_DEVICE]
+        ? [primaryLiveFallback]
         : [];
     }
 
@@ -834,7 +845,7 @@ export default function App({
     );
     if (combined.length > 0) return combined;
     return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
-      ? [INITIAL_SINGLE_DEVICE]
+      ? [primaryLiveFallback]
       : [];
   }, [devices, mergedRegisteredDevices, sites, platformConfig.onlyShowRegisteredDevices, matchesOrg, effectiveOrgId]);
 

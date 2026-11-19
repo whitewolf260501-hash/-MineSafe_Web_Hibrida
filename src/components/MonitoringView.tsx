@@ -838,15 +838,15 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">
-                  {selectedDevice.rawPM25 !== undefined ? 'Polvo PM2.5 (ADC)' : 'Polvo (PM2.5)'}
+                  Polvo PM2.5 (µg/m³)
                 </span>
                 <span className="text-lg font-bold text-white font-mono tabular-nums">
                   {selectedDevice.rawPM25 !== undefined
-                    ? `${selectedDevice.rawPM25} ADC`
+                    ? `${selectedDevice.rawPM25} µg/m³`
                     : `${selectedDevice.metrics.polvoPM} µg/m³`}
                 </span>
                 <span className="text-[10px] text-slate-400 block">
-                  {selectedDevice.rawPM25 !== undefined ? 'Prev: < 350 ADC' : 'Límite: 50 µg/m³'}
+                  Precaución: 55 · Crítico: 150 µg/m³
                 </span>
               </div>
               {showTechDiagnostics && (

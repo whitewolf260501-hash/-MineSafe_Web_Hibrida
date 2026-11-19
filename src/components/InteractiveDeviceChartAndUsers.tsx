@@ -606,14 +606,14 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
     },
     {
       id: 'pm25',
-      name: aggregatedMetrics.isRawPM25 ? 'Polvo PM2.5 (ADC)' : 'Polvo en Suspensión',
+      name: 'Polvo PM2.5 (µg/m³)',
       shortName: 'PM2.5',
-      unit: aggregatedMetrics.isRawPM25 ? 'ADC' : 'µg/m³',
+      unit: 'µg/m³',
       hasData: aggregatedMetrics.pm25 !== null,
       value: Number(pm25Value.toFixed(1)),
       safeMax: pm25Safe,
       criticalMax: pm25Crit,
-      scaleMax: aggregatedMetrics.isRawPM25 ? Math.max(4095, pm25Crit) : Math.max(150, pm25Crit),
+      scaleMax: Math.max(200, pm25Crit),
       icon: <Layers className="w-4 h-4 text-amber-300" />,
       gradient:
         pm25Value >= pm25Crit
@@ -1462,7 +1462,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                         <div
                           className="flex-1 max-w-[14px] bg-gradient-to-t from-cyan-600 to-cyan-400 rounded-t-sm"
                           style={{ height: `${Math.min(100, Math.max(12, (reading.pm25 / Math.max(100, pm25Safe)) * 100))}%` }}
-                          title={`PM2.5: ${reading.pm25.toFixed(1)} ${aggregatedMetrics.isRawPM25 ? 'ADC' : 'µg/m³'}`}
+                          title={`PM2.5: ${reading.pm25.toFixed(1)} µg/m³`}
                         />
                       </>
                     )}

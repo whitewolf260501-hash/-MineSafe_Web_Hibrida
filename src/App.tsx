@@ -1059,10 +1059,10 @@ export default function App({
         },
         {
           id: 'lux',
-          name: 'MATERIAL PARTICULADO (PM2.5 ADC)',
+          name: 'MATERIAL PARTICULADO (PM2.5 µg/m³)',
           shortName: 'Polvo PM2.5',
           value: pmVal,
-          unit: 'ADC',
+          unit: 'µg/m³',
           trend: !faultSet.has('PM2_5') && pmVal >= m.pm25Preventivo ? 'alza critica' : 'estable',
           status: faultSet.has('PM2_5')
             ? 'desconectado'

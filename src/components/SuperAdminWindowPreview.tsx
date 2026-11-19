@@ -558,7 +558,7 @@ export const SuperAdminWindowPreview: React.FC<SuperAdminWindowPreviewProps> = (
                     { k: 'Temp', v: '21 °C' },
                     { k: 'Hum', v: '48 %' },
                     { k: 'CO', v: '12 ADC' },
-                    { k: 'PM2.5', v: '18 ADC' },
+                    { k: 'PM2.5', v: '18 µg/m³' },
                   ].map((item) => (
                     <div
                       key={item.k}
@@ -827,7 +827,7 @@ export const SuperAdminWindowPreview: React.FC<SuperAdminWindowPreviewProps> = (
             { k: 'Temp', v: '21 °C' },
             { k: 'Humedad', v: '48 %' },
             { k: 'CO MQ-2', v: '12 ADC' },
-            { k: 'PM2.5', v: '18 ADC' },
+            { k: 'PM2.5', v: '18 µg/m³' },
           ].map((s) => (
             <div key={s.k} className="rounded bg-slate-950 border border-slate-800 p-1.5 text-center">
               <div className="text-[9px] text-slate-400">{s.k}</div>

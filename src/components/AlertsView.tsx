@@ -1380,7 +1380,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                         <td className="p-2 font-mono text-[10px]">
                           {r.sourceKind === 'bitacora_web'
                             ? r.metricSummary || '-'
-                            : `CO: ${r.co} ADC | PM2.5: ${r.pm25} ADC | ${r.temperatura}°C | ${r.humedad}%`}
+                            : `CO: ${r.co} ADC | PM2.5: ${r.pm25} µg/m³ | ${r.temperatura}°C | ${r.humedad}%`}
                         </td>
                         <td className="p-2 text-slate-700">
                           {(r.closingTitle || r.alertTitle) && (

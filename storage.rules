@@ -3,7 +3,8 @@ rules_version = '2';
 service firebase.storage {
   match /b/{bucket}/o {
     function isPrimarySuperAdmin() {
-      return request.auth != null && request.auth.token.email == 'manuelcrisostomovega@gmail.com';
+      return request.auth != null && request.auth.token.email == 'manuelcrisostomovega@gmail.com'
+        && request.auth.token.email_verified == true;
     }
 
     function isValidScopeSegment(val, maxLen) {

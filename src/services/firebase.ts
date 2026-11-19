@@ -1986,7 +1986,11 @@ export async function updateUserInRTDB(
   const existingData = existingSnap?.exists() ? existingSnap.val() : null;
 
   const existingEmail = (existingData?.email || updates.email || '').trim().toLowerCase();
-  const targetOrg = existingData?.organizationId || updates.organizationId || DEFAULT_ORGANIZATION_ID;
+  const targetOrg = existingData?.organizationId || DEFAULT_ORGANIZATION_ID;
+  const nextOrg = updates.organizationId || targetOrg;
+  const isChangingOrganization = Boolean(
+    updates.organizationId && nextOrg !== targetOrg
+  );
   const existingMapped = existingData
     ? mapRTDBUserToUserProfile(userId, existingData)
     : ({
@@ -2051,6 +2055,16 @@ export async function updateUserInRTDB(
   if (updates.email) rtdbUpdates.email = updates.email.trim().toLowerCase();
   if (updates.organizationId && (!actingUser || isAnyAdminRole(actingUser.role))) {
     rtdbUpdates.organizationId = updates.organizationId;
+    if (isChangingOrganization) {
+      // Limpiar asignaciones operacionales de la empresa anterior para evitar cruces entre organizaciones
+      rtdbUpdates.assignedSiteId = null;
+      rtdbUpdates.assignedSiteName = null;
+      rtdbUpdates.assignedCrewId = null;
+      rtdbUpdates.assignedCrewName = null;
+      rtdbUpdates.assignedSectors = null;
+      rtdbUpdates.deviceId = updates.assignedDeviceCode ?? '';
+      rtdbUpdates.geoMina = updates.assignedSector ?? 'Sin asignar';
+    }
   }
   if (updates.rut) rtdbUpdates.codigoId = updates.rut;
   if (updates.role) {

@@ -22,6 +22,8 @@ import {
   Radio,
   Router,
   Link2,
+  Search,
+  UserCheck,
 } from 'lucide-react';
 import {
   MiningCrew,
@@ -45,6 +47,8 @@ import {
 import {
   canCreateOrEditOrganization,
   canDeleteOrganization,
+  canModifyTargetUser,
+  DEFAULT_ORGANIZATION_ID,
   getAuthorizedOrganizationIds,
   isAnyAdminRole,
   isGlobalMineSafeAdmin,
@@ -75,6 +79,7 @@ interface CompanyBulkManagementViewProps {
   devices?: SensorDevice[];
   catalogDevices?: RegisteredDeviceConfig[];
   rtdbDevices?: SensorDevice[];
+  usersList?: UserProfile[];
   activeOrganizationId: string;
   platformConfig: PlatformConfig;
   onSelectOrganization: (orgId: string) => void;
@@ -83,6 +88,7 @@ interface CompanyBulkManagementViewProps {
   onCrewSaved?: (crew: MiningCrew) => void;
   onDeviceHierarchySaved?: (device: RegisteredDeviceConfig) => void;
   onDeviceDeleted?: (deviceId: string) => void;
+  onAssignUserToOrganization?: (userId: string, targetOrgId: string) => Promise<void> | void;
   onBulkImportCompleted?: (result: BulkImportExecutionResult) => void;
 }
 
@@ -144,6 +150,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   devices = [],
   catalogDevices,
   rtdbDevices,
+  usersList = [],
   activeOrganizationId,
   platformConfig,
   onSelectOrganization,
@@ -152,6 +159,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   onCrewSaved,
   onDeviceHierarchySaved,
   onDeviceDeleted,
+  onAssignUserToOrganization,
   onBulkImportCompleted,
 }) => {
   const isSuperAdmin = currentUser.role === 'superadmin';
@@ -215,6 +223,9 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   const [isSavingLink, setIsSavingLink] = useState(false);
   const [linkSiteIdToOrg, setLinkSiteIdToOrg] = useState('');
   const [linkSiteTargetOrgId, setLinkSiteTargetOrgId] = useState(defaultTargetOrg);
+  const [linkUserIdToOrg, setLinkUserIdToOrg] = useState('');
+  const [linkUserTargetOrgId, setLinkUserTargetOrgId] = useState(defaultTargetOrg);
+  const [linkUserSearch, setLinkUserSearch] = useState('');
   const [linkCrewId, setLinkCrewId] = useState('');
   const [linkCrewSiteId, setLinkCrewSiteId] = useState('');
   const [linkSectorSiteId, setLinkSectorSiteId] = useState('');
@@ -233,6 +244,12 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       setBulkOrgId(defaultTargetOrg);
     }
   }, [authorizedOrganizations, bulkOrgId, defaultTargetOrg]);
+
+  useEffect(() => {
+    if (bulkOrgId && organizations.some((o) => o.id === bulkOrgId)) {
+      setLinkUserTargetOrgId(bulkOrgId);
+    }
+  }, [bulkOrgId, organizations]);
 
   const showNotice = (type: 'success' | 'error', text: string) => {
     setFeedback({ type, text });
@@ -504,6 +521,55 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       showNotice('success', `Faena "${updatedSite.name}" asignada a "${targetOrg.name}".`);
     } catch (err: any) {
       showNotice('error', err?.message || 'No se pudo asignar la faena.');
+    } finally {
+      setIsSavingLink(false);
+    }
+  };
+
+  const assignableUsers = useMemo(() => {
+    const q = linkUserSearch.trim().toLowerCase();
+    return usersList.filter((u) => {
+      if (!canModifyTargetUser(currentUser, u, undefined, organizations).allowed) return false;
+      if (!q) return true;
+      return (
+        u.name.toLowerCase().includes(q) ||
+        u.email.toLowerCase().includes(q) ||
+        (u.rut || '').toLowerCase().includes(q)
+      );
+    });
+  }, [usersList, currentUser, organizations, linkUserSearch]);
+
+  const usersInTargetOrgCount = useMemo(() => {
+    const targetId = linkUserTargetOrgId || selectedBulkOrg.id;
+    return usersList.filter((u) => (u.organizationId || DEFAULT_ORGANIZATION_ID) === targetId).length;
+  }, [usersList, linkUserTargetOrgId, selectedBulkOrg.id]);
+
+  const handleAssignUserToOrg = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isGlobalAdmin || !onAssignUserToOrganization) {
+      showNotice('error', 'Solo SuperAdmin o Admin MineSafe puede asignar usuarios existentes entre empresas.');
+      return;
+    }
+    const targetUser = usersList.find((u) => u.id === linkUserIdToOrg);
+    const targetOrg = organizations.find((o) => o.id === linkUserTargetOrgId);
+    if (!targetUser || !targetOrg) {
+      showNotice('error', 'Selecciona un usuario existente y una organización destino.');
+      return;
+    }
+    if ((targetUser.organizationId || DEFAULT_ORGANIZATION_ID) === targetOrg.id) {
+      showNotice('error', `${targetUser.name} ya pertenece a "${targetOrg.name}".`);
+      return;
+    }
+    setIsSavingLink(true);
+    try {
+      await onAssignUserToOrganization(targetUser.id, targetOrg.id);
+      setLinkUserIdToOrg('');
+      showNotice(
+        'success',
+        `Usuario "${targetUser.name}" asignado a "${targetOrg.name}".`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo asignar el usuario a la empresa.');
     } finally {
       setIsSavingLink(false);
     }
@@ -966,6 +1032,92 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                   <Link2 className="w-3.5 h-3.5" />
                   <span>Vincular Faena a Empresa</span>
                 </button>
+              </form>
+            )}
+
+            {/* 2) SuperAdmin/Admin MineSafe: Asignar Usuario Existente a Empresa */}
+            {isGlobalAdmin && onAssignUserToOrganization && (
+              <form
+                onSubmit={handleAssignUserToOrg}
+                className="bg-slate-900/80 border border-indigo-800/60 rounded-2xl p-5 space-y-3"
+              >
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 font-bold text-white text-sm">
+                    <UserCheck className="w-4 h-4 text-indigo-400" />
+                    <span>2. Asignar Usuario Existente a Empresa</span>
+                  </div>
+                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 text-indigo-300">
+                    {usersInTargetOrgCount} en destino
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Exclusivo de SuperAdmin / Admin MineSafe: agrega o traslada un usuario ya creado a una organización existente.
+                </p>
+
+                <div className="relative">
+                  <Search className="w-3.5 h-3.5 text-slate-500 absolute left-3 top-2.5" />
+                  <input
+                    type="text"
+                    placeholder="Filtrar usuario por nombre, correo o RUT..."
+                    value={linkUserSearch}
+                    onChange={(e) => setLinkUserSearch(e.target.value)}
+                    className="w-full pl-8 pr-3 py-1.5 rounded-lg bg-slate-950 border border-slate-700 text-white text-xs"
+                  />
+                </div>
+
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <select
+                    value={linkUserIdToOrg}
+                    onChange={(e) => setLinkUserIdToOrg(e.target.value)}
+                    aria-label="Seleccionar usuario existente"
+                    className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    <option value="">Seleccionar Usuario ({assignableUsers.length})...</option>
+                    {assignableUsers.map((u) => {
+                      const uOrgName =
+                        organizations.find(
+                          (o) => o.id === (u.organizationId || DEFAULT_ORGANIZATION_ID)
+                        )?.name || DEFAULT_ORGANIZATION.name;
+                      return (
+                        <option key={u.id} value={u.id}>
+                          {u.name} ({u.email}) — Actual: {uOrgName}
+                        </option>
+                      );
+                    })}
+                  </select>
+                  <select
+                    value={linkUserTargetOrgId}
+                    onChange={(e) => setLinkUserTargetOrgId(e.target.value)}
+                    aria-label="Seleccionar organización destino"
+                    className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    {organizations.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+
+                <div className="flex flex-wrap items-center justify-between gap-2">
+                  <button
+                    type="submit"
+                    disabled={isSavingLink || !linkUserIdToOrg || !linkUserTargetOrgId}
+                    className="px-4 py-2 rounded-lg bg-indigo-600 hover:bg-indigo-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                  >
+                    <Link2 className="w-3.5 h-3.5" />
+                    <span>Asignar Usuario a Empresa</span>
+                  </button>
+                  {organizations.length <= 1 && (
+                    <button
+                      type="button"
+                      onClick={() => setSection('empresas')}
+                      className="text-[11px] text-cyan-400 hover:text-cyan-300 underline"
+                    >
+                      + Crear otra organización primero
+                    </button>
+                  )}
+                </div>
               </form>
             )}
 

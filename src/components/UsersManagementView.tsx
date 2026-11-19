@@ -18,7 +18,8 @@ import {
   ShieldCheck,
   AlertCircle,
   Eye,
-  ArrowRight
+  ArrowRight,
+  Building2
 } from 'lucide-react';
 import { Organization, UserProfile, UserRole } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -47,6 +48,7 @@ interface UsersManagementViewProps {
   activeOrganizationId?: string;
   onAddUser: (newUser: UserProfile) => Promise<void> | void;
   onUpdateUserRole: (userId: string, newRole: UserRole) => Promise<void> | void;
+  onUpdateUserOrganization?: (userId: string, targetOrgId: string) => Promise<void> | void;
   onToggleUserStatus: (userId: string, reason?: string) => Promise<void> | void;
 }
 
@@ -57,10 +59,12 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   activeOrganizationId,
   onAddUser,
   onUpdateUserRole,
+  onUpdateUserOrganization,
   onToggleUserStatus,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
   const [roleFilter, setRoleFilter] = useState<string>('all');
+  const [orgFilter, setOrgFilter] = useState<string>('all');
   const [statusFilter, setStatusFilter] = useState<'all' | 'activo' | 'inactivo' | 'pending'>('all');
   const [showAddModal, setShowAddModal] = useState(false);
   const [userToBlock, setUserToBlock] = useState<UserProfile | null>(null);
@@ -71,6 +75,11 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     nextRole: UserRole;
   } | null>(null);
   const [isUpdatingRole, setIsUpdatingRole] = useState(false);
+  const [pendingOrgChange, setPendingOrgChange] = useState<{
+    user: UserProfile;
+    targetOrg: Organization;
+  } | null>(null);
+  const [isUpdatingOrg, setIsUpdatingOrg] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
 
   // New user form state
@@ -100,18 +109,66 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     setTimeout(() => setFeedbackToast(null), 6000);
   };
 
+  const getOrganizationName = (orgId?: string) => {
+    const resolvedId = orgId || DEFAULT_ORGANIZATION_ID;
+    return organizations.find((o) => o.id === resolvedId)?.name || DEFAULT_ORGANIZATION.name;
+  };
+
   const filteredUsers = usersList.filter((u) => {
     const matchesSearch = 
       u.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
       u.rut.toLowerCase().includes(searchQuery.toLowerCase());
     const matchesRole = roleFilter === 'all' || u.role === roleFilter;
+    const userOrgId = u.organizationId || DEFAULT_ORGANIZATION_ID;
+    const matchesOrg = !isGlobalAdmin || orgFilter === 'all' || userOrgId === orgFilter;
     const matchesStatus =
       statusFilter === 'all' ||
       (statusFilter === 'pending' && Boolean(u.pendingActivation)) ||
       (statusFilter !== 'pending' && u.status === statusFilter);
-    return matchesSearch && matchesRole && matchesStatus;
+    return matchesSearch && matchesRole && matchesOrg && matchesStatus;
   });
+
+  const handleOrganizationSelectChange = (targetUser: UserProfile, targetOrgId: string) => {
+    const currentOrgId = targetUser.organizationId || DEFAULT_ORGANIZATION_ID;
+    if (currentOrgId === targetOrgId) return;
+    if (!isGlobalAdmin || !onUpdateUserOrganization) {
+      soundAlert.playFeedbackBeep();
+      showToast('error', 'Solo SuperAdmin o Admin Corporativo MineSafe puede cambiar la organización de un usuario.');
+      return;
+    }
+    const check = canModifyTargetUser(currentUser, targetUser, undefined, organizations);
+    if (!check.allowed) {
+      soundAlert.playFeedbackBeep();
+      showToast('error', check.reason || 'Acción denegada.');
+      return;
+    }
+    const targetOrg = organizations.find((o) => o.id === targetOrgId);
+    if (!targetOrg) {
+      showToast('error', 'Organización destino no encontrada.');
+      return;
+    }
+    setPendingOrgChange({ user: targetUser, targetOrg });
+  };
+
+  const handleConfirmOrganizationChange = async () => {
+    if (!pendingOrgChange || !onUpdateUserOrganization) return;
+    const { user: targetUser, targetOrg } = pendingOrgChange;
+    setIsUpdatingOrg(true);
+    try {
+      await onUpdateUserOrganization(targetUser.id, targetOrg.id);
+      soundAlert.playFeedbackBeep();
+      showToast(
+        'success',
+        `${targetUser.name} fue asignado a la organización "${targetOrg.name}".`
+      );
+      setPendingOrgChange(null);
+    } catch (err: any) {
+      showToast('error', err?.message || 'No se pudo asignar el usuario a la organización.');
+    } finally {
+      setIsUpdatingOrg(false);
+    }
+  };
 
   const handleRoleSelectChange = (targetUser: UserProfile, nextRole: UserRole) => {
     if (targetUser.role === nextRole) return;
@@ -492,6 +549,21 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
+          {isGlobalAdmin && organizations.length > 0 && (
+            <select
+              value={orgFilter}
+              onChange={(e) => setOrgFilter(e.target.value)}
+              aria-label="Filtrar usuarios por organización"
+              className="px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+            >
+              <option value="all">Todas las Empresas ({organizations.length})</option>
+              {organizations.map((org) => (
+                <option key={org.id} value={org.id}>
+                  {org.name}
+                </option>
+              ))}
+            </select>
+          )}
           <select
             value={roleFilter}
             onChange={(e) => setRoleFilter(e.target.value)}
@@ -527,6 +599,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 <th className="px-4 py-3">Email Corporativo</th>
                 <th className="px-4 py-3">RUT</th>
                 <th className="px-4 py-3">Rol Minero</th>
+                <th className="px-4 py-3">Empresa / Organización</th>
                 <th className="px-4 py-3">Turno / Sector</th>
                 <th className="px-4 py-3">Estado</th>
                 <th className="px-4 py-3">Acciones</th>
@@ -543,6 +616,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                   undefined,
                   organizations
                 ).allowed;
+                const userOrgId = user.organizationId || DEFAULT_ORGANIZATION_ID;
+                const userOrgName = getOrganizationName(userOrgId);
 
                 return (
                   <tr key={user.id} className="hover:bg-slate-800/40 transition-colors">
@@ -566,6 +641,40 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                     <td className="px-4 py-3.5 font-mono text-slate-300">{user.email}</td>
                     <td className="px-4 py-3.5 font-mono text-slate-400">{user.rut}</td>
                     <td className="px-4 py-3.5">{getRoleBadge(user.role)}</td>
+                    <td className="px-4 py-3.5">
+                      {isGlobalAdmin && canModifyTarget && onUpdateUserOrganization && organizations.length > 0 ? (
+                        <div className="space-y-1 min-w-[175px]">
+                          <select
+                            value={
+                              organizations.some((o) => o.id === userOrgId)
+                                ? userOrgId
+                                : organizations[0]?.id || DEFAULT_ORGANIZATION_ID
+                            }
+                            onChange={(e) => handleOrganizationSelectChange(user, e.target.value)}
+                            aria-label={`Asignar organización a ${user.name}`}
+                            className="w-full px-2 py-1 bg-slate-950 border border-indigo-800/70 rounded text-[11px] text-indigo-200 font-medium focus:border-cyan-500"
+                          >
+                            {organizations.map((org) => (
+                              <option key={org.id} value={org.id}>
+                                {org.name}
+                              </option>
+                            ))}
+                          </select>
+                          {organizations.length <= 1 && (
+                            <span className="block text-[10px] text-slate-500">
+                              Crea más empresas en Empresas y Carga
+                            </span>
+                          )}
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-200 bg-slate-950/70 px-2 py-1 rounded border border-slate-800">
+                          <Building2 className="w-3 h-3 text-cyan-400 shrink-0" />
+                          <span className="truncate max-w-[160px]" title={userOrgName}>
+                            {userOrgName}
+                          </span>
+                        </span>
+                      )}
+                    </td>
                     <td className="px-4 py-3.5 text-slate-300">
                       <div>{user.shift}</div>
                       {user.assignedSector && (
@@ -1014,6 +1123,84 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 className="px-4 py-2 text-white bg-amber-600 hover:bg-amber-500 rounded-lg font-semibold disabled:opacity-50"
               >
                 {isUpdatingRole ? 'Guardando cambio...' : 'Sí, cambiar rol'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CONFIRMAR ASIGNACIÓN DE ORGANIZACIÓN */}
+      {pendingOrgChange && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-org-change-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm"
+        >
+          <div className="bg-slate-900 border border-indigo-700/70 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl animate-in fade-in">
+            <div className="flex items-center justify-between">
+              <h3
+                id="confirm-org-change-title"
+                className="text-base font-bold text-white flex items-center gap-2"
+              >
+                <Building2 className="w-4 h-4 text-indigo-400" />
+                Confirmar asignación a empresa
+              </h3>
+              <button
+                type="button"
+                disabled={isUpdatingOrg}
+                onClick={() => setPendingOrgChange(null)}
+                className="text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs">
+              <p className="text-slate-200 leading-relaxed">
+                ¿Deseas asignar al usuario{' '}
+                <span className="font-bold text-white">{pendingOrgChange.user.name}</span> a la organización{' '}
+                <span className="font-bold text-indigo-300">{pendingOrgChange.targetOrg.name}</span>?
+              </p>
+
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="text-[11px] text-slate-400 font-mono truncate">
+                  {pendingOrgChange.user.email}
+                </div>
+                <div className="flex flex-wrap items-center gap-2 pt-1">
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-semibold">
+                    <Building2 className="w-3 h-3 text-slate-400" />
+                    {getOrganizationName(pendingOrgChange.user.organizationId)}
+                  </span>
+                  <ArrowRight className="w-4 h-4 text-indigo-400 shrink-0" />
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-indigo-950 border border-indigo-700 text-indigo-200 text-[11px] font-bold">
+                    <Building2 className="w-3 h-3 text-indigo-400" />
+                    {pendingOrgChange.targetOrg.name}
+                  </span>
+                </div>
+              </div>
+
+              <div className="p-2.5 rounded-lg bg-indigo-950/40 border border-indigo-800/60 text-indigo-200/90 text-[11px]">
+                Al cambiar de organización se desvincularán automáticamente faenas, cuadrillas o dispositivos de la empresa anterior para mantener el aislamiento de datos.
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800 text-xs">
+              <button
+                type="button"
+                disabled={isUpdatingOrg}
+                onClick={() => setPendingOrgChange(null)}
+                className="px-4 py-2 text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isUpdatingOrg}
+                onClick={handleConfirmOrganizationChange}
+                className="px-4 py-2 text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {isUpdatingOrg ? 'Asignando...' : 'Sí, asignar a empresa'}
               </button>
             </div>
           </div>

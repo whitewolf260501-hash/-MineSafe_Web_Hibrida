@@ -2119,6 +2119,111 @@ export default function App({
     }
   }, [currentUser, organizations, usersList, showAlarmFeedback]);
 
+  const handleUpdateUserOrganization = useCallback(async (userId: string, targetOrgId: string) => {
+    if (!isGlobalMineSafeAdmin(currentUser.role)) {
+      const msg = 'Solo SuperAdmin o Admin Corporativo MineSafe puede asignar usuarios existentes a otra organización.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const targetUser = usersList.find((u) => u.id === userId);
+    if (!targetUser) {
+      const msg = 'Usuario no encontrado.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const targetOrg = organizations.find((o) => o.id === targetOrgId);
+    if (!targetOrg) {
+      const msg = 'Organización destino no encontrada.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const check = canModifyTargetUser(currentUser, targetUser, undefined, organizations);
+    if (!check.allowed) {
+      const msg = check.reason || 'Acción denegada para reasignar este usuario.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+
+    const currentOrgId = targetUser.organizationId || DEFAULT_ORGANIZATION.id;
+    if (currentOrgId === targetOrgId) {
+      showAlarmFeedback(`${targetUser.name} ya pertenece a ${targetOrg.name}.`, 'success');
+      return;
+    }
+
+    const normalizedEmail = (targetUser.email || '').trim().toLowerCase();
+    if (normalizedEmail) {
+      const duplicateInTarget = usersList.find(
+        (u) =>
+          u.id !== userId &&
+          (u.email || '').trim().toLowerCase() === normalizedEmail &&
+          (u.organizationId || DEFAULT_ORGANIZATION.id) === targetOrgId &&
+          u.status === 'activo'
+      );
+      if (duplicateInTarget) {
+        const msg = `Ya existe una cuenta activa con el correo ${targetUser.email} dentro de ${targetOrg.name}.`;
+        showAlarmFeedback(msg, 'error');
+        throw new Error(msg);
+      }
+    }
+
+    soundAlert.playFeedbackBeep();
+    const prevUsers = usersList;
+    const prevCurrentUser = currentUser;
+
+    setUsersList((prev) =>
+      prev.map((u) =>
+        u.id === userId
+          ? {
+              ...u,
+              organizationId: targetOrgId,
+              assignedSiteId: undefined,
+              assignedSiteName: undefined,
+              assignedCrewId: undefined,
+              assignedCrewName: undefined,
+              assignedSectors: undefined,
+              assignedDeviceCode: '',
+              assignedSector: 'Sin asignar',
+            }
+          : u
+      )
+    );
+
+    if (currentUser.id === userId) {
+      setCurrentUser((prev) => ({
+        ...prev,
+        organizationId: targetOrgId,
+      }));
+    }
+
+    try {
+      await updateUserInRTDB(
+        userId,
+        {
+          organizationId: targetOrgId,
+          assignedSector: 'Sin asignar',
+          assignedDeviceCode: '',
+        },
+        currentUser,
+        organizations
+      );
+      showAlarmFeedback(
+        `${targetUser.name} asignado correctamente a "${targetOrg.name}" en Firebase RTDB.`,
+        'success'
+      );
+    } catch (err: any) {
+      setUsersList(prevUsers);
+      if (prevCurrentUser.id === userId) {
+        setCurrentUser(prevCurrentUser);
+      }
+      const msg = err?.message || 'Error al asignar el usuario a la organización en Firebase RTDB.';
+      showAlarmFeedback(msg, 'error');
+      throw err;
+    }
+  }, [currentUser, organizations, usersList, showAlarmFeedback]);
+
   const handleToggleUserStatus = useCallback(async (userId: string, reason?: string) => {
     const targetUser = usersList.find(u => u.id === userId);
     if (!targetUser) return;
@@ -2706,6 +2811,9 @@ export default function App({
                 activeOrganizationId={effectiveOrgId}
                 onAddUser={handleAddUser}
                 onUpdateUserRole={handleUpdateUserRole}
+                onUpdateUserOrganization={
+                  isGlobalMineSafeAdmin(currentUser.role) ? handleUpdateUserOrganization : undefined
+                }
                 onToggleUserStatus={handleToggleUserStatus}
               />
             )}
@@ -2719,9 +2827,13 @@ export default function App({
                 devices={visibleDevices}
                 catalogDevices={mergedRegisteredDevices}
                 rtdbDevices={devices}
+                usersList={isGlobalMineSafeAdmin(currentUser.role) ? usersList : scopedUsers}
                 activeOrganizationId={effectiveOrgId}
                 platformConfig={platformConfig}
                 onSelectOrganization={setActiveOrganizationId}
+                onAssignUserToOrganization={
+                  isGlobalMineSafeAdmin(currentUser.role) ? handleUpdateUserOrganization : undefined
+                }
                 onOrganizationsChanged={(changedOrg, deletedId) => {
                   setOrganizations((prev) => {
                     if (deletedId) {

@@ -106,20 +106,35 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
     }
   };
 
+  const MIN_TITLE_LEN = 5;
+  const MIN_COMMENT_LEN = 15;
+
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!comment.trim()) {
-      setErrorNotice('Debe ingresar una descripción de lo ocurrido para la bitácora de seguridad.');
+    const cleanTitle = closingTitle.trim();
+    const cleanComment = comment.trim();
+
+    if (cleanTitle.length < MIN_TITLE_LEN) {
+      setErrorNotice(
+        `El título o resumen de cierre es obligatorio y debe contener al menos ${MIN_TITLE_LEN} caracteres.`
+      );
+      return;
+    }
+
+    if (cleanComment.length < MIN_COMMENT_LEN) {
+      setErrorNotice(
+        `La descripción del suceso es obligatoria y debe contener al menos ${MIN_COMMENT_LEN} caracteres detallando lo ocurrido.`
+      );
       return;
     }
 
     const details: AlertResolutionDetails = {
       resolutionType,
-      closingTitle: closingTitle.trim() || undefined,
-      comment: comment.trim(),
+      closingTitle: cleanTitle,
+      comment: cleanComment,
       correctiveActions:
         correctiveActions.trim() || 'Verificación visual y restablecimiento de condición basal normal.',
-      resolvedBy: supervisorName.trim() || 'Prevencionista de Turno',
+      resolvedBy: supervisorName.trim() || 'Supervisor de Turno',
       resolvedAt: new Date().toLocaleString('es-CL', {
         day: '2-digit',
         month: '2-digit',
@@ -259,23 +274,48 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-              Título / Resumen de Cierre (Opcional):
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
+                2. Título / Resumen de Cierre: <span className="text-rose-400">*</span>
+              </label>
+              <span
+                className={`text-[10px] font-mono ${
+                  closingTitle.trim().length >= MIN_TITLE_LEN ? 'text-emerald-400' : 'text-amber-400'
+                }`}
+              >
+                {closingTitle.trim().length}/{MIN_TITLE_LEN} mín.
+              </span>
+            </div>
             <input
               type="text"
+              required
+              minLength={MIN_TITLE_LEN}
               value={closingTitle}
-              onChange={(e) => setClosingTitle(e.target.value)}
-              placeholder="Ej: Falsa alarma por polvo en suspensión tras tronadura controlada"
+              onChange={(e) => {
+                setClosingTitle(e.target.value);
+                if (errorNotice) setErrorNotice(null);
+              }}
+              placeholder="Ej: Polvo en suspensión controlado tras tronadura"
               className="w-full bg-slate-950 border border-slate-700 rounded-xl px-3 py-2 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 transition-colors"
             />
           </div>
 
           <div className="space-y-1.5">
-            <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
-              2. Descripción del Suceso y Hallazgos en Faena: <span className="text-rose-400">*</span>
-            </label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-xs font-bold uppercase tracking-wider text-slate-300 block">
+                3. Descripción del Suceso y Hallazgos en Faena: <span className="text-rose-400">*</span>
+              </label>
+              <span
+                className={`text-[10px] font-mono ${
+                  comment.trim().length >= MIN_COMMENT_LEN ? 'text-emerald-400' : 'text-amber-400'
+                }`}
+              >
+                {comment.trim().length}/{MIN_COMMENT_LEN} mín.
+              </span>
+            </div>
             <textarea
+              required
+              minLength={MIN_COMMENT_LEN}
               value={comment}
               onChange={(e) => {
                 setComment(e.target.value);
@@ -284,12 +324,12 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
               rows={3}
               placeholder={
                 resolutionType === 'emergencia_real'
-                  ? 'Describa la magnitud de la fuga/incendio, cuadrillas evacuadas, concentración medida...'
+                  ? 'Describa la magnitud de la fuga/incendio, cuadrillas evacuadas, concentración medida (mín. 15 caracteres)...'
                   : resolutionType === 'simulacro'
-                  ? 'Describa el objetivo del simulacro, tiempos de evacuación registrados y comportamiento de cuadrillas...'
+                  ? 'Describa el objetivo del simulacro, tiempos de evacuación registrados y comportamiento de cuadrillas (mín. 15 caracteres)...'
                   : resolutionType === 'falsa_alarma_sensor'
-                  ? 'Indique si fue pin flotante 4095 ADC, desprendimiento de conector o suciedad en cámara óptica...'
-                  : 'Describa los trabajos de mantenimiento realizados y verificación de parámetros basales...'
+                  ? 'Indique si fue pin flotante 4095 ADC, desprendimiento de conector o suciedad en cámara óptica (mín. 15 caracteres)...'
+                  : 'Describa los trabajos de mantenimiento realizados y verificación de parámetros basales (mín. 15 caracteres)...'
               }
               className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"
             />
@@ -360,7 +400,7 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
           <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 pt-1">
             <div>
               <label className="text-[11px] font-semibold text-slate-400 block mb-1">
-                Supervisor / Prevencionista a Cargo:
+                Supervisor / Administrador a Cargo:
               </label>
               <div className="flex items-center gap-2 bg-slate-950 border border-slate-800 rounded-xl px-3 py-2 text-xs text-slate-200">
                 <UserCheck className="w-4 h-4 text-cyan-400 shrink-0" />

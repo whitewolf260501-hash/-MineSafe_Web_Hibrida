@@ -1,29 +1,35 @@
-import React, { useState, useRef } from 'react';
+import React, { useState } from 'react';
 import {
-  Lock,
-  Mail,
-  KeyRound,
-  CheckCircle,
-  AlertCircle,
   X,
-  Eye,
-  EyeOff,
-  Fingerprint,
-  Loader2,
   Sun,
   Moon,
-  UserPlus,
+  LogOut,
+  ShieldCheck,
+  Building2,
+  MapPin,
+  Users,
+  Mail,
+  CreditCard,
+  Clock,
+  KeyRound,
+  Eye,
+  EyeOff,
+  CheckCircle2,
+  AlertCircle,
+  Loader2,
+  ChevronDown,
+  ChevronUp,
 } from 'lucide-react';
-import { UserProfile } from '../types';
-import {
-  createNewCompanyAccountWithPreviousEmail,
-  loginWithFirebaseAuth,
-  sendPasswordResetWithFirebase,
-} from '../services/firebase';
+import { MiningCrew, MiningSite, Organization, UserProfile } from '../types';
+import { updateCurrentUserPasswordWithPolicy } from '../services/firebase';
+import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import { soundAlert } from '../services/audioAlert';
 
 interface LoginModalProps {
   currentUser: UserProfile | null;
+  organizations?: Organization[];
+  sites?: MiningSite[];
+  crews?: MiningCrew[];
   onLogin: (user: UserProfile) => void;
   onLogout: () => void;
   onClose: () => void;
@@ -33,440 +39,373 @@ interface LoginModalProps {
 
 export const LoginModal: React.FC<LoginModalProps> = ({
   currentUser,
+  organizations = [],
+  sites = [],
+  crews = [],
   onLogin,
   onLogout,
   onClose,
   theme = 'dark',
   onToggleTheme,
 }) => {
-  const [activeTab, setActiveTab] = useState<'login' | 'recreate' | 'recover'>('login');
-  const [email, setEmail] = useState('');
-  const [password, setPassword] = useState('');
-  const [previousPassword, setPreviousPassword] = useState('');
+  const [showPasswordSection, setShowPasswordSection] = useState(false);
   const [newPassword, setNewPassword] = useState('');
-  const [confirmNewPassword, setConfirmNewPassword] = useState('');
+  const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
-  const [rememberMe, setRememberMe] = useState(true);
+  const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
-  const [isSubmitting, setIsSubmitting] = useState(false);
-  const passwordInputRef = useRef<HTMLInputElement>(null);
 
-  const handleSubmitLogin = async (e: React.FormEvent) => {
+  if (!currentUser) {
+    return null;
+  }
+
+  const org = organizations.find((o) => o.id === currentUser.organizationId);
+  const orgName = org?.name || currentUser.organizationId || 'MineSafe Corporativo';
+
+  const userCrew = crews.find(
+    (c) =>
+      c.id === currentUser.assignedCrewId ||
+      c.members.some(
+        (m) =>
+          m.userId === currentUser.id ||
+          (m.email && m.email.toLowerCase() === currentUser.email.toLowerCase())
+      )
+  );
+  const userSite = sites.find(
+    (s) => s.id === (currentUser.assignedSiteId || userCrew?.siteId)
+  );
+
+  const faenaDisplay =
+    currentUser.assignedSiteName || userSite?.name || userCrew?.siteName || 'Faena General';
+  const crewDisplay =
+    currentUser.assignedCrewName || userCrew?.name || 'Sin cuadrilla específica';
+  const sectorDisplay =
+    currentUser.assignedSector || userCrew?.sectorName || 'Sector Operativo';
+
+  const roleBadgeConfig = (() => {
+    switch (currentUser.role) {
+      case 'superadmin':
+        return {
+          label: 'SUPERADMINISTRADOR',
+          sublabel: 'Control Global de Plataforma',
+          badgeClass: 'bg-purple-500/20 text-purple-200 border-purple-400/50',
+          headerBg: 'from-purple-950/90 via-slate-900 to-slate-900',
+        };
+      case 'admin_minesafe':
+        return {
+          label: 'ADMIN CORPORATIVO MINESAFE',
+          sublabel: 'Gestión Multiempresa y Despliegue',
+          badgeClass: 'bg-indigo-500/20 text-indigo-200 border-indigo-400/50',
+          headerBg: 'from-indigo-950/90 via-slate-900 to-slate-900',
+        };
+      case 'admin':
+        return {
+          label: 'ADMINISTRADOR DE EMPRESA',
+          sublabel: 'Gestión de Faenas, Cuadrillas y Alarmas',
+          badgeClass: 'bg-cyan-500/20 text-cyan-200 border-cyan-400/50',
+          headerBg: 'from-cyan-950/90 via-slate-900 to-slate-900',
+        };
+      case 'supervisor':
+        return {
+          label: 'SUPERVISOR AMBIENTAL',
+          sublabel: 'Supervisión de Sectores y Alertas',
+          badgeClass: 'bg-amber-500/20 text-amber-200 border-amber-400/50',
+          headerBg: 'from-amber-950/80 via-slate-900 to-slate-900',
+        };
+      default:
+        return {
+          label: 'OPERADOR DE FAENA',
+          sublabel: 'Monitoreo de Sector Asignado',
+          badgeClass: 'bg-emerald-500/20 text-emerald-200 border-emerald-400/50',
+          headerBg: 'from-emerald-950/80 via-slate-900 to-slate-900',
+        };
+    }
+  })();
+
+  const initials = currentUser.name
+    .split(' ')
+    .filter(Boolean)
+    .slice(0, 2)
+    .map((part) => part.charAt(0).toUpperCase())
+    .join('');
+
+  const handleUpdatePassword = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMessage('');
     setSuccessMessage('');
 
-    const cleanEmail = email.trim();
-    if (!cleanEmail) {
-      setErrorMessage('Ingresa tu correo electrónico corporativo.');
+    const check = validatePasswordPolicy(newPassword);
+    if (!check.valid) {
+      setErrorMessage(check.errors[0] || 'La contraseña no cumple la política mínima.');
       return;
     }
-    if (!password) {
-      soundAlert.playFeedbackBeep();
-      setErrorMessage('Ingresa tu contraseña de Firebase Auth.');
-      passwordInputRef.current?.focus();
+    if (newPassword !== confirmPassword) {
+      setErrorMessage('La nueva contraseña y su confirmación no coinciden.');
       return;
     }
 
-    setIsSubmitting(true);
+    setIsUpdatingPassword(true);
     try {
-      const authenticatedUser = await loginWithFirebaseAuth(cleanEmail, password, rememberMe);
+      const updatedUser = await updateCurrentUserPasswordWithPolicy(newPassword, currentUser);
+      onLogin(updatedUser);
+      setNewPassword('');
+      setConfirmPassword('');
+      setSuccessMessage('Contraseña actualizada correctamente conforme a la política de seguridad.');
       soundAlert.playFeedbackBeep();
-      onLogin(authenticatedUser);
-      onClose();
     } catch (err: any) {
-      soundAlert.playFeedbackBeep();
-      if (err?.code === 'auth/account-recreation-required') {
-        setPreviousPassword(password);
-        setActiveTab('recreate');
-        setSuccessMessage(
-          'Una nueva empresa ya habilitó tu correo anterior. Define una nueva contraseña para crear tu cuenta nueva.'
-        );
-        return;
-      }
-      setErrorMessage(
-        err?.message || 'Credenciales inválidas en Firebase Authentication. Acceso denegado.'
-      );
+      setErrorMessage(err?.message || 'No fue posible actualizar tu contraseña.');
     } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleSubmitRecreate = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage('');
-    setSuccessMessage('');
-
-    const cleanEmail = email.trim();
-    if (!cleanEmail) {
-      setErrorMessage('Ingresa el correo autorizado por la nueva empresa.');
-      return;
-    }
-    if (!previousPassword) {
-      setErrorMessage('Ingresa tu contraseña anterior.');
-      return;
-    }
-    if (newPassword.length < 8) {
-      setErrorMessage('La nueva contraseña debe tener mínimo 8 caracteres.');
-      return;
-    }
-    if (newPassword !== confirmNewPassword) {
-      setErrorMessage('Las contraseñas nuevas no coinciden.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      const activatedUser = await createNewCompanyAccountWithPreviousEmail({
-        email: cleanEmail,
-        previousPassword,
-        newPassword,
-        rememberMe,
-      });
-      soundAlert.playFeedbackBeep();
-      onLogin(activatedUser);
-      onClose();
-    } catch (err: any) {
-      soundAlert.playFeedbackBeep();
-      setErrorMessage(
-        err?.message || 'No fue posible activar tu nueva cuenta con el correo anterior.'
-      );
-    } finally {
-      setIsSubmitting(false);
-    }
-  };
-
-  const handleSubmitRecover = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMessage('');
-    setSuccessMessage('');
-    if (!email.trim()) {
-      setErrorMessage('Ingresa el correo registrado en Firebase Auth.');
-      return;
-    }
-
-    setIsSubmitting(true);
-    try {
-      await sendPasswordResetWithFirebase(email);
-      soundAlert.playFeedbackBeep();
-      setSuccessMessage(
-        `Si ${email.trim()} corresponde a una cuenta habilitada, recibirás un enlace para restablecer tu contraseña.`
-      );
-    } catch (err: any) {
-      soundAlert.playFeedbackBeep();
-      setErrorMessage(err?.message || 'No se pudo enviar el correo de recuperación.');
-    } finally {
-      setIsSubmitting(false);
+      setIsUpdatingPassword(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/85 backdrop-blur-md p-3 sm:p-6 animate-in fade-in">
+    <div
+      className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/85 backdrop-blur-md p-3 sm:p-6 animate-in fade-in"
+      onClick={onClose}
+    >
       <div className="min-h-full flex items-center justify-center py-4">
-        <div className="bg-slate-900/95 border border-slate-700/80 rounded-2xl max-w-md w-full shadow-2xl backdrop-blur-md relative z-10 flex flex-col max-h-[min(88vh,720px)]">
-          {/* Header */}
-          <div className="flex items-start justify-between p-5 pb-4 border-b border-slate-800/80 shrink-0">
-            <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-cyan-950 text-cyan-400 border border-cyan-800 flex items-center justify-center shrink-0">
-                {activeTab === 'recreate' ? (
-                  <UserPlus className="w-5 h-5 text-cyan-400" />
-                ) : (
-                  <Lock className="w-5 h-5 text-cyan-400" />
-                )}
+        <div
+          onClick={(e) => e.stopPropagation()}
+          className="bg-slate-900 border border-slate-700/80 rounded-2xl max-w-md w-full shadow-2xl overflow-hidden flex flex-col max-h-[min(90vh,760px)]"
+        >
+          {/* Franja superior tipo Credencial / Carnet Digital */}
+          <div className={`bg-gradient-to-br ${roleBadgeConfig.headerBg} p-5 border-b border-slate-800 relative`}>
+            <div className="flex items-center justify-between gap-2 mb-4">
+              <div className="flex items-center gap-2 text-[11px] font-bold uppercase tracking-widest text-cyan-300">
+                <ShieldCheck className="w-4 h-4" />
+                <span>Credencial Digital MineSafe</span>
               </div>
-              <div>
-                <h2 className="text-base sm:text-lg font-bold text-white tracking-tight">
-                  Sesión de Usuario MineSafe
-                </h2>
-                <p className="text-xs text-slate-400">
-                  Cambiar cuenta, activar nueva empresa o recuperar clave
-                </p>
+
+              <div className="flex items-center gap-1.5">
+                {onToggleTheme && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      onToggleTheme();
+                      soundAlert.playFeedbackBeep();
+                    }}
+                    title={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950/80 border border-slate-700 hover:bg-slate-800 text-[11px] font-semibold text-slate-200 transition-colors cursor-pointer"
+                  >
+                    {theme === 'dark' ? (
+                      <>
+                        <Sun className="w-3.5 h-3.5 text-amber-400" />
+                        <span>Claro</span>
+                      </>
+                    ) : (
+                      <>
+                        <Moon className="w-3.5 h-3.5 text-cyan-400" />
+                        <span>Oscuro</span>
+                      </>
+                    )}
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={onClose}
+                  aria-label="Cerrar credencial"
+                  className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800/80 transition-colors cursor-pointer"
+                >
+                  <X className="w-5 h-5" />
+                </button>
               </div>
             </div>
 
-            <div className="flex items-center gap-1.5 shrink-0 -mr-1 -mt-1">
-              {onToggleTheme && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    onToggleTheme();
-                    soundAlert.playFeedbackBeep();
-                  }}
-                  title={theme === 'dark' ? 'Cambiar a Versión Clara' : 'Cambiar a Versión Oscura'}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-slate-950 border border-slate-800 hover:bg-slate-800 text-[11px] font-semibold text-slate-200 transition-colors"
-                >
-                  {theme === 'dark' ? (
-                    <>
-                      <Sun className="w-3.5 h-3.5 text-amber-400" />
-                      <span>Claro</span>
-                    </>
-                  ) : (
-                    <>
-                      <Moon className="w-3.5 h-3.5 text-cyan-400" />
-                      <span>Oscuro</span>
-                    </>
-                  )}
-                </button>
-              )}
-              <button
-                type="button"
-                onClick={onClose}
-                aria-label="Cerrar modal"
-                className="text-slate-400 hover:text-white p-1.5 rounded-lg hover:bg-slate-800 transition-colors"
-              >
-                <X className="w-5 h-5" />
-              </button>
+            <div className="flex items-center gap-4">
+              <div className="w-16 h-16 rounded-2xl bg-slate-950/90 border-2 border-cyan-500/60 flex items-center justify-center text-2xl font-extrabold text-cyan-300 shadow-lg shrink-0">
+                {initials || 'U'}
+              </div>
+              <div className="min-w-0 flex-1">
+                <h2 className="text-lg font-extrabold text-white tracking-tight truncate">
+                  {currentUser.name}
+                </h2>
+                <div className="mt-1.5 flex flex-wrap items-center gap-1.5">
+                  <span
+                    className={`inline-flex items-center px-2.5 py-0.5 rounded-md border text-[11px] font-extrabold tracking-wide ${roleBadgeConfig.badgeClass}`}
+                  >
+                    {roleBadgeConfig.label}
+                  </span>
+                  <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-emerald-950/80 border border-emerald-700/60 text-emerald-300 text-[10px] font-bold">
+                    <span className="w-1.5 h-1.5 rounded-full bg-emerald-400" />
+                    {currentUser.status === 'activo' ? 'ACTIVO' : 'INACTIVO'}
+                  </span>
+                </div>
+                <p className="text-[11px] text-slate-400 mt-1">{roleBadgeConfig.sublabel}</p>
+              </div>
             </div>
           </div>
 
+          {/* Cuerpo de datos del carnet */}
           <div className="p-5 overflow-y-auto space-y-4">
-            {currentUser && (
-              <div className="p-3.5 bg-slate-950 rounded-xl border border-slate-800 flex items-center justify-between text-xs">
-                <div className="flex items-center gap-2.5">
-                  <div className="w-8 h-8 rounded-full bg-cyan-950 text-cyan-300 border border-cyan-800 flex items-center justify-center font-bold">
-                    {currentUser.name.charAt(0)}
-                  </div>
-                  <div>
-                    <span className="font-bold text-white block">{currentUser.name}</span>
-                    <span className="text-[10px] text-cyan-400 uppercase font-semibold">
-                      {currentUser.role === 'superadmin'
-                        ? 'SuperAdmin'
-                        : currentUser.role === 'admin_minesafe'
-                        ? 'Admin Corporativo MineSafe'
-                        : currentUser.role === 'admin'
-                        ? 'Admin'
-                        : currentUser.role === 'monotoriador'
-                        ? 'Monotoriador'
-                        : 'Operador'}
+            <div className="grid grid-cols-1 gap-2.5 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-3">
+                <Building2 className="w-4 h-4 text-cyan-400 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                    Empresa / Organización
+                  </span>
+                  <span className="font-bold text-white truncate block">{orgName}</span>
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2.5">
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start gap-2.5">
+                  <CreditCard className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      RUT / ID
+                    </span>
+                    <span className="font-mono font-semibold text-white truncate block">
+                      {currentUser.rut || 'No registrado'}
                     </span>
                   </div>
                 </div>
 
-                <button
-                  type="button"
-                  onClick={() => {
-                    onLogout();
-                    soundAlert.playFeedbackBeep();
-                  }}
-                  className="px-2.5 py-1 text-xs font-semibold text-rose-300 bg-rose-950/80 hover:bg-rose-900 rounded border border-rose-800 transition-colors"
-                >
-                  Cerrar Sesión
-                </button>
-              </div>
-            )}
-
-            <div className="flex items-center p-1 bg-slate-950 rounded-lg border border-slate-800 text-[11px] sm:text-xs">
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('login');
-                  setErrorMessage('');
-                  setSuccessMessage('');
-                }}
-                className={`flex-1 py-1.5 font-semibold rounded-md transition-colors ${
-                  activeTab === 'login' ? 'bg-slate-800 text-cyan-300 shadow-sm' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Cambiar Cuenta
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('recreate');
-                  setErrorMessage('');
-                  setSuccessMessage('');
-                }}
-                className={`flex-1 py-1.5 font-semibold rounded-md transition-colors ${
-                  activeTab === 'recreate' ? 'bg-slate-800 text-cyan-300 shadow-sm' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Nueva Empresa
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  setActiveTab('recover');
-                  setErrorMessage('');
-                  setSuccessMessage('');
-                }}
-                className={`flex-1 py-1.5 font-semibold rounded-md transition-colors ${
-                  activeTab === 'recover' ? 'bg-slate-800 text-cyan-300 shadow-sm' : 'text-slate-400 hover:text-slate-200'
-                }`}
-              >
-                Recuperar Clave
-              </button>
-            </div>
-
-            {errorMessage && (
-              <div className="p-3 bg-rose-950/80 border border-rose-800 text-rose-200 rounded-lg text-xs flex items-start gap-2">
-                <AlertCircle className="w-4 h-4 shrink-0 mt-0.5 text-rose-400" />
-                <span>{errorMessage}</span>
-              </div>
-            )}
-
-            {successMessage && (
-              <div className="p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-300 rounded-lg text-xs flex items-start gap-2">
-                <CheckCircle className="w-4 h-4 shrink-0 mt-0.5" />
-                <span>{successMessage}</span>
-              </div>
-            )}
-
-            {activeTab === 'login' ? (
-              <form onSubmit={handleSubmitLogin} className="space-y-3.5 text-xs">
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1">
-                    Correo Electrónico Corporativo
-                  </label>
-                  <div className="relative">
-                    <Mail className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-                    <input
-                      type="email"
-                      required
-                      placeholder="usuario@organizacion.cl"
-                      value={email}
-                      onChange={(e) => setEmail(e.target.value)}
-                      className="w-full pl-9 pr-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-                    />
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start gap-2.5">
+                  <Clock className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Turno / Cargo
+                    </span>
+                    <span className="font-semibold text-white truncate block">
+                      {currentUser.shift || 'Turno Continuo'}
+                    </span>
                   </div>
                 </div>
+              </div>
 
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1">
-                    Contraseña
-                  </label>
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-3">
+                <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
+                <div className="min-w-0">
+                  <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                    Correo Corporativo
+                  </span>
+                  <span className="font-semibold text-white truncate block">{currentUser.email}</span>
+                </div>
+              </div>
+
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
+                <div className="flex items-center gap-2 text-[10px] uppercase tracking-wider text-slate-400 font-bold">
+                  <MapPin className="w-3.5 h-3.5 text-cyan-400" />
+                  <span>Asignación Operativa</span>
+                </div>
+                <div className="grid grid-cols-3 gap-2 text-[11px]">
+                  <div>
+                    <span className="text-slate-400 block text-[10px]">Faena</span>
+                    <span className="font-semibold text-white block truncate" title={faenaDisplay}>
+                      {faenaDisplay}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[10px]">Cuadrilla</span>
+                    <span className="font-semibold text-white block truncate" title={crewDisplay}>
+                      {crewDisplay}
+                    </span>
+                  </div>
+                  <div>
+                    <span className="text-slate-400 block text-[10px]">Sector</span>
+                    <span className="font-semibold text-white block truncate" title={sectorDisplay}>
+                      {sectorDisplay}
+                    </span>
+                  </div>
+                </div>
+              </div>
+            </div>
+
+            {/* Seguridad de contraseña colapsable */}
+            <div className="border border-slate-800 rounded-xl bg-slate-950/60 overflow-hidden">
+              <button
+                type="button"
+                onClick={() => {
+                  setShowPasswordSection((prev) => !prev);
+                  setErrorMessage('');
+                  setSuccessMessage('');
+                }}
+                className="w-full px-3.5 py-2.5 flex items-center justify-between text-xs font-semibold text-slate-200 hover:bg-slate-900/80 transition-colors cursor-pointer"
+              >
+                <span className="flex items-center gap-2">
+                  <KeyRound className="w-4 h-4 text-cyan-400" />
+                  <span>Actualizar mi contraseña</span>
+                </span>
+                {showPasswordSection ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />}
+              </button>
+
+              {showPasswordSection && (
+                <form onSubmit={handleUpdatePassword} className="p-3.5 pt-2 border-t border-slate-800 space-y-2.5 text-xs">
+                  <p className="text-[11px] text-slate-400">
+                    Mínimo 8 caracteres, incluyendo mayúscula, minúscula y número.
+                  </p>
+                  {errorMessage && (
+                    <div className="p-2.5 rounded-lg bg-rose-950/80 border border-rose-800 text-rose-200 flex items-start gap-2">
+                      <AlertCircle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{errorMessage}</span>
+                    </div>
+                  )}
+                  {successMessage && (
+                    <div className="p-2.5 rounded-lg bg-emerald-950/80 border border-emerald-800 text-emerald-200 flex items-start gap-2">
+                      <CheckCircle2 className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                      <span>{successMessage}</span>
+                    </div>
+                  )}
                   <div className="relative">
-                    <KeyRound className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
                     <input
-                      ref={passwordInputRef}
                       type={showPassword ? 'text' : 'password'}
                       required
-                      placeholder="Ingresa tu contraseña"
-                      value={password}
-                      onChange={(e) => setPassword(e.target.value)}
-                      className="w-full pl-9 pr-9 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500 focus:outline-none focus:border-cyan-400"
+                      minLength={8}
+                      placeholder="Nueva contraseña segura"
+                      value={newPassword}
+                      onChange={(e) => setNewPassword(e.target.value)}
+                      className="w-full px-3 py-2 pr-9 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500"
                     />
                     <button
                       type="button"
-                      onClick={() => setShowPassword(!showPassword)}
-                      className="absolute right-3 top-2.5 text-slate-500 hover:text-slate-300"
+                      onClick={() => setShowPassword((prev) => !prev)}
+                      className="absolute right-2.5 top-2 text-slate-400 hover:text-white"
                     >
                       {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
                     </button>
                   </div>
-                </div>
-
-                <label className="flex items-center gap-2 cursor-pointer select-none text-[11px] text-slate-400 pt-1">
                   <input
-                    type="checkbox"
-                    checked={rememberMe}
-                    onChange={(e) => setRememberMe(e.target.checked)}
-                    className="rounded bg-slate-950 border-slate-700 text-cyan-600 focus:ring-0 w-3.5 h-3.5"
-                  />
-                  <span>Recordar sesión en este equipo</span>
-                </label>
-
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-2.5 px-4 text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-900 text-white rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <Fingerprint className="w-4 h-4" />}
-                  <span>{isSubmitting ? 'Validando...' : 'Iniciar Sesión'}</span>
-                </button>
-              </form>
-            ) : activeTab === 'recreate' ? (
-              <form onSubmit={handleSubmitRecreate} className="space-y-3 text-xs">
-                <p className="text-[11px] text-slate-400 leading-relaxed">
-                  Si fuiste bloqueado en una empresa anterior y otra empresa te registró con tu mismo correo, valida tu clave anterior y define una nueva contraseña para crear tu nueva cuenta.
-                </p>
-
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1">Correo Anterior</label>
-                  <input
-                    type="email"
+                    type={showPassword ? 'text' : 'password'}
                     required
-                    placeholder="correo@ejemplo.cl"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
+                    minLength={8}
+                    placeholder="Confirmar nueva contraseña"
+                    value={confirmPassword}
+                    onChange={(e) => setConfirmPassword(e.target.value)}
+                    className="w-full px-3 py-2 bg-slate-900 border border-slate-700 rounded-lg text-white placeholder-slate-500"
                   />
-                </div>
+                  <button
+                    type="submit"
+                    disabled={isUpdatingPassword}
+                    className="w-full py-2 px-3 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold flex items-center justify-center gap-1.5 cursor-pointer"
+                  >
+                    {isUpdatingPassword && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                    <span>{isUpdatingPassword ? 'Guardando...' : 'Guardar nueva contraseña'}</span>
+                  </button>
+                </form>
+              )}
+            </div>
 
-                <div>
-                  <label className="text-slate-300 font-medium block mb-1">Contraseña Anterior</label>
-                  <input
-                    type="password"
-                    required
-                    placeholder="Contraseña de tu cuenta anterior"
-                    value={previousPassword}
-                    onChange={(e) => setPreviousPassword(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
-                  />
-                </div>
-
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
-                  <div>
-                    <label className="text-slate-300 font-medium block mb-1">Nueva Contraseña</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={8}
-                      placeholder="Mín. 8 caracteres"
-                      value={newPassword}
-                      onChange={(e) => setNewPassword(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
-                    />
-                  </div>
-                  <div>
-                    <label className="text-slate-300 font-medium block mb-1">Confirmar Clave</label>
-                    <input
-                      type="password"
-                      required
-                      minLength={8}
-                      placeholder="Repite nueva clave"
-                      value={confirmNewPassword}
-                      onChange={(e) => setConfirmNewPassword(e.target.value)}
-                      className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
-                    />
-                  </div>
-                </div>
-
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-2.5 px-4 text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-900 text-white rounded-lg transition-colors flex items-center justify-center gap-2 cursor-pointer"
-                >
-                  {isSubmitting ? <Loader2 className="w-4 h-4 animate-spin" /> : <UserPlus className="w-4 h-4" />}
-                  <span>{isSubmitting ? 'Creando Cuenta...' : 'Crear Nueva Cuenta y Acceder'}</span>
-                </button>
-              </form>
-            ) : (
-              <form onSubmit={handleSubmitRecover} className="space-y-3 text-xs">
-                <p className="text-slate-400">
-                  Ingresa tu correo registrado para recibir el enlace de restablecimiento de contraseña.
-                </p>
-                <div>
-                  <label className="text-slate-300 block mb-1">Correo Electrónico</label>
-                  <input
-                    type="email"
-                    required
-                    placeholder="usuario@organizacion.cl"
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white placeholder-slate-500"
-                  />
-                </div>
-                <button
-                  type="submit"
-                  disabled={isSubmitting}
-                  className="w-full py-2.5 px-3 text-xs font-bold bg-cyan-600 hover:bg-cyan-500 disabled:bg-cyan-900 text-white rounded-lg transition-colors flex items-center justify-center gap-2"
-                >
-                  {isSubmitting && <Loader2 className="w-4 h-4 animate-spin" />}
-                  <span>{isSubmitting ? 'Enviando enlace...' : 'Enviar Enlace de Recuperación'}</span>
-                </button>
-              </form>
-            )}
+            {/* Acciones inferiores del Carnet */}
+            <div className="flex items-center justify-between gap-2 pt-2 border-t border-slate-800">
+              <span className="inline-flex items-center gap-1.5 text-[11px] text-slate-400">
+                <Users className="w-3.5 h-3.5 text-cyan-400" />
+                <span>Sesión verificada</span>
+              </span>
+              <button
+                type="button"
+                onClick={() => {
+                  onLogout();
+                  soundAlert.playFeedbackBeep();
+                }}
+                className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs font-bold text-rose-200 bg-rose-950/90 hover:bg-rose-900 border border-rose-700 transition-colors cursor-pointer"
+              >
+                <LogOut className="w-3.5 h-3.5" />
+                <span>Cerrar Sesión</span>
+              </button>
+            </div>
           </div>
         </div>
       </div>

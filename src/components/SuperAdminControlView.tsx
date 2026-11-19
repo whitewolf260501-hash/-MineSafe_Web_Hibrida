@@ -295,7 +295,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   };
 
   const handleToggleRoleWindow = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
     tabId: ControllableTab
   ) => {
     if (role === 'operador') return;
@@ -322,7 +322,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   };
 
   const handleSetAllRoleWindows = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
     allowed: boolean
   ) => {
     if (role === 'operador') return;
@@ -404,7 +404,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   };
 
   const handleToggleEquiposSubTabRole = (
-    role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador',
+    role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor',
     subId: EquiposSubTab
   ) => {
     soundAlert.playFeedbackBeep();
@@ -413,7 +413,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
         admin_minesafe: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         admin: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
         operador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
-        monotoriador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
+        supervisor: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
       };
       const roleSubMap =
         currentPerms[role] || { asignaciones: true, arriendos: true, pagos: true, inventario: true };
@@ -1127,19 +1127,19 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
 
               <div className="p-3 rounded-xl bg-emerald-950/20 border border-emerald-900/40 flex items-center justify-between gap-2">
                 <span className="font-bold text-emerald-300 flex items-center gap-1.5">
-                  <Eye className="w-3.5 h-3.5" /> Monotoriadores
+                  <Eye className="w-3.5 h-3.5" /> Supervisores
                 </span>
                 <div className="flex items-center gap-1.5">
                   <button
                     type="button"
-                    onClick={() => handleSetAllRoleWindows('monotoriador', true)}
+                    onClick={() => handleSetAllRoleWindows('supervisor', true)}
                     className="px-2 py-1 rounded bg-emerald-950 text-emerald-300 border border-emerald-800 hover:bg-emerald-900/60"
                   >
                     Ver todas
                   </button>
                   <button
                     type="button"
-                    onClick={() => handleSetAllRoleWindows('monotoriador', false)}
+                    onClick={() => handleSetAllRoleWindows('supervisor', false)}
                     className="px-2 py-1 rounded bg-rose-950 text-rose-300 border border-rose-800 hover:bg-rose-900/60"
                   >
                     Bloquear
@@ -1165,7 +1165,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                     <th className="px-4 py-3">Ventana de la Plataforma</th>
                     <th className="px-4 py-3 text-center text-indigo-300">Admin MineSafe</th>
                     <th className="px-4 py-3 text-center">Administrador</th>
-                    <th className="px-4 py-3 text-center">Monotoriador</th>
+                    <th className="px-4 py-3 text-center">Supervisor</th>
                     <th className="px-4 py-3 text-center">Operador (Normal)</th>
                   </tr>
                 </thead>
@@ -1180,8 +1180,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         true;
                     const adminVisible = draftConfig.visibility.rolePermissions.admin[win.id];
                     const monVisible =
-                      draftConfig.visibility.rolePermissions.monotoriador?.[win.id] ??
-                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador?.[win.id] ??
+                      draftConfig.visibility.rolePermissions.supervisor?.[win.id] ??
+                      DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor?.[win.id] ??
                       true;
                     const opVisible = draftConfig.visibility.rolePermissions.operador[win.id];
 
@@ -1250,7 +1250,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         <td className="px-4 py-3 text-center">
                           <button
                             type="button"
-                            onClick={() => handleToggleRoleWindow('monotoriador', win.id)}
+                            onClick={() => handleToggleRoleWindow('supervisor', win.id)}
                             className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
                               monVisible
                                 ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
@@ -1312,7 +1312,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       <th className="px-4 py-2.5">Sub-ventana</th>
                       <th className="px-4 py-2.5 text-center text-indigo-300">Admin MineSafe</th>
                       <th className="px-4 py-2.5 text-center">Administrador</th>
-                      <th className="px-4 py-2.5 text-center">Monotoriador</th>
+                      <th className="px-4 py-2.5 text-center">Supervisor</th>
                       <th className="px-4 py-2.5 text-center">Operador (Normal)</th>
                     </tr>
                   </thead>
@@ -1321,7 +1321,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       const subPerms = draftConfig.visibility.equiposSubTabRolePermissions;
                       const mineSafeAdminSubVisible = subPerms?.admin_minesafe?.[sub.id] ?? true;
                       const adminSubVisible = subPerms?.admin?.[sub.id] ?? true;
-                      const monSubVisible = subPerms?.monotoriador?.[sub.id] ?? true;
+                      const monSubVisible = subPerms?.supervisor?.[sub.id] ?? true;
                       const opSubVisible = subPerms?.operador?.[sub.id] ?? true;
 
                       return (
@@ -1379,7 +1379,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                           <td className="px-4 py-2.5 text-center">
                             <button
                               type="button"
-                              onClick={() => handleToggleEquiposSubTabRole('monotoriador', sub.id)}
+                              onClick={() => handleToggleEquiposSubTabRole('supervisor', sub.id)}
                               className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg font-bold text-[11px] border transition-colors ${
                                 monSubVisible
                                   ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700 hover:bg-emerald-900/60'
@@ -1422,7 +1422,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 Rol y Bloqueo Individual por Usuario
               </h2>
               <p className="text-xs text-slate-400 mt-0.5">
-                Selecciona cualquier usuario para cambiar su rol (Operador, Monotoriador o Administrador), activar/desactivar su cuenta o bloquearle ventanas puntuales.
+                Selecciona cualquier usuario para cambiar su rol (Operador, Supervisor o Administrador), activar/desactivar su cuenta o bloquearle ventanas puntuales.
               </p>
             </div>
 
@@ -1467,7 +1467,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       <div className="min-w-0">
                         <span className="font-bold block truncate">{u.name}</span>
                         <span className="text-[10px] text-slate-400 block truncate">
-                          {u.email} · {u.role === 'admin_minesafe' ? 'Admin MineSafe' : u.role === 'admin' ? 'Admin' : u.role === 'monotoriador' ? 'Monotoriador' : 'Operador'}
+                          {u.email} · {u.role === 'admin_minesafe' ? 'Admin MineSafe' : u.role === 'admin' ? 'Admin' : u.role === 'supervisor' ? 'Supervisor' : 'Operador'}
                         </span>
                       </div>
                       {customCount > 0 && (
@@ -1490,7 +1490,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       {activeTargetUser.name}
                     </span>
                     <span className="text-[10px] text-cyan-400 font-semibold uppercase">
-                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin_minesafe' ? 'Admin Corporativo MineSafe' : activeTargetUser.role === 'admin' ? 'Administrador' : activeTargetUser.role === 'monotoriador' ? 'Monotoriador' : 'Usuario Normal (Operador)'}
+                      {activeTargetUser.email} · Rol: {activeTargetUser.role === 'admin_minesafe' ? 'Admin Corporativo MineSafe' : activeTargetUser.role === 'admin' ? 'Administrador' : activeTargetUser.role === 'supervisor' ? 'Supervisor' : 'Usuario Normal (Operador)'}
                     </span>
                   </div>
                   <button
@@ -1551,17 +1551,17 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         <button
                           type="button"
                           onClick={() => {
-                            if (activeTargetUser.role === 'monotoriador') return;
-                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'monotoriador' });
+                            if (activeTargetUser.role === 'supervisor') return;
+                            setPendingRoleChange({ user: activeTargetUser, nextRole: 'supervisor' });
                           }}
                           className={`flex items-center justify-center gap-1.5 px-2.5 py-1.5 rounded-lg border transition-colors ${
-                            activeTargetUser.role === 'monotoriador'
+                            activeTargetUser.role === 'supervisor'
                               ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
                               : 'bg-slate-950 text-slate-400 border-slate-800 hover:text-emerald-300 hover:border-emerald-800'
                           }`}
                         >
                           <Eye className="w-3.5 h-3.5" />
-                          <span>Monotoriador</span>
+                          <span>Supervisor</span>
                         </button>
                         <button
                           type="button"
@@ -1617,13 +1617,13 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       : []),
                   ]).size;
 
-                  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+                  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
                     activeTargetUser.role === 'admin_minesafe'
                       ? 'admin_minesafe'
                       : activeTargetUser.role === 'admin'
                       ? 'admin'
-                      : activeTargetUser.role === 'monotoriador'
-                      ? 'monotoriador'
+                      : activeTargetUser.role === 'supervisor'
+                      ? 'supervisor'
                       : 'operador';
                   const parentById = draftConfig.visibility.userOverrides?.[activeTargetUser.id]?.equipos;
                   const parentByEmail = activeEmailKey
@@ -3290,8 +3290,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       ? 'Admin MineSafe'
                       : pendingRoleChange.user.role === 'admin'
                       ? 'Administrador'
-                      : pendingRoleChange.user.role === 'monotoriador'
-                      ? 'Monotoriador'
+                      : pendingRoleChange.user.role === 'supervisor'
+                      ? 'Supervisor'
                       : 'Operador'}
                   </span>
                   <ArrowRight className="w-4 h-4 text-amber-400 shrink-0" />
@@ -3300,8 +3300,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                       ? 'Admin MineSafe'
                       : pendingRoleChange.nextRole === 'admin'
                       ? 'Administrador'
-                      : pendingRoleChange.nextRole === 'monotoriador'
-                      ? 'Monotoriador'
+                      : pendingRoleChange.nextRole === 'supervisor'
+                      ? 'Supervisor'
                       : 'Operador'}
                   </span>
                 </div>
@@ -3331,8 +3331,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                         ? `Permisos de Admin Corporativo MineSafe otorgados a ${targetUser.name}.`
                         : nextRole === 'admin'
                         ? `Permisos de Administrador otorgados a ${targetUser.name}.`
-                        : nextRole === 'monotoriador'
-                        ? `Rol actualizado a Monotoriador Ambiental para ${targetUser.name}.`
+                        : nextRole === 'supervisor'
+                        ? `Rol actualizado a Supervisor Ambiental para ${targetUser.name}.`
                         : `Rol actualizado a Usuario Normal (Operador) para ${targetUser.name}.`
                     );
                     setPendingRoleChange(null);

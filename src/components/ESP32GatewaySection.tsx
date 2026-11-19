@@ -1,44 +1,25 @@
-import React, { useState, useEffect } from 'react';
-import { 
-  Wifi, 
-  WifiOff, 
-  Cpu, 
-  ExternalLink, 
-  Pause, 
-  Play, 
-  RefreshCw, 
-  Activity, 
-  Clock, 
-  Server, 
-  Settings, 
-  CheckCircle2, 
-  AlertTriangle,
+import React, { useEffect, useMemo, useState } from 'react';
+import {
+  Wifi,
+  WifiOff,
+  Server,
   Radio,
-  Sliders,
-  Copy,
-  Check,
-  RotateCcw,
   BellRing,
   BellOff,
+  CheckCircle2,
+  MapPin,
+  Users,
+  Lock,
+  Clock,
   Lightbulb,
-  LightbulbOff,
-  Sparkles,
-  Zap,
-  Volume2,
-  VolumeX,
-  Download,
-  Lock
 } from 'lucide-react';
 import { SensorDevice, UserProfile } from '../types';
-import { 
-  sendESP32Command, 
-  resetGatewayDataInRTDB, 
-  toggleGatewayAlarmInRTDB, 
-  toggleGatewayLightInRTDB,
-  verifySuperAdminPrivileges
+import {
+  shutdownAlarmCompletelyInRTDB,
+  toggleGatewayAlarmInRTDB,
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
-import { isAnyAdminRole } from '../utils/accessControl';
+import { canControlMineAlarm } from '../utils/accessControl';
 
 interface ESP32GatewaySectionProps {
   devices: SensorDevice[];
@@ -48,6 +29,11 @@ interface ESP32GatewaySectionProps {
   isAlarmActive?: boolean;
   onToggleAlarm?: () => Promise<void> | void;
   onShutdownAlarmCompletely?: () => Promise<void> | void;
+  onToggleGatewayAlarm?: (
+    gatewayId: string,
+    active: boolean,
+    targetDeviceIds: string[]
+  ) => Promise<void> | void;
   isLightActive?: boolean;
   onToggleLight?: () => void;
   isSuperAdmin?: boolean;
@@ -55,30 +41,31 @@ interface ESP32GatewaySectionProps {
   timeoutSeconds?: number;
 }
 
+interface SectorGatewayGroup {
+  gateway: SensorDevice;
+  linkedNodes: SensorDevice[];
+  targetDeviceIds: string[];
+  sectorLabel: string;
+  siteLabel: string;
+  crewLabel: string;
+  isOnline: boolean;
+  lastUpdateServer: number;
+  isAlarmActive: boolean;
+}
+
 export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
   devices,
   activeDeviceId,
   onSelectDevice,
-  onResetPageLevels,
   isAlarmActive = false,
-  onToggleAlarm,
-  onShutdownAlarmCompletely,
-  isLightActive = false,
-  onToggleLight,
-  isSuperAdmin = false,
+  onToggleGatewayAlarm,
   currentUser = null,
   timeoutSeconds = 20,
 }) => {
-  const [localIp, setLocalIp] = useState('192.168.4.1');
-  const [isEditingIp, setIsEditingIp] = useState(false);
-  const [acquisitionState, setAcquisitionState] = useState<'activo' | 'pausado'>('activo');
-  const [copiedId, setCopiedId] = useState(false);
-  const [isSimulatingHeartbeat, setIsSimulatingHeartbeat] = useState(false);
   const [nowTimestamp, setNowTimestamp] = useState(Date.now());
   const [actionFeedback, setActionFeedback] = useState<string | null>(null);
-  const [isResettingGateway, setIsResettingGateway] = useState(false);
+  const [busyGatewayId, setBusyGatewayId] = useState<string | null>(null);
 
-  // Update clock every second for live telemetry timeout calculation
   useEffect(() => {
     const timer = setInterval(() => {
       setNowTimestamp(Date.now());
@@ -86,224 +73,173 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
     return () => clearInterval(timer);
   }, []);
 
-  // Todos los dispositivos activos (Sensores y Gateways registrados)
-  const currentDevice = devices.find(d => d.id === activeDeviceId) || devices[0];
-
-  useEffect(() => {
-    if (currentDevice?.localIp) {
-      setLocalIp(currentDevice.localIp);
-    }
-  }, [currentDevice?.id, currentDevice?.localIp]);
-
   const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || 20);
-  const serverTime = currentDevice?.lastUpdateServer || 0;
-  const diffSeconds = serverTime > 0 ? Math.floor(Math.abs(nowTimestamp - serverTime) / 1000) : 999;
-
-  // Connection status: live RTDB packet within effectiveTimeout seconds or gatewayOnline flag
-  const isOnline = Boolean(currentDevice?.gatewayOnline) || (serverTime > 0 && diffSeconds <= effectiveTimeout) || isSimulatingHeartbeat;
-
-  // Format date and time
-  const formatReportDate = (timestamp: number) => {
-    if (!timestamp || timestamp <= 0) return 'Sin sincronización previa';
-    const date = new Date(timestamp);
-    return date.toLocaleString('es-CL', {
-      day: '2-digit',
-      month: '2-digit',
-      year: 'numeric',
-      hour: '2-digit',
-      minute: '2-digit',
-      second: '2-digit',
-    });
-  };
+  const alarmPermission = canControlMineAlarm(currentUser);
+  const canControlAlarm = alarmPermission.allowed;
 
   const showNotification = (msg: string) => {
     setActionFeedback(msg);
     setTimeout(() => {
       setActionFeedback(null);
-    }, 3500);
+    }, 4000);
   };
 
-  const canOperateHardware = isSuperAdmin || isAnyAdminRole(currentUser?.role);
-
-  const handleToggleAcquisition = async (newState: 'activo' | 'pausado') => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
-      return;
-    }
-    setAcquisitionState(newState);
-    soundAlert.playFeedbackBeep();
-    if (currentDevice) {
-      await sendESP32Command(currentDevice.id, newState === 'activo' ? 'resume' : 'pause', currentUser);
-      showNotification(`Adquisición ${newState === 'activo' ? 'reanudada' : 'pausada'} en el ESP32.`);
-    }
+  const isDeviceOnline = (dev: SensorDevice): boolean => {
+    const serverTime = dev.lastUpdateServer || 0;
+    const diffSeconds = serverTime > 0 ? Math.floor(Math.abs(nowTimestamp - serverTime) / 1000) : 999;
+    return Boolean(dev.gatewayOnline) || (serverTime > 0 && diffSeconds <= effectiveTimeout) || dev.status !== 'desconectado';
   };
 
-  const handleTriggerPing = async () => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
-      return;
-    }
-    soundAlert.playFeedbackBeep();
-    setIsSimulatingHeartbeat(true);
-    if (currentDevice) {
-      await sendESP32Command(currentDevice.id, 'ping', currentUser);
-      showNotification(`Latido enviado: Dispositivo marcado "En línea" (ventana ${effectiveTimeout}s).`);
-    }
-    setTimeout(() => {
-      setIsSimulatingHeartbeat(false);
-    }, effectiveTimeout * 1000);
+  const formatRelativeSync = (timestamp: number): string => {
+    if (!timestamp || timestamp <= 0) return 'Sin transmisión reciente';
+    const diffSeconds = Math.floor(Math.abs(nowTimestamp - timestamp) / 1000);
+    if (diffSeconds < 60) return `Hace ${diffSeconds}s`;
+    if (diffSeconds < 3600) return `Hace ${Math.floor(diffSeconds / 60)} min`;
+    return new Date(timestamp).toLocaleTimeString('es-CL', { hour: '2-digit', minute: '2-digit' });
   };
 
-  const handleCopyId = () => {
-    if (currentDevice?.id) {
-      navigator.clipboard.writeText(currentDevice.id);
-      setCopiedId(true);
-      setTimeout(() => setCopiedId(false), 2000);
-    }
-  };
+  // Build simplified Gateway-by-Sector list (hiding internal ESP32 IDs & technical paths)
+  const gatewayGroups = useMemo<SectorGatewayGroup[]>(() => {
+    const gateways = devices.filter((d) => d.deviceCategory !== 'sensor');
+    const nodes = devices.filter((d) => d.deviceCategory === 'sensor');
 
-  const effectiveAlarmActive = Boolean(isAlarmActive || currentDevice?.alarmaActiva);
+    const groups: SectorGatewayGroup[] = [];
+    const assignedNodeIds = new Set<string>();
 
-  // 1. Resetear niveles de la página
-  const handleResetPageLevels = () => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
-      return;
-    }
-    if (effectiveAlarmActive && !isSuperAdmin) {
-      showNotification('Acción bloqueada: Solo el SuperAdministrador puede apagar o resetear una alarma activa.');
-      return;
-    }
-    soundAlert.playFeedbackBeep();
-    onResetPageLevels?.();
-    showNotification('Niveles de la página restablecidos a condiciones basales seguras (DS 132).');
-  };
+    for (const gw of gateways) {
+      const linked = nodes.filter((node) => {
+        if (assignedNodeIds.has(node.id)) return false;
+        if (node.parentGatewayId && node.parentGatewayId === gw.id) return true;
+        if (
+          !node.parentGatewayId &&
+          gw.sectorName &&
+          node.sectorName &&
+          node.sectorName.trim().toLowerCase() === gw.sectorName.trim().toLowerCase() &&
+          (!gw.organizationId || !node.organizationId || gw.organizationId === node.organizationId)
+        ) {
+          return true;
+        }
+        return false;
+      });
+      linked.forEach((n) => assignedNodeIds.add(n.id));
 
-  // 2. Resetear datos del Gateway (Firebase RTDB)
-  const handleResetGatewayData = async () => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
-      return;
+      const targetDeviceIds = Array.from(new Set([gw.id, ...linked.map((n) => n.id)]));
+      const anyAlarm = Boolean(gw.alarmaActiva) || linked.some((n) => Boolean(n.alarmaActiva)) || (gateways.length === 1 && isAlarmActive);
+      const latestTs = Math.max(gw.lastUpdateServer || 0, ...linked.map((n) => n.lastUpdateServer || 0));
+
+      groups.push({
+        gateway: gw,
+        linkedNodes: linked,
+        targetDeviceIds,
+        sectorLabel: gw.sectorName || 'Sector Principal',
+        siteLabel: gw.siteName || 'Faena Operativa',
+        crewLabel: gw.crewName || 'Cuadrilla Asignada',
+        isOnline: isDeviceOnline(gw),
+        lastUpdateServer: latestTs,
+        isAlarmActive: anyAlarm,
+      });
     }
-    if (!currentDevice) return;
-    if (effectiveAlarmActive) {
-      const verifiedSuper = isSuperAdmin && await verifySuperAdminPrivileges(currentUser);
-      if (!verifiedSuper) {
-        showNotification('Acción bloqueada: Solo el SuperAdministrador autenticado puede apagar la alarma y resetear el Gateway.');
-        return;
+
+    // Group remaining standalone sensor nodes by sector so every sector with nodes appears cleanly
+    const orphanNodes = nodes.filter((n) => !assignedNodeIds.has(n.id));
+    if (orphanNodes.length > 0) {
+      const bySector = new Map<string, SensorDevice[]>();
+      for (const n of orphanNodes) {
+        const key = (n.sectorName || 'Sector General').trim();
+        const list = bySector.get(key) || [];
+        list.push(n);
+        bySector.set(key, list);
+      }
+
+      for (const [sectorLabel, sectorNodes] of bySector.entries()) {
+        const primary = sectorNodes[0];
+        const targetDeviceIds = sectorNodes.map((n) => n.id);
+        const anyAlarm = sectorNodes.some((n) => Boolean(n.alarmaActiva));
+        const latestTs = Math.max(...sectorNodes.map((n) => n.lastUpdateServer || 0));
+
+        groups.push({
+          gateway: primary,
+          linkedNodes: sectorNodes.slice(1),
+          targetDeviceIds,
+          sectorLabel,
+          siteLabel: primary.siteName || 'Faena Operativa',
+          crewLabel: primary.crewName || 'Cuadrilla Asignada',
+          isOnline: sectorNodes.some((n) => isDeviceOnline(n)),
+          lastUpdateServer: latestTs,
+          isAlarmActive: anyAlarm,
+        });
       }
     }
-    setIsResettingGateway(true);
-    soundAlert.playFeedbackBeep();
+
+    return groups;
+  }, [devices, isAlarmActive, nowTimestamp, effectiveTimeout]);
+
+  const handleToggleSectorAlarm = async (group: SectorGatewayGroup) => {
+    if (!canControlAlarm) {
+      showNotification(
+        alarmPermission.reason ||
+          'Acceso denegado: Solo la Administración de Empresa o MineSafe puede activar o apagar la alarma.'
+      );
+      return;
+    }
+
+    const nextActive = !group.isAlarmActive;
+    setBusyGatewayId(group.gateway.id);
     try {
-      await resetGatewayDataInRTDB(currentDevice.id, currentUser);
-      showNotification(`Datos del Gateway (${currentDevice.id}) reseteados y comando_web="APAGAR" enviado a RTDB.`);
-    } catch (err: any) {
-      showNotification(err?.message || 'Error al resetear datos en Firebase RTDB.');
-    } finally {
-      setIsResettingGateway(false);
-    }
-  };
-
-  // Descarga directa de registro_alarmas para el dispositivo seleccionado
-  const handleDownloadDeviceAlarmCSV = () => {
-    if (!currentDevice?.registroAlarmas) return;
-    soundAlert.playFeedbackBeep();
-    const headers = 'ID_Registro;Fecha;Hora;Origen;Gas_CO_ADC;PM25_ugm3;Temp_C;Hum_Porc;Via;Descripcion\n';
-    const rows = Object.keys(currentDevice.registroAlarmas).map((k) => {
-      const item = currentDevice.registroAlarmas![k];
-      const desc = (item.descripcion || '').replace(/[\r\n;]/g, ' ');
-      return `${k};${item.fecha || ''};${item.hora || ''};${item.origen || ''};${item.CO || 0};${item.PM2_5 || 0};${item.temperatura || 0};${item.humedad || 0};${item.via || 'WIFI_DIRECTO'};"${desc}"`;
-    }).join('\n');
-
-    const blob = new Blob(['\uFEFF' + headers + rows], { type: 'text/csv;charset=utf-8;' });
-    const url = URL.createObjectURL(blob);
-    const link = document.createElement('a');
-    link.href = url;
-    link.setAttribute('download', `Alarmas_${currentDevice.id}.csv`);
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    showNotification(`Historial de alarmas descargado en formato Excel / CSV para ${currentDevice.id}.`);
-  };
-
-  // 3. Encender alarma (Admin/SuperAdmin) o Apagar alarma completamente (SOLO SuperAdmin)
-  const handleToggleAlarmClick = async () => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores solo tienen vista de telemetría.');
-      return;
-    }
-    if (effectiveAlarmActive) {
-      if (!isSuperAdmin) {
-        showNotification('Acceso denegado: Solo el usuario SuperAdministrador puede apagar la alarma completamente.');
-        return;
-      }
-      if (onShutdownAlarmCompletely) {
-        await onShutdownAlarmCompletely();
-        return;
-      }
-    }
-    if (onToggleAlarm) {
-      await onToggleAlarm();
-      return;
-    }
-
-    const nextState = !effectiveAlarmActive;
-    try {
-      if (currentDevice) {
-        await toggleGatewayAlarmInRTDB(currentDevice.id, nextState, currentUser);
-      }
-      if (nextState) {
+      if (onToggleGatewayAlarm) {
+        await onToggleGatewayAlarm(group.gateway.id, nextActive, group.targetDeviceIds);
+      } else if (nextActive) {
+        await toggleGatewayAlarmInRTDB(group.gateway.id, true, currentUser, {
+          targetDeviceIds: group.targetDeviceIds,
+        });
         soundAlert.setMuted(false);
         soundAlert.startContinuousAlarm();
       } else {
+        await shutdownAlarmCompletelyInRTDB(group.gateway.id, currentUser, {
+          targetDeviceIds: group.targetDeviceIds,
+        });
         soundAlert.stopContinuousAlarm();
       }
+
+      const nodesLabel =
+        group.targetDeviceIds.length > 1
+          ? `${group.targetDeviceIds.length} equipos (Gateway y nodos vinculados)`
+          : 'el Gateway del sector';
+
       showNotification(
-        nextState
-          ? `Alarma activada: comando_web="ENCENDER" enviado a /dispositivos/${currentDevice?.id}.`
-          : `Alarma apagada: comando_web="APAGAR" y silencio_remoto=true enviados a /dispositivos/${currentDevice?.id}.`
+        nextActive
+          ? `Alarma sonora y baliza luminosa activadas automáticamente en ${nodesLabel} (${group.sectorLabel}).`
+          : `Alarma y baliza luminosa apagadas en ${nodesLabel} (${group.sectorLabel}).`
       );
     } catch (err: any) {
-      showNotification(err?.message || 'Error al enviar comando de alarma a Firebase RTDB.');
+      showNotification(err?.message || 'No se pudo enviar la instrucción de alarma al Gateway.');
+    } finally {
+      setBusyGatewayId(null);
     }
   };
 
-  // 4. Encender y apagar la luz
-  const handleToggleLightClick = async () => {
-    if (!canOperateHardware) {
-      showNotification('Acceso denegado: Operadores y Monotoriadores no pueden controlar actuadores LED.');
-      return;
-    }
-    soundAlert.playFeedbackBeep();
-    if (onToggleLight) {
-      onToggleLight();
-    } else {
-      const nextState = !isLightActive;
-      if (currentDevice) {
-        await toggleGatewayLightInRTDB(currentDevice.id, nextState, currentUser);
-      }
-      showNotification(nextState ? 'Luz / Baliza LED encendida en el nodo.' : 'Luz / Baliza LED apagada.');
-    }
-  };
+  const onlineGatewaysCount = gatewayGroups.filter((g) => g.isOnline).length;
+  const activeAlarmsCount = gatewayGroups.filter((g) => g.isAlarmActive).length;
 
   return (
     <div className="bg-slate-900/90 border border-slate-800 rounded-2xl p-5 mb-8 shadow-xl backdrop-blur-md relative overflow-hidden">
-      
-      {/* Decorative background glow */}
-      <div className={`absolute top-0 right-0 w-80 h-80 rounded-full blur-3xl pointer-events-none transition-colors duration-500 ${
-        isLightActive ? 'bg-amber-400/15' : isAlarmActive ? 'bg-red-500/20' : 'bg-cyan-500/5'
-      }`} />
+      {/* Subtle status glow */}
+      <div
+        className={`absolute top-0 right-0 w-72 h-72 rounded-full blur-3xl pointer-events-none transition-colors duration-500 ${
+          activeAlarmsCount > 0 ? 'bg-rose-500/15' : 'bg-cyan-500/5'
+        }`}
+      />
 
       {/* Action feedback toast */}
       {actionFeedback && (
-        <div className="mb-4 p-3 bg-cyan-950/90 border border-cyan-500/60 text-cyan-200 rounded-xl text-xs font-semibold flex items-center justify-between shadow-lg animate-in fade-in">
+        <div className="mb-4 p-3 bg-cyan-950/90 border border-cyan-500/60 text-cyan-200 rounded-xl text-xs font-semibold flex items-center justify-between shadow-lg">
           <div className="flex items-center gap-2">
             <CheckCircle2 className="w-4 h-4 text-cyan-400 shrink-0" />
             <span>{actionFeedback}</span>
           </div>
-          <button 
-            onClick={() => setActionFeedback(null)} 
+          <button
+            type="button"
+            onClick={() => setActionFeedback(null)}
             className="text-cyan-400 hover:text-white text-[10px] font-bold"
           >
             Cerrar
@@ -311,485 +247,186 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
         </div>
       )}
 
-      {/* Top Header: Gateway Central de Enlace */}
-      <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
-        <div>
-          <div className="flex items-center gap-2.5">
-            <div className="w-9 h-9 rounded-xl bg-cyan-950 border border-cyan-800 text-cyan-400 flex items-center justify-center shadow-md shadow-cyan-950/50">
-              <Cpu className="w-5 h-5 text-cyan-400" />
-            </div>
-            <div>
-              <div className="flex items-center gap-2">
-                <h2 className="text-base font-bold text-white tracking-wide">
-                  Estado del Gateway IoT (ESP32 Central de Enlace)
-                </h2>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-slate-800 text-slate-300 border border-slate-700">
-                  ESP-WROOM-32
+      {/* Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-4 border-b border-slate-800/80 relative z-10">
+        <div className="flex items-center gap-3">
+          <div className="w-10 h-10 rounded-xl bg-cyan-950 border border-cyan-800 text-cyan-400 flex items-center justify-center shadow-md shadow-cyan-950/50 shrink-0">
+            <Server className="w-5 h-5" />
+          </div>
+          <div>
+            <div className="flex flex-wrap items-center gap-2">
+              <h2 className="text-base font-bold text-white tracking-tight">
+                Gateways por Sector y Control de Alarma
+              </h2>
+              <span className="px-2 py-0.5 rounded-md text-[11px] font-semibold bg-emerald-950/60 text-emerald-300 border border-emerald-800/60">
+                {onlineGatewaysCount} / {gatewayGroups.length} en línea
+              </span>
+              {activeAlarmsCount > 0 && (
+                <span className="px-2 py-0.5 rounded-md text-[11px] font-bold bg-rose-600 text-white animate-pulse flex items-center gap-1">
+                  <BellRing className="w-3 h-3" /> {activeAlarmsCount} Alarma Activa
                 </span>
-                {isLightActive && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-amber-500 text-slate-950 animate-pulse flex items-center gap-1">
-                    <Lightbulb className="w-3 h-3" /> Luz ON
-                  </span>
-                )}
-                {isAlarmActive && (
-                  <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-rose-600 text-white animate-bounce flex items-center gap-1">
-                    <BellRing className="w-3 h-3" /> Sirena ON
-                  </span>
-                )}
-              </div>
-              <p className="text-xs text-slate-400">
-                {devices.length === 1
-                  ? 'Nodo único activo con sincronización en tiempo real hacia Firebase Realtime Database (agrega más sensores o gateways desde Control Maestro).'
-                  : `${devices.length} dispositivos activos (sensores y gateways) sincronizados en tiempo real con Firebase Realtime Database.`}
-              </p>
+              )}
             </div>
+            <p className="text-xs text-slate-400 mt-0.5">
+              Vista consolidada de enlaces por sector. La baliza luminosa se activa y apaga automáticamente junto con la alarma.
+            </p>
           </div>
         </div>
 
-        {/* Dynamic Registered Devices Selector Tabs */}
-        <div className="flex flex-wrap items-center gap-1.5 p-1 bg-slate-950 rounded-xl border border-slate-800 self-start lg:self-center">
-          {devices.map((dev) => {
-            const isSelected = currentDevice?.id === dev.id;
-            const catLabel =
-              dev.deviceCategory === 'gateway'
-                ? 'Gateway'
-                : dev.deviceCategory === 'sensor'
-                ? 'Sensor'
-                : 'Gateway + Sensor';
+        {!canControlAlarm && (
+          <div className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-slate-950/80 border border-slate-800 text-[11px] text-slate-400 shrink-0">
+            <Lock className="w-3.5 h-3.5 text-amber-400" />
+            <span>Control de alarma reservado a Administración</span>
+          </div>
+        )}
+      </div>
+
+      {/* Simplified Gateway Cards List */}
+      {gatewayGroups.length === 0 ? (
+        <div className="mt-5 p-6 rounded-xl bg-slate-950/70 border border-slate-800 text-center text-xs text-slate-400">
+          No hay Gateways ni nodos asignados a los sectores visibles para tu perfil.
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 mt-5 relative z-10">
+          {gatewayGroups.map((group) => {
+            const isSelected = activeDeviceId === group.gateway.id;
+            const onlineNodesCount = group.linkedNodes.filter((n) => isDeviceOnline(n)).length;
+            const isBusy = busyGatewayId === group.gateway.id;
+
             return (
-              <button
-                key={dev.id}
-                type="button"
-                onClick={() => onSelectDevice(dev.id)}
-                className={`px-3 py-1.5 text-xs font-semibold rounded-lg transition-all flex items-center gap-1.5 ${
-                  isSelected
-                    ? 'bg-cyan-600 text-white shadow-md shadow-cyan-950'
-                    : 'text-slate-400 hover:text-white'
+              <div
+                key={group.gateway.id}
+                onClick={() => onSelectDevice(group.gateway.id)}
+                className={`p-4 rounded-xl border transition-all cursor-pointer flex flex-col justify-between gap-4 ${
+                  group.isAlarmActive
+                    ? 'bg-rose-950/35 border-rose-500/70 shadow-lg shadow-rose-950/30'
+                    : isSelected
+                    ? 'bg-slate-950/90 border-cyan-500/70 shadow-md shadow-cyan-950/30'
+                    : 'bg-slate-950/70 border-slate-800 hover:border-slate-700'
                 }`}
               >
-                {dev.deviceCategory === 'gateway' ? (
-                  <Server className="w-3.5 h-3.5" />
-                ) : (
-                  <Radio className="w-3.5 h-3.5" />
+                {/* Top Row: Name + Connection Status */}
+                <div className="flex items-start justify-between gap-3">
+                  <div className="min-w-0">
+                    <div className="flex items-center gap-2">
+                      <Radio
+                        className={`w-4 h-4 shrink-0 ${
+                          group.isAlarmActive
+                            ? 'text-rose-400 animate-pulse'
+                            : group.isOnline
+                            ? 'text-cyan-400'
+                            : 'text-slate-500'
+                        }`}
+                      />
+                      <h3 className="text-sm font-bold text-white truncate">
+                        {group.gateway.name}
+                      </h3>
+                    </div>
+
+                    <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-slate-400">
+                      <span className="inline-flex items-center gap-1 text-cyan-300 font-medium">
+                        <MapPin className="w-3 h-3" />
+                        {group.sectorLabel}
+                      </span>
+                      <span>•</span>
+                      <span>{group.siteLabel}</span>
+                      {group.crewLabel && (
+                        <>
+                          <span>•</span>
+                          <span className="inline-flex items-center gap-1">
+                            <Users className="w-3 h-3 text-slate-500" />
+                            {group.crewLabel}
+                          </span>
+                        </>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Connection Pill */}
+                  {group.isOnline ? (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/50 text-emerald-300 text-[11px] font-bold shrink-0">
+                      <Wifi className="w-3 h-3" />
+                      En línea
+                    </span>
+                  ) : (
+                    <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-rose-950/70 border border-rose-500/50 text-rose-300 text-[11px] font-bold shrink-0">
+                      <WifiOff className="w-3 h-3" />
+                      Desconectado
+                    </span>
+                  )}
+                </div>
+
+                {/* Middle Info: Subordinate Nodes + Sync + Auto Beacon Status */}
+                <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 pt-3 border-t border-slate-800/80 text-[11px]">
+                  <div className="bg-slate-900/70 rounded-lg px-2.5 py-2 border border-slate-800/70">
+                    <span className="text-slate-400 block text-[10px]">Nodos vinculados</span>
+                    <span className="font-bold text-white">
+                      {group.linkedNodes.length === 0
+                        ? 'Gateway directo'
+                        : `${onlineNodesCount} / ${group.linkedNodes.length} activos`}
+                    </span>
+                  </div>
+                  <div className="bg-slate-900/70 rounded-lg px-2.5 py-2 border border-slate-800/70">
+                    <span className="text-slate-400 block text-[10px]">Última señal</span>
+                    <span className="font-semibold text-slate-200 inline-flex items-center gap-1">
+                      <Clock className="w-3 h-3 text-slate-400" />
+                      {formatRelativeSync(group.lastUpdateServer)}
+                    </span>
+                  </div>
+                  <div className="col-span-2 sm:col-span-1 bg-slate-900/70 rounded-lg px-2.5 py-2 border border-slate-800/70">
+                    <span className="text-slate-400 block text-[10px]">Baliza y sirena</span>
+                    <span
+                      className={`font-bold inline-flex items-center gap-1 ${
+                        group.isAlarmActive ? 'text-rose-300' : 'text-emerald-300'
+                      }`}
+                    >
+                      <Lightbulb className="w-3 h-3" />
+                      {group.isAlarmActive ? 'Activas (auto)' : 'En reposo'}
+                    </span>
+                  </div>
+                </div>
+
+                {/* Action Footer: Alarm toggle strictly for authorized mining company Admin / Global Admin */}
+                {canControlAlarm && (
+                  <div className="flex items-center justify-between gap-3 pt-1">
+                    <span className="text-[11px] text-slate-400">
+                      Propagación simultánea a{' '}
+                      <strong className="text-slate-200">{group.targetDeviceIds.length}</strong>{' '}
+                      {group.targetDeviceIds.length === 1 ? 'equipo' : 'equipos'}
+                    </span>
+
+                    <button
+                      type="button"
+                      disabled={isBusy}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        handleToggleSectorAlarm(group);
+                      }}
+                      className={`px-3.5 py-2 rounded-xl text-xs font-bold flex items-center gap-2 transition-all shadow-sm shrink-0 ${
+                        group.isAlarmActive
+                          ? 'bg-rose-600 hover:bg-rose-500 text-white shadow-rose-950/60'
+                          : 'bg-slate-800 hover:bg-rose-600/90 text-slate-100 border border-slate-700 hover:border-rose-500'
+                      } ${isBusy ? 'opacity-60 cursor-wait' : ''}`}
+                    >
+                      {group.isAlarmActive ? (
+                        <>
+                          <BellRing className="w-3.5 h-3.5 animate-bounce" />
+                          <span>{isBusy ? 'Enviando...' : 'Apagar Alarma y Baliza'}</span>
+                        </>
+                      ) : (
+                        <>
+                          <BellOff className="w-3.5 h-3.5" />
+                          <span>{isBusy ? 'Enviando...' : 'Activar Alarma'}</span>
+                        </>
+                      )}
+                    </button>
+                  </div>
                 )}
-                <span className="truncate max-w-[190px]">{dev.name}</span>
-                <span className={`px-1.5 py-0.5 rounded text-[9px] font-mono ${
-                  isSelected ? 'bg-black/25 text-cyan-100' : 'bg-slate-800 text-slate-400'
-                }`}>
-                  {catLabel}
-                </span>
-              </button>
+              </div>
             );
           })}
         </div>
-      </div>
-
-      {/* Main Grid: 4 Core Gateway Indicators */}
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mt-5">
-        
-        {/* 1. Connection Status (15 seconds rule) */}
-        <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Estado de Conexión
-            </span>
-            {isOnline ? (
-              <Wifi className="w-4 h-4 text-emerald-400" />
-            ) : (
-              <WifiOff className="w-4 h-4 text-rose-400" />
-            )}
-          </div>
-
-          <div className="my-2.5">
-            {isOnline ? (
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-emerald-950/80 border border-emerald-500/60 text-emerald-300 shadow-sm">
-                <span className="w-2.5 h-2.5 rounded-full bg-emerald-400 animate-ping" />
-                <span className="text-xs font-bold uppercase tracking-wider">En línea</span>
-              </div>
-            ) : (
-              <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full bg-rose-950/80 border border-rose-500/60 text-rose-300 shadow-sm">
-                <span className="w-2.5 h-2.5 rounded-full bg-rose-400" />
-                <span className="text-xs font-bold uppercase tracking-wider">Desconectado</span>
-              </div>
-            )}
-          </div>
-
-          <div className="flex items-center justify-between text-[11px] text-slate-400 pt-1 border-t border-slate-900">
-            <span>Ventana &lt; {effectiveTimeout}s:</span>
-            <span className={`font-mono font-bold ${isOnline ? 'text-emerald-400' : 'text-rose-400'}`}>
-              {diffSeconds < 999 ? `${diffSeconds} seg transcurridos` : 'Sin latido reciente'}
-            </span>
-          </div>
-        </div>
-
-        {/* 2. Device Identifier */}
-        <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Identificador ESP32
-            </span>
-            <Server className="w-4 h-4 text-cyan-400" />
-          </div>
-
-          <div className="my-2">
-            <div className="flex items-center gap-2">
-              <span className="text-sm sm:text-base font-mono font-extrabold text-white tracking-wide truncate">
-                {currentDevice?.id || 'device_38A839E81F84'}
-              </span>
-              <button
-                type="button"
-                onClick={handleCopyId}
-                className="p-1 rounded hover:bg-slate-800 text-slate-400 hover:text-cyan-300 transition-colors"
-                title="Copiar ID del dispositivo"
-              >
-                {copiedId ? <Check className="w-3.5 h-3.5 text-emerald-400" /> : <Copy className="w-3.5 h-3.5" />}
-              </button>
-            </div>
-            <span className="text-[11px] text-cyan-400/90 font-medium block truncate">
-              {currentDevice?.name}
-            </span>
-          </div>
-
-          <div className="text-[11px] text-slate-400 pt-1 border-t border-slate-900 flex items-center justify-between">
-            <span>Ruta RTDB:</span>
-            <span className="font-mono text-slate-300">/dispositivos/{currentDevice?.id}</span>
-          </div>
-        </div>
-
-        {/* 3. Last Report Timestamp */}
-        <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              Último Reporte
-            </span>
-            <Clock className="w-4 h-4 text-amber-400" />
-          </div>
-
-          <div className="my-2">
-            <div className="text-xs sm:text-sm font-semibold text-slate-200">
-              {formatReportDate(serverTime)}
-            </div>
-            <div className="text-[11px] text-slate-400 mt-0.5">
-              {diffSeconds < 60 
-                ? `Sincronizado hace ${diffSeconds} segundos` 
-                : `Último sync hace ${Math.floor(diffSeconds / 60)} min`}
-            </div>
-          </div>
-
-          <div className="text-[11px] text-slate-400 pt-1 border-t border-slate-900 flex items-center justify-between">
-            <span>Timestamp Server:</span>
-            <span className="font-mono text-slate-300">{serverTime || 'N/A'}</span>
-          </div>
-        </div>
-
-        {/* 4. Local WebServer Link & Acquisition Control */}
-        <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 flex flex-col justify-between">
-          <div className="flex items-center justify-between">
-            <span className="text-xs font-semibold text-slate-400 uppercase tracking-wider">
-              WebServer Local ESP32
-            </span>
-            <button
-              type="button"
-              onClick={() => setIsEditingIp(!isEditingIp)}
-              className="text-slate-400 hover:text-cyan-300"
-              title="Configurar IP local"
-            >
-              <Settings className="w-3.5 h-3.5" />
-            </button>
-          </div>
-
-          <div className="my-2">
-            {isEditingIp ? (
-              <div className="flex items-center gap-1.5">
-                <input
-                  type="text"
-                  value={localIp}
-                  onChange={(e) => setLocalIp(e.target.value)}
-                  placeholder="192.168.4.1"
-                  className="w-full px-2 py-1 text-xs bg-slate-900 border border-cyan-700 rounded text-cyan-200 focus:outline-none"
-                />
-                <button
-                  type="button"
-                  onClick={() => setIsEditingIp(false)}
-                  className="px-2 py-1 text-[10px] font-bold bg-cyan-600 text-white rounded"
-                >
-                  OK
-                </button>
-              </div>
-            ) : (
-              <a
-                href={`http://${localIp}`}
-                target="_blank"
-                rel="noreferrer"
-                className="inline-flex items-center gap-1.5 text-xs font-bold text-cyan-400 hover:text-cyan-300 group"
-              >
-                <span>http://{localIp}</span>
-                <ExternalLink className="w-3.5 h-3.5 group-hover:translate-x-0.5 group-hover:-translate-y-0.5 transition-transform" />
-              </a>
-            )}
-
-            {canOperateHardware ? (
-              <div className="mt-2 flex items-center gap-2">
-                {acquisitionState === 'activo' ? (
-                  <button
-                    type="button"
-                    onClick={() => handleToggleAcquisition('pausado')}
-                    className="flex-1 py-1 px-2 text-[11px] font-bold bg-amber-950/70 hover:bg-amber-900 border border-amber-800 text-amber-300 rounded flex items-center justify-center gap-1 transition-colors"
-                  >
-                    <Pause className="w-3 h-3" />
-                    <span>Pausar</span>
-                  </button>
-                ) : (
-                  <button
-                    type="button"
-                    onClick={() => handleToggleAcquisition('activo')}
-                    className="flex-1 py-1 px-2 text-[11px] font-bold bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-800 text-emerald-300 rounded flex items-center justify-center gap-1 transition-colors"
-                  >
-                    <Play className="w-3 h-3" />
-                    <span>Reanudar</span>
-                  </button>
-                )}
-
-                <button
-                  type="button"
-                  onClick={handleTriggerPing}
-                  className="py-1 px-2 text-[11px] font-bold bg-slate-800 hover:bg-slate-700 text-slate-200 rounded flex items-center justify-center gap-1 transition-colors"
-                  title="Forzar latido / ping en línea"
-                >
-                  <RefreshCw className={`w-3 h-3 ${isSimulatingHeartbeat ? 'animate-spin text-cyan-400' : ''}`} />
-                  <span>Ping</span>
-                </button>
-              </div>
-            ) : (
-              <div className="mt-2 text-[10px] text-slate-400 flex items-center gap-1.5">
-                <Lock className="w-3 h-3 text-amber-400 shrink-0" />
-                <span>Control de adquisición reservado a Administración</span>
-              </div>
-            )}
-          </div>
-
-          <div className="text-[10px] text-slate-400 pt-1 border-t border-slate-900 flex items-center justify-between">
-            <span>Estado ESP32:</span>
-            <span className={acquisitionState === 'activo' ? 'text-emerald-400 font-semibold' : 'text-amber-400 font-semibold'}>
-              {acquisitionState === 'activo' ? 'Adquisición Activa' : 'Adquisición Pausada'}
-            </span>
-          </div>
-        </div>
-
-      </div>
-
-      {/* Detalle en Vivo de Monitoreo emitido por el firmware del ESP32 */}
-      {(currentDevice?.descripcionMonitoreo || currentDevice?.origenAlarma) && (
-        <div className={`mt-4 p-3.5 rounded-xl border flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs transition-colors ${
-          currentDevice?.alarmaActiva || currentDevice?.status === 'critico'
-            ? 'bg-rose-950/50 border-rose-800/80 text-rose-200'
-            : currentDevice?.status === 'advertencia'
-            ? 'bg-amber-950/40 border-amber-800/80 text-amber-200'
-            : 'bg-slate-950/80 border-slate-800 text-slate-300'
-        }`}>
-          <div className="flex items-start gap-2.5">
-            <Radio className={`w-4 h-4 shrink-0 mt-0.5 ${
-              currentDevice?.alarmaActiva ? 'text-rose-400 animate-pulse' : 'text-cyan-400'
-            }`} />
-            <div>
-              <div className="flex items-center gap-2 mb-0.5">
-                <span className="font-bold text-white">Telemetría de Firmware ESP32:</span>
-                {currentDevice?.origenAlarma && currentDevice.origenAlarma !== 'NINGUNO' && (
-                  <span className="px-1.5 py-0.5 rounded text-[10px] font-mono font-bold bg-rose-900/90 text-rose-200 border border-rose-700">
-                    {currentDevice.origenAlarma}
-                  </span>
-                )}
-                {currentDevice?.fecha && currentDevice?.hora && (
-                  <span className="text-[10px] text-slate-400 font-mono">
-                    [{currentDevice.fecha} {currentDevice.hora}]
-                  </span>
-                )}
-              </div>
-              <p className="text-slate-300 leading-relaxed text-[11px]">
-                {currentDevice?.descripcionMonitoreo}
-              </p>
-            </div>
-          </div>
-          <div className="shrink-0 flex items-center gap-2">
-            {currentDevice?.registroAlarmas && (
-              <button
-                type="button"
-                onClick={handleDownloadDeviceAlarmCSV}
-                className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 text-[11px] font-semibold flex items-center gap-1.5 transition-colors cursor-pointer"
-                title="Descargar historial de alarmas de este nodo en Excel / CSV"
-              >
-                <Download className="w-3.5 h-3.5 text-cyan-400" />
-                <span>Auditoría CSV</span>
-              </button>
-            )}
-            {currentDevice?.alarmaActiva && (
-              <div className="shrink-0 flex items-center gap-1.5 px-2.5 py-1 rounded-lg bg-rose-900/80 border border-rose-600 text-rose-100 font-bold text-[11px] animate-pulse">
-                <BellRing className="w-3.5 h-3.5" />
-                <span>SIRENA ACTIVA</span>
-              </div>
-            )}
-          </div>
-        </div>
       )}
-
-      {/* ==============================================================
-          PANEL DE COMANDOS RÁPIDOS IOT Y CONTROL DE FAENA
-          (4 Botones Solicitados: Reset Página, Reset Gateway, Alarma, Luz)
-         ============================================================== */}
-      {canOperateHardware ? (
-      <div className="mt-5 pt-4 border-t border-slate-800">
-        <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2 mb-3">
-          <div className="flex items-center gap-2">
-            <Sliders className="w-4 h-4 text-cyan-400" />
-            <span className="text-xs font-bold uppercase tracking-wider text-slate-300">
-              Panel de Comandos Rápidos IoT y Control de Faena
-            </span>
-          </div>
-          <span className="text-[11px] text-slate-400 font-mono">
-            Dispositivo Objetivo: <span className="text-white font-bold">{currentDevice?.id || 'Sin asignar'}</span>
-          </span>
-        </div>
-
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          
-          {/* Botón 1: Resetear Niveles de la Página */}
-          <button
-            type="button"
-            onClick={handleResetPageLevels}
-            className="p-3 rounded-xl border border-slate-700 bg-slate-800/90 hover:bg-slate-800 text-left transition-all group flex items-center justify-between hover:border-cyan-500 shadow-sm"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-cyan-950 text-cyan-300 border border-cyan-800 flex items-center justify-center group-hover:rotate-180 transition-transform duration-500">
-                <RotateCcw className="w-4 h-4 text-cyan-400" />
-              </div>
-              <div>
-                <span className="text-xs font-bold text-white block">Resetear Página</span>
-                <span className="text-[10px] text-slate-400">Valores seguros DS 132</span>
-              </div>
-            </div>
-            <Sparkles className="w-4 h-4 text-cyan-400 group-hover:scale-110 transition-transform" />
-          </button>
-
-          {/* Botón 2: Resetear Datos del Gateway (Firebase RTDB) */}
-          <button
-            type="button"
-            onClick={handleResetGatewayData}
-            disabled={isResettingGateway}
-            className="p-3 rounded-xl border border-slate-700 bg-slate-800/90 hover:bg-slate-800 text-left transition-all group flex items-center justify-between hover:border-emerald-500 shadow-sm"
-          >
-            <div className="flex items-center gap-2.5">
-              <div className="w-8 h-8 rounded-lg bg-emerald-950 text-emerald-300 border border-emerald-800 flex items-center justify-center">
-                <RefreshCw className={`w-4 h-4 text-emerald-400 ${isResettingGateway ? 'animate-spin' : ''}`} />
-              </div>
-              <div>
-                <span className="text-xs font-bold text-white block">Resetear Gateway</span>
-                <span className="text-[10px] text-slate-400">Limpiar RTDB a 45 ADC</span>
-              </div>
-            </div>
-            <Server className="w-4 h-4 text-emerald-400" />
-          </button>
-
-          {/* Botón 3: Activar / Apagar Completamente Alarma (Solo SuperAdmin puede apagarla) */}
-          <button
-            type="button"
-            onClick={handleToggleAlarmClick}
-            className={`p-3 rounded-xl border transition-all text-left flex items-center justify-between shadow-md ${
-              effectiveAlarmActive
-                ? isSuperAdmin
-                  ? 'border-rose-500 bg-rose-950/90 hover:bg-rose-900/80 text-rose-100 animate-pulse ring-1 ring-rose-400 cursor-pointer'
-                  : 'border-rose-800 bg-rose-950/60 text-rose-200 cursor-not-allowed opacity-90'
-                : 'border-slate-700 bg-slate-800/90 hover:bg-slate-800 text-slate-300 hover:border-rose-500/60 cursor-pointer'
-            }`}
-          >
-            <div className="flex items-center gap-2.5">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center font-bold ${
-                effectiveAlarmActive ? 'bg-rose-900 text-rose-200 animate-bounce' : 'bg-slate-900 text-slate-400'
-              }`}>
-                {effectiveAlarmActive ? (
-                  isSuperAdmin ? <BellRing className="w-4 h-4 text-rose-300" /> : <Lock className="w-4 h-4 text-amber-300" />
-                ) : (
-                  <BellOff className="w-4 h-4 text-slate-400" />
-                )}
-              </div>
-              <div>
-                <span className="text-xs font-bold block text-white">
-                  {effectiveAlarmActive
-                    ? isSuperAdmin
-                      ? 'Apagar Alarma Completamente'
-                      : 'Alarma Activa (Bloqueada)'
-                    : 'Activar Alarma'}
-                </span>
-                <span className="text-[10px] text-slate-400">
-                  {effectiveAlarmActive
-                    ? isSuperAdmin
-                      ? 'Silenciar sirena, luz y Firebase'
-                      : 'Solo SuperAdmin puede apagarla'
-                    : 'Encender sirena sonora y baliza'}
-                </span>
-              </div>
-            </div>
-            {effectiveAlarmActive ? (
-              <span className={`px-2 py-0.5 rounded text-[9px] font-mono font-bold border ${
-                isSuperAdmin
-                  ? 'bg-rose-900 text-rose-100 border-rose-500'
-                  : 'bg-amber-950 text-amber-200 border-amber-700'
-              }`}>
-                {isSuperAdmin ? 'APAGAR' : 'SOLO SA'}
-              </span>
-            ) : (
-              <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-900 text-slate-400 border border-slate-700">
-                OFF
-              </span>
-            )}
-          </button>
-
-          {/* Botón 4: Encender / Apagar Luz (Baliza / Foco LED ESP32) */}
-          <button
-            type="button"
-            onClick={handleToggleLightClick}
-            className={`p-3 rounded-xl border transition-all text-left flex items-center justify-between shadow-md ${
-              isLightActive
-                ? 'border-amber-400 bg-amber-950/80 text-amber-200 ring-1 ring-amber-400 shadow-amber-950/50'
-                : 'border-slate-700 bg-slate-800/90 hover:bg-slate-800 text-slate-300 hover:border-amber-500/60'
-            }`}
-          >
-            <div className="flex items-center gap-2.5">
-              <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${
-                isLightActive ? 'bg-amber-400 text-slate-950 shadow-md shadow-amber-500/50' : 'bg-slate-900 text-slate-400'
-              }`}>
-                {isLightActive ? <Lightbulb className="w-4 h-4 text-slate-950" /> : <LightbulbOff className="w-4 h-4 text-slate-400" />}
-              </div>
-              <div>
-                <span className="text-xs font-bold text-white block">
-                  {isLightActive ? 'Apagar Luz' : 'Encender Luz'}
-                </span>
-                <span className="text-[10px] text-slate-400">
-                  {isLightActive ? 'Foco LED encendido' : 'Iluminación apagada'}
-                </span>
-              </div>
-            </div>
-            {isLightActive ? (
-              <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-amber-400 text-slate-950 font-black">
-                ON
-              </span>
-            ) : (
-              <span className="px-2 py-0.5 rounded text-[9px] font-mono font-bold bg-slate-900 text-slate-400 border border-slate-700">
-                OFF
-              </span>
-            )}
-          </button>
-
-        </div>
-      </div>
-      ) : (
-        <div className="mt-5 pt-4 border-t border-slate-800 flex items-center justify-between text-xs text-slate-400">
-          <span className="flex items-center gap-2">
-            <Lock className="w-4 h-4 text-amber-400 shrink-0" />
-            <span>Comandos de actuadores IoT y reseteo de hardware habilitados solo para Administración / SuperAdmin.</span>
-          </span>
-        </div>
-      )}
-
     </div>
   );
 };

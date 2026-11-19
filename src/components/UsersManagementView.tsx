@@ -145,8 +145,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           ? `Permisos de Admin Corporativo MineSafe otorgados a ${targetUser.name}.`
           : nextRole === 'admin'
           ? `Permisos de Administrador otorgados a ${targetUser.name}.`
-          : nextRole === 'monotoriador'
-          ? `Rol actualizado a Monotoriador Ambiental para ${targetUser.name}.`
+          : nextRole === 'supervisor'
+          ? `Rol actualizado a Supervisor Ambiental para ${targetUser.name}.`
           : `Rol actualizado a Operador (Usuario Normal) para ${targetUser.name}.`
       );
       setPendingRoleChange(null);
@@ -211,15 +211,15 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     if (!newName.trim() || !newEmail.trim()) return;
 
     // Garantizar que nunca se cree un segundo superadmin y solo SuperAdmin pueda crear Admin MineSafe
-    const safeRole: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+    const safeRole: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
       newRole === 'admin_minesafe' && isSuperAdmin
         ? 'admin_minesafe'
         : newRole === 'admin_minesafe'
         ? 'admin'
         : newRole === 'admin'
         ? 'admin'
-        : newRole === 'monotoriador'
-        ? 'monotoriador'
+        : newRole === 'supervisor'
+        ? 'supervisor'
         : 'operador';
     const targetOrgId =
       isGlobalAdmin || authorizedOrgs.length > 1
@@ -312,8 +312,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     const roleLabels: Record<UserRole, string> = {
       superadmin: 'Super Administrador de Seguridad Minera',
       admin_minesafe: 'Admin Corporativo MineSafe',
-      admin: 'Administrador / Prevencionista Sernageomin',
-      monotoriador: 'Monotoriador Ambiental',
+      admin: 'Administrador de Empresa',
+      supervisor: 'Supervisor Ambiental',
       operador: 'Usuario Normal / Operador de Faena',
     };
 
@@ -372,14 +372,14 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         return (
           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
             <Shield className="w-3.5 h-3.5 text-cyan-400" />
-            Admin / Prevencionista
+            Admin de Empresa
           </span>
         );
-      case 'monotoriador':
+      case 'supervisor':
         return (
           <span className="inline-flex items-center gap-1 text-[11px] font-bold text-emerald-300 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
             <Eye className="w-3.5 h-3.5 text-emerald-400" />
-            Monotoriador
+            Supervisor
           </span>
         );
       default:
@@ -404,7 +404,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               Gestión de Usuarios y Roles (RBAC)
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-indigo-400 font-semibold">Admin Corporativo MineSafe</span>, <span className="text-cyan-400 font-semibold">Administradores</span>, <span className="text-emerald-400 font-semibold">Monotoriadores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
+              Administración de cuentas con <span className="text-purple-400 font-semibold">1 Único SuperAdmin Protegido</span>, <span className="text-indigo-400 font-semibold">Admin Corporativo MineSafe</span>, <span className="text-cyan-400 font-semibold">Administradores</span>, <span className="text-emerald-400 font-semibold">Supervisores</span> y <span className="text-amber-400 font-semibold">Usuarios Normales</span>.
             </p>
           </div>
 
@@ -488,7 +488,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           <div className="p-3 bg-cyan-950/20 border border-cyan-900/40 rounded-lg space-y-1.5">
             <div className="flex items-center gap-1.5 text-cyan-300 font-bold">
               <Shield className="w-4 h-4" />
-              Administrador / Prevencionista
+              Administrador de Empresa
             </div>
             <p className="text-slate-400 text-[11px]">
               Gestión operacional: monitoreo, umbrales, arriendos y gestión de operadores de su organización. No puede modificar al SuperAdmin ni a Admin MineSafe.
@@ -498,7 +498,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
           <div className="p-3 bg-emerald-950/20 border border-emerald-900/40 rounded-lg space-y-1.5">
             <div className="flex items-center gap-1.5 text-emerald-300 font-bold">
               <Eye className="w-4 h-4" />
-              Monotoriador Ambiental
+              Supervisor Ambiental
             </div>
             <p className="text-slate-400 text-[11px]">
               Supervisión continua de telemetría en vivo, alertas e historial ambiental de su organización, sin permisos para editar configuraciones críticas ni gestionar usuarios.
@@ -541,7 +541,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             <option value="superadmin">SuperAdmin Único</option>
             <option value="admin_minesafe">Admin Corporativo MineSafe</option>
             <option value="admin">Solo Administradores</option>
-            <option value="monotoriador">Solo Monotoriadores</option>
+            <option value="supervisor">Solo Supervisores</option>
             <option value="operador">Solo Usuarios Normales</option>
           </select>
           <select
@@ -662,8 +662,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                             {isSuperAdmin && (
                               <option value="admin_minesafe">Admin MineSafe (Corporativo)</option>
                             )}
-                            <option value="admin">Admin (Prevencionista)</option>
-                            <option value="monotoriador">Monotoriador</option>
+                            <option value="admin">Administrador de Empresa</option>
+                            <option value="supervisor">Supervisor</option>
                             <option value="operador">Operador (Normal)</option>
                           </select>
                           <button
@@ -783,8 +783,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                     className="w-full px-3 py-2 bg-slate-950 border border-slate-800 rounded-lg text-white"
                   >
                     <option value="operador">Usuario Normal (Operador)</option>
-                    <option value="monotoriador">Monotoriador</option>
-                    <option value="admin">Administrador (Prevencionista)</option>
+                    <option value="supervisor">Supervisor</option>
+                    <option value="admin">Administrador de Empresa</option>
                     {isSuperAdmin && (
                       <option value="admin_minesafe">Admin Corporativo MineSafe</option>
                     )}
@@ -1042,7 +1042,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                   ? 'Este usuario obtendrá acceso administrativo corporativo multi-empresa en MineSafe.'
                   : pendingRoleChange.nextRole === 'admin'
                   ? 'Este usuario podrá administrar datos, usuarios y cuadrillas dentro de su empresa.'
-                  : pendingRoleChange.nextRole === 'monotoriador'
+                  : pendingRoleChange.nextRole === 'supervisor'
                   ? 'Este usuario tendrá acceso de supervisión ambiental sin permisos de administración.'
                   : 'Este usuario quedará restringido a Operador (solo lectura de alertas de su empresa).'}
               </div>

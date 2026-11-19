@@ -19,13 +19,9 @@ import {
   Shield,
   HardHat,
   LogOut,
-  Lightbulb,
-  LightbulbOff,
   BellRing,
   BellOff,
-  RotateCcw,
   Sliders,
-  Lock,
   Sun,
   Moon,
   Building2,
@@ -39,6 +35,7 @@ import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../typ
 import { soundAlert } from '../services/audioAlert';
 import { isTabVisibleForUser } from '../services/firebase';
 import {
+  canControlMineAlarm,
   DEFAULT_ORGANIZATION_ID,
   isAnyAdminRole,
   isGlobalMineSafeAdmin,
@@ -53,8 +50,8 @@ interface NavbarProps {
   onLogout?: () => void;
   onTriggerEmergency: () => void;
   onRefreshData: () => void;
-  isSimulating: boolean;
-  onToggleSimulation: () => void;
+  isSimulating?: boolean;
+  onToggleSimulation?: () => void;
   isFirebaseConnected?: boolean;
   onResetPageLevels?: () => void;
   isAlarmActive?: boolean;
@@ -80,14 +77,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   onLogout,
   onTriggerEmergency,
   onRefreshData,
-  isSimulating,
-  onToggleSimulation,
   isFirebaseConnected = true,
-  onResetPageLevels,
   isAlarmActive = false,
   onToggleAlarm,
-  isLightActive = false,
-  onToggleLight,
   isDrillActive = false,
   platformConfig,
   theme = 'dark',
@@ -102,9 +94,10 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const isSuperAdmin = currentUser.role === 'superadmin';
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
+  const canControlAlarm = canControlMineAlarm(currentUser).allowed;
 
   const handleToggleSound = () => {
-    if (isAlarmActive && !isMuted && !isSuperAdmin) {
+    if (isAlarmActive && !isMuted && !canControlAlarm) {
       return;
     }
     const muted = soundAlert.toggleMute();
@@ -113,10 +106,6 @@ export const Navbar: React.FC<NavbarProps> = ({
   };
   const isOperador = currentUser.role === 'operador';
   const isSuperOrAdmin = isAnyAdminRole(currentUser.role);
-  const showHardwareControls =
-    isSuperAdmin ||
-    ((currentUser.role === 'admin' || currentUser.role === 'admin_minesafe') &&
-      (platformConfig?.appearance?.allowHardwareControlsForNonSuperAdmin ?? true));
   const showEmergencyButton =
     !isOperador &&
     (isSuperOrAdmin || (platformConfig?.appearance?.allowEmergencyButtonForOperador ?? true));
@@ -204,18 +193,18 @@ export const Navbar: React.FC<NavbarProps> = ({
           badgeText: 'Admin',
           icon: <Shield className="w-3 h-3 text-cyan-400" />
         };
-      case 'monotoriador':
+      case 'supervisor':
         return {
           bg: 'bg-emerald-950/80 border-emerald-800 text-emerald-200',
           avatarBg: 'bg-emerald-900 text-emerald-200 border-emerald-700',
-          badgeText: 'Monotoriador',
+          badgeText: 'Supervisor',
           icon: <Eye className="w-3 h-3 text-emerald-400" />
         };
       default:
         return {
           bg: 'bg-amber-950/80 border-amber-800 text-amber-200',
           avatarBg: 'bg-amber-900 text-amber-200 border-amber-700',
-          badgeText: 'Usuario Normal',
+          badgeText: 'Operador',
           icon: <HardHat className="w-3 h-3 text-amber-400" />
         };
     }
@@ -227,10 +216,10 @@ export const Navbar: React.FC<NavbarProps> = ({
     <header className="sticky top-0 z-50 bg-slate-950/95 backdrop-blur-md border-b border-slate-800 shadow-lg shadow-black/40">
       <div className="w-full max-w-[1850px] mx-auto px-3 sm:px-4 lg:px-6">
         
-        {/* ROW 1: BRAND, RTDB STATUS, HARDWARE CONTROLS, PROFILE & EVACUATION */}
+        {/* ROW 1: BRAND, CONNECTION STATUS, ALARM CONTROL, PROFILE & EVACUATION */}
         <div className="flex items-center justify-between h-14 gap-2">
           
-          {/* ZONE 1: BRAND WORDMARK & RTDB STATUS */}
+          {/* ZONE 1: BRAND WORDMARK & GENERIC CONNECTION STATUS */}
           <div className="flex items-center gap-3 shrink-0">
             <button 
               onClick={() => onSelectTab(isOperador ? 'alertas' : 'dashboard')} 
@@ -245,37 +234,27 @@ export const Navbar: React.FC<NavbarProps> = ({
               </span>
             </button>
 
-            {/* Firebase Realtime Database Status */}
+            {/* Generic Real-time Telemetry Status */}
             <div 
-              title={isFirebaseConnected ? "Conectado a Firebase Realtime Database: https://minefase-fc5f5-default-rtdb.firebaseio.com/" : "Conectando a RTDB..."}
-              className="hidden sm:flex items-center gap-1.5 px-2 py-0.5 text-[11px] font-mono rounded-lg bg-emerald-950/40 border border-emerald-800/60 text-emerald-300 shrink-0"
+              title={isFirebaseConnected ? "Conectado a la red de telemetría en tiempo real" : "Reconectando a la red de telemetría..."}
+              className={`hidden sm:flex items-center gap-1.5 px-2.5 py-0.5 text-[11px] font-medium rounded-lg border shrink-0 ${
+                isFirebaseConnected
+                  ? 'bg-emerald-950/40 border-emerald-800/60 text-emerald-300'
+                  : 'bg-amber-950/40 border-amber-800/60 text-amber-300'
+              }`}
             >
               <span className={`w-2 h-2 rounded-full shrink-0 ${isFirebaseConnected ? 'bg-emerald-400 animate-pulse' : 'bg-amber-400'}`} />
-              <span className="font-semibold text-emerald-400">RTDB: minefase-fc5f5</span>
+              <span className="font-semibold">
+                {isFirebaseConnected ? 'Telemetría en línea' : 'Reconectando...'}
+              </span>
             </div>
           </div>
 
           {/* ZONE 2: DESKTOP CONTROLS, PROFILE & EVACUATION ACTION */}
           <div className="hidden md:flex items-center gap-2 shrink-0">
             
-            {/* Quick Hardware & Simulation Control Group */}
+            {/* Quick Controls Group */}
             <div className="flex items-center gap-1 bg-slate-900/90 p-1 rounded-lg border border-slate-800 shrink-0">
-              {/* Simulation stream toggle (solo SuperAdmin / Admin) */}
-              {isSuperOrAdmin && (
-                <button
-                  onClick={onToggleSimulation}
-                  title={isSimulating ? 'Pausar simulación IoT' : 'Activar simulación IoT'}
-                  className={`flex items-center gap-1.5 px-2 py-1 text-xs font-medium rounded-md border transition-colors shrink-0 ${
-                    isSimulating 
-                      ? 'bg-emerald-950/60 text-emerald-300 border-emerald-700/60 hover:bg-emerald-900/50' 
-                      : 'bg-slate-800 text-slate-400 border-slate-700 hover:bg-slate-700'
-                  }`}
-                >
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${isSimulating ? 'bg-emerald-400 animate-pulse' : 'bg-slate-500'}`} />
-                  <span className="text-[11px] font-medium">{isSimulating ? 'En Vivo' : 'Pausado'}</span>
-                </button>
-              )}
-
               {/* Manual refresh button */}
               <button
                 onClick={onRefreshData}
@@ -288,7 +267,7 @@ export const Navbar: React.FC<NavbarProps> = ({
               {/* Audio chime mute button */}
               <button
                 onClick={handleToggleSound}
-                title={isMuted ? 'Activar sirena de alertas' : 'Silenciar sirena de alertas'}
+                title={isMuted ? 'Activar sirena local de alertas' : 'Silenciar sirena local de alertas'}
                 className={`p-1 rounded transition-colors shrink-0 ${
                   isMuted 
                     ? 'text-slate-500 hover:bg-slate-800' 
@@ -298,64 +277,29 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
               </button>
 
-              {/* Quick Toggle Light Button */}
-              {showHardwareControls && onToggleLight && (
-                <button
-                  onClick={onToggleLight}
-                  className={`px-1.5 py-1 rounded text-xs flex items-center gap-1 transition-colors shrink-0 ${
-                    isLightActive
-                      ? 'bg-amber-400 text-slate-950 font-bold shadow-sm shadow-amber-500/50'
-                      : 'text-slate-400 hover:text-amber-300 hover:bg-slate-800'
-                  }`}
-                  title={isLightActive ? 'Luz / Baliza encendida - Clic para apagar' : 'Luz apagada - Clic para encender'}
-                >
-                  {isLightActive ? <Lightbulb className="w-3.5 h-3.5 fill-current" /> : <LightbulbOff className="w-3.5 h-3.5" />}
-                  <span className="text-[11px] font-bold">{isLightActive ? 'Luz ON' : 'Luz'}</span>
-                </button>
-              )}
-
-              {/* Quick Toggle Alarm Siren Button */}
-              {showHardwareControls && onToggleAlarm && (
+              {/* Quick Toggle Alarm Siren + Automatic Beacon Button (Admin de Empresa / SuperAdmin / Admin MineSafe) */}
+              {canControlAlarm && onToggleAlarm && (
                 <button
                   onClick={onToggleAlarm}
-                  className={`px-1.5 py-1 rounded text-xs flex items-center gap-1 transition-colors shrink-0 ${
+                  className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors shrink-0 ${
                     isAlarmActive
-                      ? isSuperAdmin
-                        ? 'bg-rose-600 hover:bg-rose-500 text-white animate-pulse font-bold shadow-sm shadow-rose-950'
-                        : 'bg-rose-900/80 text-rose-200 border border-rose-700 font-bold cursor-not-allowed'
-                      : 'text-slate-400 hover:text-rose-300 hover:bg-slate-800'
+                      ? 'bg-rose-600 hover:bg-rose-500 text-white animate-pulse font-bold shadow-sm shadow-rose-950'
+                      : 'text-slate-300 hover:text-rose-300 hover:bg-slate-800'
                   }`}
                   title={
                     isAlarmActive
-                      ? isSuperAdmin
-                        ? 'Alarma activa - Clic para apagar completamente (SuperAdmin)'
-                        : 'Alarma activa - Solo el SuperAdministrador puede apagarla'
-                      : 'Alarma inactiva - Clic para encender sirena'
+                      ? 'Alarma y baliza activas - Clic para apagar y propagar a todos los nodos'
+                      : 'Alarma inactiva - Clic para activar sirena y baliza en nodos vinculados'
                   }
                 >
                   {isAlarmActive ? (
-                    <>
-                      <BellRing className="w-3.5 h-3.5 animate-bounce" />
-                      {!isSuperAdmin && <Lock className="w-3 h-3 text-amber-300" />}
-                    </>
+                    <BellRing className="w-3.5 h-3.5 animate-bounce" />
                   ) : (
                     <BellOff className="w-3.5 h-3.5" />
                   )}
                   <span className="text-[11px] font-bold">
-                    {isAlarmActive ? (isSuperAdmin ? 'Apagar Alarma' : 'Alarma ON') : 'Alarma'}
+                    {isAlarmActive ? 'Apagar Alarma' : 'Alarma'}
                   </span>
-                </button>
-              )}
-
-              {/* Quick Reset Baseline Button */}
-              {showHardwareControls && onResetPageLevels && (
-                <button
-                  onClick={onResetPageLevels}
-                  className="px-1.5 py-1 rounded text-slate-400 hover:text-cyan-300 hover:bg-slate-800 text-xs flex items-center gap-1 transition-colors shrink-0"
-                  title="Resetear niveles de la página a condiciones basales seguras (DS 132)"
-                >
-                  <RotateCcw className="w-3.5 h-3.5 text-cyan-400" />
-                  <span className="text-[11px]">Reset</span>
                 </button>
               )}
             </div>
@@ -385,8 +329,8 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
-            {/* Organization Switcher for SuperAdmin, Admin MineSafe or Multi-Org Admin */}
-            {(isGlobalAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+            {/* Organization Switcher strictly for SuperAdmin & Admin MineSafe */}
+            {isGlobalAdmin &&
               organizations.length > 0 &&
               onSelectOrganization && (
                 <div className="hidden xl:flex items-center gap-1.5 px-2 py-1 rounded-lg border border-slate-800 bg-slate-900/90 text-xs shrink-0">
@@ -397,9 +341,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     aria-label="Seleccionar Organización"
                     className="bg-transparent text-slate-200 text-[11px] font-semibold focus:outline-none max-w-[140px]"
                   >
-                    {isGlobalAdmin && (
-                      <option value="all" className="bg-slate-950 text-white">Todas las Org.</option>
-                    )}
+                    <option value="all" className="bg-slate-950 text-white">Todas las Org.</option>
                     {organizations.map((org) => (
                       <option key={org.id} value={org.id} className="bg-slate-950 text-white">
                         {org.name}
@@ -412,11 +354,11 @@ export const Navbar: React.FC<NavbarProps> = ({
             {/* Divider */}
             <div className="h-5 w-px bg-slate-800" />
 
-            {/* User Account / Role switcher button */}
+            {/* User Credential / Profile Carnet button */}
             <button
               onClick={onChangeUser}
               className={`flex items-center gap-2 px-2.5 py-1 rounded-lg border text-xs transition-colors hover:scale-102 shrink-0 ${roleTheme.bg}`}
-              title="Clic para cambiar de usuario o iniciar sesión"
+              title="Ver credencial digital y perfil de sesión"
             >
               <div className={`w-5 h-5 rounded-full flex items-center justify-center font-bold text-[10px] border shrink-0 ${roleTheme.avatarBg}`}>
                 {currentUser.name.charAt(0)}
@@ -585,7 +527,7 @@ export const Navbar: React.FC<NavbarProps> = ({
           </div>
 
           <div className="pt-3 border-t border-slate-800 flex flex-col gap-2">
-            {(isGlobalAdmin || (currentUser.role === 'admin' && organizations.length > 1)) &&
+            {isGlobalAdmin &&
               organizations.length > 0 &&
               onSelectOrganization && (
                 <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-slate-800/80 border border-slate-700 text-xs">
@@ -596,9 +538,7 @@ export const Navbar: React.FC<NavbarProps> = ({
                     aria-label="Organización activa"
                     className="w-full bg-transparent text-slate-200 font-semibold focus:outline-none"
                   >
-                    {isGlobalAdmin && (
-                      <option value="all" className="bg-slate-950 text-white">Todas las Organizaciones</option>
-                    )}
+                    <option value="all" className="bg-slate-950 text-white">Todas las Organizaciones</option>
                     {organizations.map((org) => (
                       <option key={org.id} value={org.id} className="bg-slate-950 text-white">
                         {org.name}

@@ -339,7 +339,7 @@ assert.equal(
   'Operador cannot see gateway_3d under default config'
 );
 
-const monSpecial = makeUser({ id: 'mon-spec', email: 'mon_special@minesafe.cl', role: 'monotoriador', organizationId: 'org-alpha' });
+const monSpecial = makeUser({ id: 'mon-spec', email: 'mon_special@minesafe.cl', role: 'supervisor', organizationId: 'org-alpha' });
 const gatewayCustomConfig = {
   ...DEFAULT_PLATFORM_CONFIG,
   visibility: {
@@ -350,8 +350,8 @@ const gatewayCustomConfig = {
         ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
         gateway_3d: true,
       },
-      monotoriador: {
-        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+      supervisor: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor,
         gateway_3d: true,
       },
     },
@@ -397,55 +397,65 @@ assert.equal(
 assert.equal(
   isTabVisibleForUser('gateway_3d', monSpecial, gatewayCustomConfig),
   true,
-  'Per-user email allow override grants gateway_3d access to monotoriador'
+  'Per-user email allow override grants gateway_3d access to supervisor'
 );
 
-const monAlpha = makeUser({ id: 'mon-a', email: 'mon@minesafe.cl', role: 'monotoriador', organizationId: 'org-alpha' });
+const monAlpha = makeUser({ id: 'mon-a', email: 'mon@minesafe.cl', role: 'supervisor', organizationId: 'org-alpha' });
 assert.equal(
   canManageContractsAndPayments(monAlpha, 'org-alpha').allowed,
   false,
-  'Monotoriador cannot manage contracts or payments'
+  'Supervisor cannot manage contracts or payments'
 );
 assert.equal(
-  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador.monitoreo,
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor.monitoreo,
   true,
-  'monitoreo defaults to visible for monotoriador'
+  'monitoreo defaults to visible for supervisor'
 );
 assert.equal(
-  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador.usuarios,
+  DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor.usuarios,
   false,
-  'usuarios defaults to hidden for monotoriador'
+  'usuarios defaults to hidden for supervisor'
 );
 assert.equal(
   isTabVisibleForUser('superadmin_panel', monAlpha, DEFAULT_PLATFORM_CONFIG),
   false,
-  'Monotoriador never accesses superadmin_panel'
+  'Supervisor never accesses superadmin_panel'
 );
 assert.equal(
   isTabVisibleForUser('monitoreo', monAlpha, DEFAULT_PLATFORM_CONFIG),
   true,
-  'Monotoriador accesses monitoreo by default'
+  'Supervisor accesses monitoreo by default'
 );
 assert.equal(
   isTabVisibleForUser('gateway_3d', monAlpha, DEFAULT_PLATFORM_CONFIG),
   false,
-  'Monotoriador hides gateway_3d by default'
+  'Supervisor hides gateway_3d by default'
 );
 assert.equal(
   isEquiposSubTabVisibleForUser('asignaciones', monAlpha, DEFAULT_PLATFORM_CONFIG),
   true,
-  'Equipos sub-tab defaults work for monotoriador'
+  'Equipos sub-tab defaults work for supervisor'
 );
 
-const monMapped = mapRTDBUserToUserProfile('uid-mon-1', {
-  nombre: 'Elena Monotoriadora',
+const supMapped = mapRTDBUserToUserProfile('uid-sup-1', {
+  nombre: 'Elena Supervisora',
   email: 'elena@minesafe.cl',
+  tipoUsuario: 'supervisor',
+  isActive: true,
+  organizationId: 'org-alpha',
+});
+assert.equal(supMapped.role, 'supervisor', 'mapRTDBUserToUserProfile resolves supervisor');
+assert.equal(supMapped.roleLabel, 'Supervisor Ambiental');
+
+const legacyMonMapped = mapRTDBUserToUserProfile('uid-mon-legacy', {
+  nombre: 'Carlos Legacy',
+  email: 'carlos@minesafe.cl',
   tipoUsuario: 'monotoriador',
   isActive: true,
   organizationId: 'org-alpha',
 });
-assert.equal(monMapped.role, 'monotoriador', 'mapRTDBUserToUserProfile resolves monotoriador');
-assert.equal(monMapped.roleLabel, 'Monotoriador Ambiental');
+assert.equal(legacyMonMapped.role, 'supervisor', 'mapRTDBUserToUserProfile migrates legacy monotoriador to supervisor');
+assert.equal(legacyMonMapped.roleLabel, 'Supervisor Ambiental');
 
 const monCustomConfig = {
   ...DEFAULT_PLATFORM_CONFIG,
@@ -453,8 +463,8 @@ const monCustomConfig = {
     ...DEFAULT_PLATFORM_CONFIG.visibility,
     rolePermissions: {
       ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions,
-      monotoriador: {
-        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+      supervisor: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor,
         gateway_3d: true,
       },
     },
@@ -463,13 +473,13 @@ const monCustomConfig = {
 assert.equal(
   isTabVisibleForUser('gateway_3d', monAlpha, monCustomConfig),
   true,
-  'Monotoriador role visibility toggle works independently from operador'
+  'Supervisor role visibility toggle works independently from operador'
 );
 assert.equal(
   isTabVisibleForUser('gateway_3d', opAlpha, monCustomConfig),
   false,
-  'Operador stays hidden when only monotoriador is toggled'
+  'Operador stays hidden when only supervisor is toggled'
 );
 
-console.log('✅ 6. Gateway 3D & Monotoriador role/individual visibility rules passed');
+console.log('✅ 6. Gateway 3D & Supervisor role/individual visibility rules passed');
 console.log('\n🎉 All MineSafe Audit & Stabilization checks passed!');

@@ -18,10 +18,18 @@ import {
   Trash2,
   Upload,
   Users,
+  Network,
+  Radio,
+  Router,
+  Link2,
 } from 'lucide-react';
 import {
+  MiningCrew,
+  MiningSite,
   Organization,
   PlatformConfig,
+  RegisteredDeviceConfig,
+  SensorDevice,
   UserProfile,
 } from '../types';
 import {
@@ -29,7 +37,10 @@ import {
   DEFAULT_ORGANIZATION,
   deleteOrganizationFromRTDB,
   executeBulkCompanyImport,
+  saveCrewToRTDB,
   saveOrganizationToRTDB,
+  saveRegisteredDeviceHierarchy,
+  saveSiteToRTDB,
 } from '../services/firebase';
 import {
   canCreateOrEditOrganization,
@@ -54,10 +65,16 @@ import { soundAlert } from '../services/audioAlert';
 interface CompanyBulkManagementViewProps {
   currentUser: UserProfile;
   organizations: Organization[];
+  sites?: MiningSite[];
+  crews?: MiningCrew[];
+  devices?: SensorDevice[];
   activeOrganizationId: string;
   platformConfig: PlatformConfig;
   onSelectOrganization: (orgId: string) => void;
   onOrganizationsChanged?: (org: Organization, deletedId?: string) => void;
+  onSiteSaved?: (site: MiningSite) => void;
+  onCrewSaved?: (crew: MiningCrew) => void;
+  onDeviceHierarchySaved?: (device: RegisteredDeviceConfig) => void;
   onBulkImportCompleted?: (result: BulkImportExecutionResult) => void;
 }
 
@@ -68,10 +85,22 @@ const ENTITY_OPTIONS: Array<{
   icon: React.ReactNode;
 }> = [
   {
-    id: 'users',
-    label: 'Usuarios / Personal',
-    shortDesc: 'Operadores, Monotoriadores y Admins',
-    icon: <Users className="w-4 h-4 text-cyan-400" />,
+    id: 'hierarchy',
+    label: 'Jerarquía Completa (Faena → Dispositivo)',
+    shortDesc: 'Faena, Cuadrilla, Sector y Gateway/Nodo en un CSV',
+    icon: <Network className="w-4 h-4 text-teal-400" />,
+  },
+  {
+    id: 'devices',
+    label: 'Dispositivos (Gateways y Nodos)',
+    shortDesc: 'Vincula Gateways y Nodos a Faena, Cuadrilla y Sector',
+    icon: <Router className="w-4 h-4 text-sky-400" />,
+  },
+  {
+    id: 'crews',
+    label: 'Cuadrillas Operativas',
+    shortDesc: 'Cuadrillas asignadas a Faenas y Sectores',
+    icon: <HardHat className="w-4 h-4 text-purple-400" />,
   },
   {
     id: 'sites',
@@ -80,21 +109,21 @@ const ENTITY_OPTIONS: Array<{
     icon: <MapPin className="w-4 h-4 text-emerald-400" />,
   },
   {
+    id: 'users',
+    label: 'Usuarios / Personal',
+    shortDesc: 'Operadores, Supervisores y Admins',
+    icon: <Users className="w-4 h-4 text-cyan-400" />,
+  },
+  {
     id: 'rentals',
     label: 'Contratos de Arriendo',
     shortDesc: 'Contratos mensuales de equipos IoT',
     icon: <Cpu className="w-4 h-4 text-amber-400" />,
   },
   {
-    id: 'assignments',
-    label: 'Asignaciones',
-    shortDesc: 'Cuadrillas y detectores asignados',
-    icon: <HardHat className="w-4 h-4 text-purple-400" />,
-  },
-  {
     id: 'bundle',
     label: 'Paquete JSON Completo',
-    shortDesc: 'Empresa + usuarios + faenas + arriendos',
+    shortDesc: 'Faenas, cuadrillas, dispositivos y usuarios en JSON',
     icon: <FileJson className="w-4 h-4 text-indigo-400" />,
   },
 ];
@@ -102,10 +131,16 @@ const ENTITY_OPTIONS: Array<{
 export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps> = ({
   currentUser,
   organizations,
+  sites = [],
+  crews = [],
+  devices = [],
   activeOrganizationId,
   platformConfig,
   onSelectOrganization,
   onOrganizationsChanged,
+  onSiteSaved,
+  onCrewSaved,
+  onDeviceHierarchySaved,
   onBulkImportCompleted,
 }) => {
   const isSuperAdmin = currentUser.role === 'superadmin';
@@ -118,18 +153,20 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     return organizations.filter((o) => allowedIds.has(o.id));
   }, [isGlobalAdmin, currentUser, organizations]);
 
-  const [section, setSection] = useState<'empresas' | 'carga_masiva'>('empresas');
+  const [section, setSection] = useState<'empresas' | 'jerarquia' | 'carga_masiva'>(
+    isGlobalAdmin ? 'empresas' : 'jerarquia'
+  );
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSavingOrg, setIsSavingOrg] = useState(false);
 
-  // Company create/edit form state
+  // Company create/edit form state (only for SuperAdmin / Admin MineSafe)
   const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
   const [orgName, setOrgName] = useState('');
   const [orgRut, setOrgRut] = useState('');
   const [orgIndustry, setOrgIndustry] = useState('Minería Subterránea & Rajo');
   const [orgStatus, setOrgStatus] = useState<'activa' | 'suspendida'>('activa');
 
-  // Bulk import state
+  // Bulk import & Hierarchy target org state
   const defaultTargetOrg = useMemo(() => {
     if (
       activeOrganizationId &&
@@ -142,7 +179,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   }, [activeOrganizationId, authorizedOrganizations, currentUser.organizationId]);
 
   const [bulkOrgId, setBulkOrgId] = useState<string>(defaultTargetOrg);
-  const [entityType, setEntityType] = useState<BulkEntityType>('users');
+  const [entityType, setEntityType] = useState<BulkEntityType>('hierarchy');
   const [rawContent, setRawContent] = useState<string>('');
   const [createAuthAccounts, setCreateAuthAccounts] = useState<boolean>(false);
   const [defaultAuthPassword, setDefaultAuthPassword] = useState<string>('MineSafe2026*');
@@ -150,6 +187,23 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   const [isExecuting, setIsExecuting] = useState<boolean>(false);
   const [progress, setProgress] = useState<{ completed: number; total: number; label: string } | null>(null);
   const [executionResult, setExecutionResult] = useState<BulkImportExecutionResult | null>(null);
+
+  // Hierarchy linking form state
+  const [isSavingLink, setIsSavingLink] = useState(false);
+  const [linkSiteIdToOrg, setLinkSiteIdToOrg] = useState('');
+  const [linkSiteTargetOrgId, setLinkSiteTargetOrgId] = useState(defaultTargetOrg);
+  const [linkCrewId, setLinkCrewId] = useState('');
+  const [linkCrewSiteId, setLinkCrewSiteId] = useState('');
+  const [linkSectorSiteId, setLinkSectorSiteId] = useState('');
+  const [linkSectorId, setLinkSectorId] = useState('');
+  const [linkSectorCrewId, setLinkSectorCrewId] = useState('');
+  const [linkDeviceId, setLinkDeviceId] = useState('');
+  const [linkDeviceName, setLinkDeviceName] = useState('');
+  const [linkDeviceCategory, setLinkDeviceCategory] = useState<'gateway' | 'nodo'>('gateway');
+  const [linkDeviceSiteId, setLinkDeviceSiteId] = useState('');
+  const [linkDeviceCrewId, setLinkDeviceCrewId] = useState('');
+  const [linkDeviceSectorName, setLinkDeviceSectorName] = useState('');
+  const [linkDeviceParentGatewayId, setLinkDeviceParentGatewayId] = useState('');
 
   useEffect(() => {
     if (!authorizedOrganizations.some((o) => o.id === bulkOrgId)) {
@@ -337,17 +391,213 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   const validImportCount = useMemo(() => {
     if (entityType === 'bundle') {
       if (!bundleParsePreview || bundleParsePreview.formatError) return 0;
-      const orgCount = bundleParsePreview.organization?.valid ? 1 : 0;
+      const orgCount = isGlobalAdmin && bundleParsePreview.organization?.valid ? 1 : 0;
       return (
         orgCount +
         bundleParsePreview.users.validRows.length +
         bundleParsePreview.sites.validRows.length +
+        bundleParsePreview.crews.validRows.length +
+        bundleParsePreview.devices.validRows.length +
         bundleParsePreview.rentals.validRows.length +
         bundleParsePreview.assignments.validRows.length
       );
     }
     return singleParsePreview?.validRows.length || 0;
-  }, [entityType, bundleParsePreview, singleParsePreview]);
+  }, [entityType, bundleParsePreview, singleParsePreview, isGlobalAdmin]);
+
+  // Datos filtrados por empresa seleccionada para la pestaña Jerarquía y Vinculación
+  const scopedOrgSites = useMemo(
+    () => sites.filter((s) => (s.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id),
+    [sites, selectedBulkOrg.id]
+  );
+  const scopedOrgCrews = useMemo(
+    () => crews.filter((c) => (c.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id),
+    [crews, selectedBulkOrg.id]
+  );
+  const scopedOrgDevices = useMemo(() => {
+    const byId = new Map<string, RegisteredDeviceConfig>();
+    (platformConfig.registeredDevices || [])
+      .filter((d) => (d.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id)
+      .forEach((d) => byId.set(d.id, d));
+    devices
+      .filter((d) => (d.organizationId || DEFAULT_ORGANIZATION.id) === selectedBulkOrg.id)
+      .forEach((d) => {
+        const prev = byId.get(d.id);
+        byId.set(d.id, {
+          id: d.id,
+          name: d.name || prev?.name || d.id,
+          organizationId: d.organizationId || selectedBulkOrg.id,
+          siteId: d.siteId || prev?.siteId,
+          siteName: d.siteName || prev?.siteName,
+          crewId: d.crewId || prev?.crewId,
+          crewName: d.crewName || prev?.crewName,
+          sectorId: d.sectorId || prev?.sectorId,
+          sectorName: d.sectorName || prev?.sectorName || 'Sector Operativo',
+          category: d.deviceCategory || prev?.category || 'gateway',
+          parentGatewayId: d.parentGatewayId || prev?.parentGatewayId,
+          enabled: true,
+          active: true,
+          createdAt: prev?.createdAt || Date.now(),
+        });
+      });
+    return Array.from(byId.values());
+  }, [platformConfig.registeredDevices, devices, selectedBulkOrg.id]);
+
+  const scopedGateways = useMemo(
+    () => scopedOrgDevices.filter((d) => d.category !== 'nodo'),
+    [scopedOrgDevices]
+  );
+
+  const handleAssignSiteToOrg = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!isGlobalAdmin) {
+      showNotice('error', 'Solo SuperAdmin o Admin MineSafe puede reasignar faenas entre empresas.');
+      return;
+    }
+    const targetSite = sites.find((s) => s.id === linkSiteIdToOrg);
+    const targetOrg = organizations.find((o) => o.id === linkSiteTargetOrgId);
+    if (!targetSite || !targetOrg) {
+      showNotice('error', 'Selecciona una faena y una empresa destino.');
+      return;
+    }
+    setIsSavingLink(true);
+    try {
+      const updatedSite: MiningSite = {
+        ...targetSite,
+        organizationId: targetOrg.id,
+        company: targetOrg.name,
+      };
+      await saveSiteToRTDB(updatedSite);
+      onSiteSaved?.(updatedSite);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Faena "${updatedSite.name}" asignada a "${targetOrg.name}".`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo asignar la faena.');
+    } finally {
+      setIsSavingLink(false);
+    }
+  };
+
+  const handleLinkCrewToSite = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const crew = scopedOrgCrews.find((c) => c.id === linkCrewId);
+    const site = scopedOrgSites.find((s) => s.id === linkCrewSiteId);
+    if (!crew || !site) {
+      showNotice('error', 'Selecciona una cuadrilla y una faena de tu empresa.');
+      return;
+    }
+    setIsSavingLink(true);
+    try {
+      const updated: MiningCrew = {
+        ...crew,
+        organizationId: selectedBulkOrg.id,
+        siteId: site.id,
+        siteName: site.name,
+      };
+      const res = await saveCrewToRTDB(updated, currentUser, organizations);
+      onCrewSaved?.(res.crew);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Cuadrilla "${crew.name}" vinculada a faena "${site.name}".`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo vincular la cuadrilla a la faena.');
+    } finally {
+      setIsSavingLink(false);
+    }
+  };
+
+  const handleLinkSectorToCrew = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const site = scopedOrgSites.find((s) => s.id === linkSectorSiteId);
+    const crew = scopedOrgCrews.find((c) => c.id === linkSectorCrewId);
+    if (!site || !linkSectorId || !crew) {
+      showNotice('error', 'Selecciona faena, sector y cuadrilla para vincular.');
+      return;
+    }
+    setIsSavingLink(true);
+    try {
+      const updatedSectors = site.activeSectors.map((sec) => {
+        if (sec.id !== linkSectorId) return sec;
+        const crewsList = Array.from(new Set([...(sec.assignedCrews || []), crew.name]));
+        return {
+          ...sec,
+          siteId: site.id,
+          crewId: crew.id,
+          crewName: crew.name,
+          assignedCrews: crewsList,
+        };
+      });
+      const updatedSite: MiningSite = { ...site, activeSectors: updatedSectors };
+      await saveSiteToRTDB(updatedSite);
+      onSiteSaved?.(updatedSite);
+      const secObj = updatedSectors.find((s) => s.id === linkSectorId);
+      const updatedCrew: MiningCrew = {
+        ...crew,
+        siteId: site.id,
+        siteName: site.name,
+        sectorId: linkSectorId,
+        sectorName: secObj?.name || crew.sectorName,
+      };
+      const crewRes = await saveCrewToRTDB(updatedCrew, currentUser, organizations);
+      onCrewSaved?.(crewRes.crew);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Sector "${secObj?.name || linkSectorId}" vinculado a cuadrilla "${crew.name}".`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo vincular el sector a la cuadrilla.');
+    } finally {
+      setIsSavingLink(false);
+    }
+  };
+
+  const handleLinkDeviceToSector = async (e: React.FormEvent) => {
+    e.preventDefault();
+    const devId = linkDeviceId.trim();
+    if (!devId) {
+      showNotice('error', 'Indica o selecciona un dispositivo (Gateway o Nodo).');
+      return;
+    }
+    const site = scopedOrgSites.find((s) => s.id === linkDeviceSiteId);
+    const crew = scopedOrgCrews.find((c) => c.id === linkDeviceCrewId);
+    const matchedSector = site?.activeSectors.find((s) => s.name === linkDeviceSectorName);
+    if (!linkDeviceSectorName.trim()) {
+      showNotice('error', 'Selecciona o escribe el sector donde operará el dispositivo.');
+      return;
+    }
+
+    setIsSavingLink(true);
+    try {
+      const savedDev = await saveRegisteredDeviceHierarchy(
+        {
+          id: devId,
+          name: linkDeviceName.trim() || devId,
+          organizationId: selectedBulkOrg.id,
+          siteId: site?.id,
+          siteName: site?.name,
+          crewId: crew?.id,
+          crewName: crew?.name,
+          sectorId: matchedSector?.id,
+          sectorName: linkDeviceSectorName.trim(),
+          category: linkDeviceCategory,
+          parentGatewayId:
+            linkDeviceCategory === 'nodo' ? linkDeviceParentGatewayId || undefined : undefined,
+          enabled: true,
+          active: true,
+          createdAt: Date.now(),
+        },
+        currentUser,
+        organizations
+      );
+      onDeviceHierarchySaved?.(savedDev);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        `${savedDev.category === 'gateway' ? 'Gateway' : 'Nodo'} "${savedDev.name}" vinculado a ${savedDev.sectorName}.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo vincular el dispositivo.');
+    } finally {
+      setIsSavingLink(false);
+    }
+  };
 
   const handleExecuteImport = async () => {
     if (validImportCount === 0) {
@@ -379,7 +629,10 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
         organizations,
         registeredDevices: platformConfig.registeredDevices,
         organizationToCreate:
-          entityType === 'bundle' && bundleParsePreview?.organization?.valid && bundleParsePreview.organization.data
+          isGlobalAdmin &&
+          entityType === 'bundle' &&
+          bundleParsePreview?.organization?.valid &&
+          bundleParsePreview.organization.data
             ? {
                 id:
                   bundleParsePreview.organization.data.id ||
@@ -401,6 +654,22 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
             ? (singleParsePreview?.validRows.map((r) => r.data) || [])
             : entityType === 'bundle'
             ? (bundleParsePreview?.sites.validRows.map((r) => r.data!) || [])
+            : [],
+        crews:
+          entityType === 'crews'
+            ? (singleParsePreview?.validRows.map((r) => r.data) || [])
+            : entityType === 'bundle'
+            ? (bundleParsePreview?.crews.validRows.map((r) => r.data!) || [])
+            : [],
+        devices:
+          entityType === 'devices'
+            ? (singleParsePreview?.validRows.map((r) => r.data) || [])
+            : entityType === 'bundle'
+            ? (bundleParsePreview?.devices.validRows.map((r) => r.data!) || [])
+            : [],
+        hierarchy:
+          entityType === 'hierarchy'
+            ? (singleParsePreview?.validRows.map((r) => r.data) || [])
             : [],
         rentals:
           entityType === 'rentals'
@@ -461,18 +730,20 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
             <div>
               <div className="flex flex-wrap items-center gap-2">
                 <h1 className="text-xl sm:text-2xl font-black text-white tracking-tight">
-                  Gestión de Empresas y Carga Masiva
+                  Jerarquía Organizacional y Carga Masiva
                 </h1>
                 <span className="text-[10px] font-mono font-bold uppercase px-2 py-0.5 rounded bg-cyan-950 text-cyan-200 border border-cyan-700">
                   {isSuperAdmin
                     ? 'SuperAdmin Global'
                     : isGlobalAdmin
                     ? 'Admin Corporativo MineSafe'
-                    : 'Administrador Multi-Empresa'}
+                    : 'Administrador de Empresa'}
                 </span>
               </div>
               <p className="text-xs sm:text-sm text-slate-300 mt-1">
-                Crea y administra empresas autorizadas, cambia tu contexto operativo e importa masivamente usuarios, faenas, contratos y asignaciones desde CSV o JSON.
+                {isGlobalAdmin
+                  ? 'Administra empresas, vincula la cadena completa Empresa → Faena → Cuadrilla → Sector → Dispositivo (Gateway o Nodo) y ejecuta cargas masivas CSV/JSON.'
+                  : 'Gestiona la estructura de tu empresa (Cuadrillas → Faenas, Sectores → Cuadrillas y Dispositivos → Sectores) de forma individual o mediante carga masiva.'}
               </p>
             </div>
           </div>
@@ -480,20 +751,32 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
           <div className="flex flex-wrap items-center gap-2 shrink-0">
             <button
               type="button"
+              onClick={() => setSection('jerarquia')}
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
+                section === 'jerarquia'
+                  ? 'bg-teal-600 text-white border-teal-400 shadow-md'
+                  : 'bg-slate-950/70 text-slate-300 border-slate-700 hover:text-white'
+              }`}
+            >
+              <Network className="w-4 h-4" />
+              <span>Jerarquía y Vinculación</span>
+            </button>
+            <button
+              type="button"
               onClick={() => setSection('empresas')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
                 section === 'empresas'
                   ? 'bg-cyan-600 text-white border-cyan-400 shadow-md'
                   : 'bg-slate-950/70 text-slate-300 border-slate-700 hover:text-white'
               }`}
             >
               <Building2 className="w-4 h-4" />
-              <span>Empresas ({authorizedOrganizations.length})</span>
+              <span>{isGlobalAdmin ? `Empresas (${authorizedOrganizations.length})` : 'Mi Empresa'}</span>
             </button>
             <button
               type="button"
               onClick={() => setSection('carga_masiva')}
-              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors ${
+              className={`flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-bold border transition-colors cursor-pointer ${
                 section === 'carga_masiva'
                   ? 'bg-emerald-600 text-white border-emerald-400 shadow-md'
                   : 'bg-slate-950/70 text-slate-300 border-slate-700 hover:text-white'
@@ -534,10 +817,412 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       )}
 
       {/* ==================================================================== */}
+      {/* SECCIÓN 0: JERARQUÍA ORGANIZACIONAL Y VINCULACIÓN                    */}
+      {/* ==================================================================== */}
+      {section === 'jerarquia' && (
+        <div className="space-y-6">
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div>
+              <h2 className="text-base font-bold text-white flex items-center gap-2">
+                <Network className="w-4 h-4 text-teal-400" />
+                <span>Cadena: Empresa → Faena → Cuadrilla → Sector → Dispositivo (Gateway / Nodo)</span>
+              </h2>
+              <p className="text-xs text-slate-400 mt-1">
+                {isGlobalAdmin
+                  ? 'Como administrador global puedes seleccionar cualquier empresa y asignar faenas, cuadrillas, sectores y dispositivos.'
+                  : `Tu alcance está acotado exclusivamente a tu empresa: ${selectedBulkOrg.name}.`}
+              </p>
+            </div>
+            <div className="shrink-0 min-w-[230px]">
+              <label className="text-[10px] uppercase tracking-wider text-slate-400 font-bold block mb-1">
+                Empresa activa
+              </label>
+              {isGlobalAdmin ? (
+                <select
+                  value={bulkOrgId}
+                  onChange={(e) => setBulkOrgId(e.target.value)}
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-xs text-white font-semibold"
+                >
+                  {authorizedOrganizations.map((org) => (
+                    <option key={org.id} value={org.id}>
+                      {org.name}
+                    </option>
+                  ))}
+                </select>
+              ) : (
+                <div className="px-3 py-2 rounded-lg bg-slate-950 border border-cyan-800/60 text-xs font-bold text-cyan-200">
+                  {selectedBulkOrg.name}
+                </div>
+              )}
+            </div>
+          </div>
+
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 text-xs">
+            {/* 1) SuperAdmin/Admin MineSafe: Asignar Faena a Empresa */}
+            {isGlobalAdmin && (
+              <form
+                onSubmit={handleAssignSiteToOrg}
+                className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3"
+              >
+                <div className="flex items-center gap-2 font-bold text-white text-sm">
+                  <Building2 className="w-4 h-4 text-cyan-400" />
+                  <span>1. Asignar Faena a Empresa</span>
+                </div>
+                <p className="text-[11px] text-slate-400">
+                  Exclusivo de SuperAdmin / Admin MineSafe: vincula una faena minera a su empresa mandante.
+                </p>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                  <select
+                    value={linkSiteIdToOrg}
+                    onChange={(e) => setLinkSiteIdToOrg(e.target.value)}
+                    className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    <option value="">Seleccionar Faena...</option>
+                    {sites.map((s) => (
+                      <option key={s.id} value={s.id}>
+                        {s.name} ({s.company})
+                      </option>
+                    ))}
+                  </select>
+                  <select
+                    value={linkSiteTargetOrgId}
+                    onChange={(e) => setLinkSiteTargetOrgId(e.target.value)}
+                    className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    {organizations.map((o) => (
+                      <option key={o.id} value={o.id}>
+                        {o.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <button
+                  type="submit"
+                  disabled={isSavingLink || !linkSiteIdToOrg}
+                  className="px-4 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                >
+                  <Link2 className="w-3.5 h-3.5" />
+                  <span>Vincular Faena a Empresa</span>
+                </button>
+              </form>
+            )}
+
+            {/* 2) Vincular Cuadrilla a Faena */}
+            <form
+              onSubmit={handleLinkCrewToSite}
+              className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3"
+            >
+              <div className="flex items-center gap-2 font-bold text-white text-sm">
+                <HardHat className="w-4 h-4 text-purple-400" />
+                <span>Vincular Cuadrilla a Faena</span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Asigna cuadrillas registradas dentro de {selectedBulkOrg.name} a una faena activa.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <select
+                  value={linkCrewId}
+                  onChange={(e) => setLinkCrewId(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Seleccionar Cuadrilla ({scopedOrgCrews.length})...</option>
+                  {scopedOrgCrews.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name} ({c.siteName || 'Sin faena'})
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={linkCrewSiteId}
+                  onChange={(e) => setLinkCrewSiteId(e.target.value)}
+                  className="px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Seleccionar Faena ({scopedOrgSites.length})...</option>
+                  {scopedOrgSites.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="submit"
+                disabled={isSavingLink || !linkCrewId || !linkCrewSiteId}
+                className="px-4 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>Asignar Cuadrilla a Faena</span>
+              </button>
+            </form>
+
+            {/* 3) Vincular Sector a Cuadrilla */}
+            <form
+              onSubmit={handleLinkSectorToCrew}
+              className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3"
+            >
+              <div className="flex items-center gap-2 font-bold text-white text-sm">
+                <MapPin className="w-4 h-4 text-emerald-400" />
+                <span>Vincular Sector a Cuadrilla</span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Asocia sectores o galerías de una faena directamente a una cuadrilla responsable.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <select
+                  value={linkSectorSiteId}
+                  onChange={(e) => {
+                    setLinkSectorSiteId(e.target.value);
+                    setLinkSectorId('');
+                  }}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Faena...</option>
+                  {scopedOrgSites.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={linkSectorId}
+                  onChange={(e) => setLinkSectorId(e.target.value)}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Sector...</option>
+                  {(scopedOrgSites.find((s) => s.id === linkSectorSiteId)?.activeSectors || []).map((sec) => (
+                    <option key={sec.id} value={sec.id}>
+                      {sec.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={linkSectorCrewId}
+                  onChange={(e) => setLinkSectorCrewId(e.target.value)}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Cuadrilla...</option>
+                  {scopedOrgCrews.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <button
+                type="submit"
+                disabled={isSavingLink || !linkSectorSiteId || !linkSectorId || !linkSectorCrewId}
+                className="px-4 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>Vincular Sector a Cuadrilla</span>
+              </button>
+            </form>
+
+            {/* 4) Vincular Dispositivo (Gateway o Nodo) a Sector */}
+            <form
+              onSubmit={handleLinkDeviceToSector}
+              className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-3"
+            >
+              <div className="flex items-center gap-2 font-bold text-white text-sm">
+                <Router className="w-4 h-4 text-sky-400" />
+                <span>Vincular Dispositivo (Gateway o Nodo) a Sector</span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Registra o reasigna un equipo diferenciando si es Gateway concentrador o Nodo sensor de sector.
+              </p>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">Equipo existente o nuevo código</label>
+                  <input
+                    list="minesafe-org-devices-list"
+                    value={linkDeviceId}
+                    onChange={(e) => {
+                      const val = e.target.value;
+                      setLinkDeviceId(val);
+                      const found = scopedOrgDevices.find((d) => d.id === val);
+                      if (found) {
+                        setLinkDeviceName(found.name);
+                        setLinkDeviceCategory(found.category === 'nodo' ? 'nodo' : 'gateway');
+                        setLinkDeviceSiteId(found.siteId || '');
+                        setLinkDeviceCrewId(found.crewId || '');
+                        setLinkDeviceSectorName(found.sectorName || '');
+                        setLinkDeviceParentGatewayId(found.parentGatewayId || '');
+                      }
+                    }}
+                    placeholder="Ej: GW-NORTE-01 o NODO-101"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-mono"
+                  />
+                  <datalist id="minesafe-org-devices-list">
+                    {scopedOrgDevices.map((d) => (
+                      <option key={d.id} value={d.id}>
+                        {d.name} ({d.category})
+                      </option>
+                    ))}
+                  </datalist>
+                </div>
+                <div>
+                  <label className="text-[10px] text-slate-400 block mb-1">Nombre visible</label>
+                  <input
+                    type="text"
+                    value={linkDeviceName}
+                    onChange={(e) => setLinkDeviceName(e.target.value)}
+                    placeholder="Ej: Gateway Rampa Principal"
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                <select
+                  value={linkDeviceCategory}
+                  onChange={(e) => setLinkDeviceCategory(e.target.value as 'gateway' | 'nodo')}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white font-semibold"
+                >
+                  <option value="gateway">Tipo: Gateway</option>
+                  <option value="nodo">Tipo: Nodo Sensor</option>
+                </select>
+                <select
+                  value={linkDeviceSiteId}
+                  onChange={(e) => setLinkDeviceSiteId(e.target.value)}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Faena...</option>
+                  {scopedOrgSites.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+                <select
+                  value={linkDeviceCrewId}
+                  onChange={(e) => setLinkDeviceCrewId(e.target.value)}
+                  className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                >
+                  <option value="">Cuadrilla...</option>
+                  {scopedOrgCrews.map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <input
+                  type="text"
+                  list="minesafe-site-sectors-list"
+                  value={linkDeviceSectorName}
+                  onChange={(e) => setLinkDeviceSectorName(e.target.value)}
+                  placeholder="Sector asignado (ej: Rampa Principal)"
+                  className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                />
+                <datalist id="minesafe-site-sectors-list">
+                  {(scopedOrgSites.find((s) => s.id === linkDeviceSiteId)?.activeSectors || []).map((sec) => (
+                    <option key={sec.id} value={sec.name} />
+                  ))}
+                </datalist>
+
+                {linkDeviceCategory === 'nodo' ? (
+                  <select
+                    value={linkDeviceParentGatewayId}
+                    onChange={(e) => setLinkDeviceParentGatewayId(e.target.value)}
+                    className="w-full px-3 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                  >
+                    <option value="">Gateway Padre (opcional)...</option>
+                    {scopedGateways.map((gw) => (
+                      <option key={gw.id} value={gw.id}>
+                        {gw.name} ({gw.sectorName})
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div className="px-3 py-2 rounded-lg bg-slate-950/60 border border-slate-800 text-[11px] text-slate-400 flex items-center gap-1.5">
+                    <Radio className="w-3.5 h-3.5 text-sky-400" />
+                    <span>Actúa como concentrador de sector</span>
+                  </div>
+                )}
+              </div>
+
+              <button
+                type="submit"
+                disabled={isSavingLink || !linkDeviceId.trim() || !linkDeviceSectorName.trim()}
+                className="px-4 py-2 rounded-lg bg-sky-600 hover:bg-sky-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+              >
+                <Link2 className="w-3.5 h-3.5" />
+                <span>Guardar Vinculación de Dispositivo</span>
+              </button>
+            </form>
+          </div>
+
+          {/* Vista de Árbol Jerárquico de la Empresa */}
+          <div className="bg-slate-900/80 border border-slate-800 rounded-2xl p-5 space-y-4">
+            <div className="flex flex-wrap items-center justify-between gap-2 pb-3 border-b border-slate-800">
+              <div>
+                <h3 className="text-sm font-bold text-white">
+                  Mapa Jerárquico Actual · {selectedBulkOrg.name}
+                </h3>
+                <p className="text-[11px] text-slate-400">
+                  {scopedOrgSites.length} faena(s) · {scopedOrgCrews.length} cuadrilla(s) · {scopedOrgDevices.length} dispositivo(s) ({scopedGateways.length} Gateways / {scopedOrgDevices.length - scopedGateways.length} Nodos)
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={() => {
+                  setEntityType('hierarchy');
+                  setSection('carga_masiva');
+                }}
+                className="px-3 py-1.5 rounded-lg bg-emerald-950/70 hover:bg-emerald-900 border border-emerald-700 text-emerald-200 text-xs font-bold cursor-pointer"
+              >
+                Importar Jerarquía Masiva (CSV)
+              </button>
+            </div>
+
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-3 text-xs">
+              {scopedOrgDevices.length === 0 ? (
+                <p className="text-slate-400 col-span-full py-4 text-center">
+                  No hay dispositivos vinculados todavía en esta empresa. Usa el formulario superior o la carga masiva.
+                </p>
+              ) : (
+                scopedOrgDevices.map((dev) => (
+                  <div
+                    key={dev.id}
+                    className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start justify-between gap-3"
+                  >
+                    <div className="space-y-1 min-w-0">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <span
+                          className={`px-2 py-0.5 rounded text-[10px] font-bold uppercase border ${
+                            dev.category === 'nodo'
+                              ? 'bg-emerald-950/70 text-emerald-300 border-emerald-700'
+                              : 'bg-sky-950/70 text-sky-300 border-sky-700'
+                          }`}
+                        >
+                          {dev.category === 'nodo' ? 'Nodo' : 'Gateway'}
+                        </span>
+                        <span className="font-bold text-white truncate">{dev.name}</span>
+                      </div>
+                      <div className="text-[11px] text-slate-400 flex flex-wrap gap-x-2 gap-y-0.5">
+                        <span>Faena: <strong className="text-slate-200">{dev.siteName || 'General'}</strong></span>
+                        <span>·</span>
+                        <span>Cuadrilla: <strong className="text-slate-200">{dev.crewName || 'Sin asignar'}</strong></span>
+                        <span>·</span>
+                        <span>Sector: <strong className="text-cyan-300">{dev.sectorName}</strong></span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* ==================================================================== */}
       {/* SECCIÓN 1: CREACIÓN Y LISTADO DE EMPRESAS                            */}
       {/* ==================================================================== */}
       {section === 'empresas' && (
         <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
+          {isGlobalAdmin ? (
           <div className="lg:col-span-5 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
             <div className="pb-3 border-b border-slate-800 flex items-center justify-between gap-2">
               <div>
@@ -654,16 +1339,34 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
               </button>
             </form>
           </div>
+          ) : (
+            <div className="lg:col-span-5 bg-slate-900/80 border border-cyan-800/40 rounded-2xl p-5 sm:p-6 space-y-3">
+              <div className="flex items-center gap-2 text-cyan-300 font-bold text-sm">
+                <Building2 className="w-5 h-5" />
+                <span>Alcance de Administrador de Empresa</span>
+              </div>
+              <p className="text-xs text-slate-300 leading-relaxed">
+                Tu rol de Administrador está restringido exclusivamente a tu empresa asignada. No puedes crear nuevas organizaciones ni acceder a faenas de otras empresas.
+              </p>
+              <p className="text-xs text-slate-400 leading-relaxed">
+                Utiliza las pestañas <strong className="text-white">Jerarquía y Vinculación</strong> y <strong className="text-white">Carga Masiva</strong> para gestionar tus cuadrillas, sectores y dispositivos (Gateways o Nodos).
+              </p>
+            </div>
+          )}
 
           <div className="lg:col-span-7 bg-slate-900/80 border border-slate-800 rounded-2xl p-5 sm:p-6 space-y-4">
             <div className="pb-3 border-b border-slate-800 flex flex-wrap items-center justify-between gap-2">
               <div>
                 <h3 className="text-base font-bold text-white flex items-center gap-2">
                   <Layers className="w-4 h-4 text-cyan-400" />
-                  Empresas Autorizadas ({authorizedOrganizations.length})
+                  {isGlobalAdmin
+                    ? `Empresas Autorizadas (${authorizedOrganizations.length})`
+                    : 'Mi Empresa Asignada'}
                 </h3>
                 <p className="text-[11px] text-slate-400">
-                  Puedes activar el contexto de tu empresa principal o de cualquier empresa creada por ti, y cargar sus datos masivamente.
+                  {isGlobalAdmin
+                    ? 'Activa el contexto de cualquier empresa o carga sus datos y jerarquía masivamente.'
+                    : 'Información de tu empresa y acceso directo a carga masiva de tu operación.'}
                 </p>
               </div>
               {isGlobalAdmin && (
@@ -1054,10 +1757,12 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                     </div>
                   )}
 
-                  <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
+                  <div className="grid grid-cols-2 sm:grid-cols-3 gap-2">
                     {[
                       { label: 'Usuarios', res: bundleParsePreview.users },
                       { label: 'Faenas', res: bundleParsePreview.sites },
+                      { label: 'Cuadrillas', res: bundleParsePreview.crews },
+                      { label: 'Dispositivos', res: bundleParsePreview.devices },
                       { label: 'Contratos', res: bundleParsePreview.rentals },
                       { label: 'Asignaciones', res: bundleParsePreview.assignments },
                     ].map((blk) => (
@@ -1132,6 +1837,16 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                     {executionResult.createdSites.length > 0 && (
                       <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700">
                         Faenas: {executionResult.createdSites.length}
+                      </span>
+                    )}
+                    {executionResult.createdCrews.length > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700">
+                        Cuadrillas: {executionResult.createdCrews.length}
+                      </span>
+                    )}
+                    {executionResult.createdDevices.length > 0 && (
+                      <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700">
+                        Dispositivos: {executionResult.createdDevices.length}
                       </span>
                     )}
                     {executionResult.createdRentals.length > 0 && (

@@ -52,6 +52,7 @@ import {
 } from './data/mockData';
 
 import {
+  canControlMineAlarm,
   canModifyTargetUser,
   canProvisionUserInOrganization,
   canManageContractsAndPayments,
@@ -127,28 +128,29 @@ const INITIAL_SINGLE_DEVICE: SensorDevice = {
   id: 'device_38A839E81F84',
   code: 'device_38A839E81F84',
   organizationId: DEFAULT_ORGANIZATION.id,
-  name: 'Nodo Sensor & Gateway Principal (1F84)',
+  name: 'Gateway Principal Sector Rampa',
   type: 'estacion_fija',
   sectorId: 'sec-device_38A839E81F84',
   sectorName: 'Mina Chuquicamata - Rampa Principal',
-  batteryPct: 95,
+  batteryPct: 0,
+  batteryReported: false,
   signalStrength: 'debil',
   lastPing: 'Conectando...',
   status: 'desconectado',
-  assignedTo: 'Manuel Crisostomo',
+  assignedTo: '',
   deviceCategory: 'gateway_sensor',
   localIp: '192.168.4.1',
   gatewayOnline: false,
   metrics: {
-    temperatura: 22.4,
-    humedad: 48,
-    co2: 520,
-    co: 12,
-    ch4: 0.1,
-    o2: 20.9,
-    flujoAire: 1.25,
-    ruido: 74,
-    polvoPM: 25,
+    temperatura: 0,
+    humedad: 0,
+    co2: 0,
+    co: 0,
+    ch4: 0,
+    o2: 0,
+    flujoAire: 0,
+    ruido: 0,
+    polvoPM: 0,
   },
 };
 
@@ -439,7 +441,7 @@ export default function App({
           }
           return updated;
         });
-      } else if (subscriptionScope.role === 'operador' || subscriptionScope.role === 'monotoriador') {
+      } else if (subscriptionScope.role === 'operador' || subscriptionScope.role === 'supervisor') {
         setUsersList([]);
       }
     }, subscriptionScope);
@@ -545,6 +547,11 @@ export default function App({
           ...existing,
           organizationId: reg.organizationId || existing.organizationId || DEFAULT_ORGANIZATION.id,
           name: reg.name || existing.name,
+          siteId: reg.siteId || existing.siteId,
+          siteName: reg.siteName || existing.siteName,
+          crewId: reg.crewId || existing.crewId,
+          crewName: reg.crewName || existing.crewName,
+          sectorId: reg.sectorId || existing.sectorId,
           sectorName: reg.sectorName || existing.sectorName,
           deviceCategory: reg.category,
           parentGatewayId: reg.parentGatewayId || existing.parentGatewayId,
@@ -558,13 +565,18 @@ export default function App({
         organizationId: reg.organizationId || DEFAULT_ORGANIZATION.id,
         name: reg.name,
         type: reg.category === 'sensor' ? 'multigas_portatil' : 'estacion_fija',
-        sectorId: `sec-${reg.id}`,
+        siteId: reg.siteId,
+        siteName: reg.siteName,
+        crewId: reg.crewId,
+        crewName: reg.crewName,
+        sectorId: reg.sectorId || `sec-${reg.id}`,
         sectorName: reg.sectorName || 'Faena Minera',
-        batteryPct: 100,
+        batteryPct: 0,
+        batteryReported: false,
         signalStrength: 'debil',
         lastPing: 'En espera de telemetría',
         status: 'desconectado',
-        assignedTo: 'Pendiente de conexión',
+        assignedTo: '',
         lastUpdateServer: 0,
         gatewayOnline: false,
         alarmaActiva: false,
@@ -608,6 +620,11 @@ export default function App({
         ...d,
         organizationId: reg.organizationId || d.organizationId || DEFAULT_ORGANIZATION.id,
         name: reg.name || d.name,
+        siteId: reg.siteId || d.siteId,
+        siteName: reg.siteName || d.siteName,
+        crewId: reg.crewId || d.crewId,
+        crewName: reg.crewName || d.crewName,
+        sectorId: reg.sectorId || d.sectorId,
         sectorName: reg.sectorName || d.sectorName,
         deviceCategory: reg.category,
         parentGatewayId: reg.parentGatewayId || d.parentGatewayId,
@@ -941,6 +958,21 @@ export default function App({
     );
   }, [subscriptionScope]);
 
+  const getRelatedActiveAlertIds = useCallback((targetAlert?: SafetyAlert): string[] => {
+    if (!targetAlert) return [];
+    const sensorKey = (targetAlert.sensorId || '').trim().toLowerCase();
+    const varKey = (targetAlert.variableName || '').trim().toLowerCase();
+    return alertsRef.current
+      .filter(
+        (a) =>
+          !a.resolved &&
+          a.id !== targetAlert.id &&
+          (a.sensorId || '').trim().toLowerCase() === sensorKey &&
+          (a.variableName || '').trim().toLowerCase() === varKey
+      )
+      .map((a) => a.id);
+  }, []);
+
   const handleAcknowledgeAlert = useCallback(async (alertId: string) => {
     if (currentUser?.role === 'operador') {
       showAlarmFeedback('Modo solo lectura: el usuario Operador solo puede ver datos y descripciones de alertas.', 'error');
@@ -949,19 +981,22 @@ export default function App({
     soundAlert.playFeedbackBeep();
     const ackBy = currentUser?.name || 'Operador';
     const targetAlert = alertsRef.current.find((a) => a.id === alertId);
+    const relatedIds = getRelatedActiveAlertIds(targetAlert);
+    const affectedIds = new Set([alertId, ...relatedIds]);
+
     setAlerts((prev) =>
       prev.map((a) =>
-        a.id === alertId
+        affectedIds.has(a.id)
           ? { ...a, acknowledged: true, acknowledgedBy: ackBy }
           : a
       )
     );
     try {
-      await acknowledgeAlertInRTDB(targetAlert || alertId, ackBy);
+      await acknowledgeAlertInRTDB(targetAlert || alertId, ackBy, relatedIds);
     } catch (err: any) {
       showAlarmFeedback(err?.message || 'Error al registrar reconocimiento en Firebase RTDB.', 'error');
     }
-  }, [currentUser, showAlarmFeedback]);
+  }, [currentUser, getRelatedActiveAlertIds, showAlarmFeedback]);
 
   const handleResolveAlert = useCallback(async (alertId: string) => {
     if (currentUser?.role === 'operador') {
@@ -971,9 +1006,13 @@ export default function App({
     soundAlert.playFeedbackBeep();
     const prevAlerts = alertsRef.current;
     const targetAlert = prevAlerts.find((a) => a.id === alertId);
+    const relatedIds = getRelatedActiveAlertIds(targetAlert);
+    const affectedIds = new Set([alertId, ...relatedIds]);
+
     const defaultDetails: AlertResolutionDetails = targetAlert?.resolutionDetails || {
       resolutionType: 'prueba_operativa',
-      comment: 'Alerta marcada como resuelta desde consola de seguridad.',
+      closingTitle: 'Cierre operativo de alerta',
+      comment: 'Alerta verificada y marcada como resuelta desde la consola de seguridad.',
       correctiveActions: 'Verificación de condiciones ambientales en rango seguro.',
       resolvedBy: currentUser?.name || 'Supervisor de Turno',
       resolvedAt: new Date().toLocaleString('es-CL', {
@@ -984,21 +1023,28 @@ export default function App({
         minute: '2-digit',
       }),
     };
+
+    if (targetAlert) {
+      alertEngine.markIncidentManuallyResolved(targetAlert);
+    }
+
     setAlerts((prev) =>
-      prev.map((a) =>
-        a.id === alertId
-          ? { ...a, resolved: true, acknowledged: true, resolutionDetails: defaultDetails }
-          : a
-      )
+      prev
+        .filter((a) => !relatedIds.includes(a.id))
+        .map((a) =>
+          affectedIds.has(a.id)
+            ? { ...a, resolved: true, acknowledged: true, resolutionDetails: defaultDetails }
+            : a
+        )
     );
     try {
-      await resolveAlertInRTDB(targetAlert || alertId, defaultDetails);
+      await resolveAlertInRTDB(targetAlert || alertId, defaultDetails, relatedIds);
     } catch (err: any) {
       setAlerts(prevAlerts);
       showAlarmFeedback(err?.message || 'Error al resolver alerta en Firebase RTDB.', 'error');
       throw err;
     }
-  }, [currentUser, showAlarmFeedback]);
+  }, [currentUser, getRelatedActiveAlertIds, showAlarmFeedback]);
 
   const handleResolveAlertWithDetails = useCallback(async (alertId: string, details: AlertResolutionDetails) => {
     if (currentUser?.role === 'operador') {
@@ -1007,21 +1053,29 @@ export default function App({
     }
     soundAlert.playFeedbackBeep();
     const targetAlert = alertsRef.current.find((a) => a.id === alertId);
-    await resolveAlertInRTDB(targetAlert || alertId, details);
+    const relatedIds = getRelatedActiveAlertIds(targetAlert);
+
+    if (targetAlert) {
+      alertEngine.markIncidentManuallyResolved(targetAlert);
+    }
+
+    await resolveAlertInRTDB(targetAlert || alertId, details, relatedIds);
     setAlerts((prev) =>
-      prev.map((a) =>
-        a.id === alertId
-          ? {
-              ...a,
-              resolved: true,
-              acknowledged: true,
-              resolutionDetails: details,
-            }
-          : a
-      )
+      prev
+        .filter((a) => !relatedIds.includes(a.id))
+        .map((a) =>
+          a.id === alertId
+            ? {
+                ...a,
+                resolved: true,
+                acknowledged: true,
+                resolutionDetails: details,
+              }
+            : a
+        )
     );
-    showAlarmFeedback('Alerta y descripción guardadas en Firebase RTDB.', 'success');
-  }, [currentUser, showAlarmFeedback]);
+    showAlarmFeedback('Alerta y bitácora de cierre guardadas sin duplicados.', 'success');
+  }, [currentUser, getRelatedActiveAlertIds, showAlarmFeedback]);
 
   const handleSaveDrillDebrief = useCallback(async (record: DrillDebriefRecord) => {
     const orgId =
@@ -1060,7 +1114,7 @@ export default function App({
 
   const handleSimulateGasSpike = useCallback(async (sensorId: string) => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden simular alzas de gas.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden simular alzas de gas.', 'error');
       return;
     }
     soundAlert.playCriticalAlert();
@@ -1123,7 +1177,7 @@ export default function App({
 
   const handleResetSensor = useCallback(async (sensorId: string) => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden restablecer nodos en RTDB.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden restablecer nodos en RTDB.', 'error');
       return;
     }
     const targetDev = visibleDevices.find(d => d.id === sensorId);
@@ -1153,25 +1207,106 @@ export default function App({
     }
   }, [currentUser, visibleDevices, showAlarmFeedback]);
 
-  const handleShutdownAlarmCompletely = useCallback(async () => {
-    if (!currentUser || currentUser.role !== 'superadmin') {
-      showAlarmFeedback('Acceso denegado: Solo el usuario SuperAdministrador autenticado puede apagar la alarma completamente.', 'error');
-      return;
-    }
+  const collectPropagationDeviceIds = useCallback(
+    (primaryGatewayId: string): string[] => {
+      const gw = visibleDevices.find((d) => d.id === primaryGatewayId);
+      const ids = new Set<string>([primaryGatewayId]);
+      visibleDevices.forEach((d) => {
+        if (d.parentGatewayId === primaryGatewayId) {
+          ids.add(d.id);
+        } else if (
+          gw &&
+          gw.sectorName &&
+          d.sectorName &&
+          d.sectorName.trim().toLowerCase() === gw.sectorName.trim().toLowerCase() &&
+          (!gw.organizationId || !d.organizationId || gw.organizationId === d.organizationId)
+        ) {
+          ids.add(d.id);
+        }
+      });
+      return Array.from(ids);
+    },
+    [visibleDevices]
+  );
 
-    const isVerifiedSuper = await verifySuperAdminPrivileges(currentUser);
-    if (!isVerifiedSuper) {
-      showAlarmFeedback('Acceso denegado: Tu sesión de Firebase Auth no posee privilegios reales de SuperAdministrador.', 'error');
+  const handleToggleGatewayAlarm = useCallback(
+    async (gatewayId: string, active: boolean, targetDeviceIds: string[]) => {
+      const access = canControlMineAlarm(currentUser);
+      if (!access.allowed) {
+        showAlarmFeedback(
+          access.reason ||
+            'Acceso denegado: Solo la Administración de Empresa o MineSafe puede activar o apagar alarmas.',
+          'error'
+        );
+        return;
+      }
+
+      const effectiveTargets = Array.from(
+        new Set(targetDeviceIds.length > 0 ? targetDeviceIds : collectPropagationDeviceIds(gatewayId))
+      );
+
+      try {
+        if (active) {
+          await toggleGatewayAlarmInRTDB(gatewayId, true, currentUser, {
+            targetDeviceIds: effectiveTargets,
+          });
+          soundAlert.setMuted(false);
+          soundAlert.startContinuousAlarm();
+          setIsAlarmActive(true);
+          setIsLightActive(true);
+          setDismissEmergencyBanner(false);
+        } else {
+          await shutdownAlarmCompletelyInRTDB(gatewayId, currentUser, {
+            resetSensorBaselines: isDrillActive,
+            organizationId: effectiveOrgId === 'all' ? currentUser.organizationId : effectiveOrgId,
+            targetDeviceIds: effectiveTargets,
+          });
+          soundAlert.stopContinuousAlarm();
+          soundAlert.playFeedbackBeep();
+          setIsAlarmActive(false);
+          setIsLightActive(false);
+          setIsDrillActive(false);
+          setDrillType(null);
+          setEvacuationActive(false);
+          setDismissEmergencyBanner(true);
+        }
+
+        const targetSet = new Set(effectiveTargets);
+        setDevices((prev) =>
+          prev.map((d) =>
+            targetSet.has(d.id)
+              ? { ...d, alarmaActiva: active }
+              : d
+          )
+        );
+      } catch (err: any) {
+        showAlarmFeedback(err?.message || 'Error al propagar instrucción de alarma a los nodos.', 'error');
+        throw err;
+      }
+    },
+    [currentUser, collectPropagationDeviceIds, isDrillActive, effectiveOrgId, showAlarmFeedback]
+  );
+
+  const handleShutdownAlarmCompletely = useCallback(async () => {
+    const access = canControlMineAlarm(currentUser);
+    if (!access.allowed) {
+      showAlarmFeedback(
+        access.reason ||
+          'Acceso denegado: Solo la Administración de Empresa o MineSafe puede apagar la alarma.',
+        'error'
+      );
       return;
     }
 
     const wasDrill = isDrillActive;
-    const targetId = activeTelemetryDeviceId || 'device_38A839E81F84';
+    const targetId = activeTelemetryDeviceId || visibleDevices[0]?.id || 'device_38A839E81F84';
+    const propagationIds = collectPropagationDeviceIds(targetId);
 
     try {
       await shutdownAlarmCompletelyInRTDB(targetId, currentUser, {
         resetSensorBaselines: wasDrill,
         organizationId: effectiveOrgId === 'all' ? currentUser.organizationId : effectiveOrgId,
+        targetDeviceIds: propagationIds,
       });
 
       soundAlert.stopContinuousAlarm();
@@ -1186,10 +1321,12 @@ export default function App({
       setAlerts(prev => prev.map(a => (!a.resolved ? { ...a, resolved: true, acknowledged: true } : a)));
       resolveActiveAlertsInRTDB(
         alertsRef.current.filter((a) => !a.resolved && a.id.startsWith('alt-')),
-        'Alarma apagada completamente por SuperAdministrador.',
-        currentUser.name || 'SuperAdmin'
+        'Alarma y baliza apagadas desde consola de administración.',
+        currentUser.name || 'Administración'
       ).catch(() => {});
-      setDevices(prev => prev.map(d => (d.id === targetId || d.id === 'device_38A839E81F84') ? {
+
+      const propSet = new Set(propagationIds);
+      setDevices(prev => prev.map(d => (propSet.has(d.id) || d.id === targetId) ? {
         ...d,
         alarmaActiva: false,
         status: wasDrill ? 'normal' : d.status,
@@ -1200,15 +1337,18 @@ export default function App({
           : d.metrics,
       } : d));
 
-      showAlarmFeedback(`Alarma apagada: comando_web="APAGAR" y silencio_remoto=true escritos en /dispositivos/${targetId}.`, 'success');
+      showAlarmFeedback(
+        `Alarma y baliza apagadas y propagadas a ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        'success'
+      );
     } catch (err: any) {
-      showAlarmFeedback(err?.message || 'Error al escribir comando APAGAR en Firebase RTDB.', 'error');
+      showAlarmFeedback(err?.message || 'Error al enviar comando de apagado de alarma.', 'error');
     }
-  }, [currentUser, isDrillActive, activeTelemetryDeviceId, effectiveOrgId, showAlarmFeedback]);
+  }, [currentUser, isDrillActive, activeTelemetryDeviceId, visibleDevices, collectPropagationDeviceIds, effectiveOrgId, showAlarmFeedback]);
 
   const handleResetPageLevels = useCallback(async () => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden resetear niveles de página en RTDB.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden resetear niveles de página en RTDB.', 'error');
       return;
     }
     const dev = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
@@ -1328,19 +1468,24 @@ export default function App({
   }, [currentUser, visibleDevices, activeTelemetryDeviceId, effectiveOrgId, showAlarmFeedback]);
 
   const handleStopDrill = useCallback(async () => {
-    const isVerifiedSuper = currentUser?.role === 'superadmin' && await verifySuperAdminPrivileges(currentUser);
-    if (!isVerifiedSuper) {
-      showAlarmFeedback('Acción bloqueada: Solo el SuperAdministrador autenticado puede finalizar un simulacro y apagar la alarma.', 'error');
+    const access = canControlMineAlarm(currentUser);
+    if (!access.allowed) {
+      showAlarmFeedback(
+        access.reason || 'Acción bloqueada: Solo Administración de Empresa o MineSafe puede finalizar un simulacro.',
+        'error'
+      );
       return;
     }
 
     const dev = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
     const targetId = dev?.id || 'device_38A839E81F84';
+    const propagationIds = collectPropagationDeviceIds(targetId);
 
     try {
       await shutdownAlarmCompletelyInRTDB(targetId, currentUser, {
         resetSensorBaselines: true,
         organizationId: effectiveOrgId === 'all' ? currentUser.organizationId : effectiveOrgId,
+        targetDeviceIds: propagationIds,
       });
       soundAlert.stopContinuousAlarm();
       soundAlert.playFeedbackBeep();
@@ -1350,7 +1495,8 @@ export default function App({
       setIsLightActive(false);
       setDismissEmergencyBanner(true);
 
-      setDevices(prev => prev.map(d => (d.id === targetId || d.id === 'device_38A839E81F84') ? {
+      const propSet = new Set(propagationIds);
+      setDevices(prev => prev.map(d => (propSet.has(d.id) || d.id === targetId) ? {
         ...d,
         status: 'normal',
         alarmaActiva: false,
@@ -1363,13 +1509,13 @@ export default function App({
       await resolveActiveAlertsInRTDB(
         alertsRef.current.filter((a) => !a.resolved && a.id.startsWith('alt-drill-')),
         'Simulacro finalizado desde consola central.',
-        currentUser.name || 'SuperAdmin'
+        currentUser.name || 'Administración'
       ).catch(() => {});
-      showAlarmFeedback('Simulacro finalizado y comando_web="APAGAR" enviado a Firebase RTDB.', 'success');
+      showAlarmFeedback('Simulacro finalizado y alarma apagada en los nodos del sector.', 'success');
     } catch (err: any) {
-      showAlarmFeedback(err?.message || 'Error al detener el simulacro en Firebase RTDB.', 'error');
+      showAlarmFeedback(err?.message || 'Error al detener el simulacro.', 'error');
     }
-  }, [currentUser, visibleDevices, activeTelemetryDeviceId, effectiveOrgId, showAlarmFeedback]);
+  }, [currentUser, visibleDevices, activeTelemetryDeviceId, collectPropagationDeviceIds, effectiveOrgId, showAlarmFeedback]);
 
   const handleToggleAlarm = useCallback(async () => {
     const dev = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
@@ -1381,8 +1527,12 @@ export default function App({
       return;
     }
 
-    if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden activar alarmas manuales de hardware.', 'error');
+    const access = canControlMineAlarm(currentUser);
+    if (!access.allowed) {
+      showAlarmFeedback(
+        access.reason || 'Acceso denegado: Solo la Administración de Empresa o MineSafe puede activar la alarma.',
+        'error'
+      );
       return;
     }
     if (!targetId) {
@@ -1390,21 +1540,31 @@ export default function App({
       return;
     }
 
+    const propagationIds = collectPropagationDeviceIds(targetId);
+
     try {
-      await toggleGatewayAlarmInRTDB(targetId, true, currentUser);
+      await toggleGatewayAlarmInRTDB(targetId, true, currentUser, {
+        targetDeviceIds: propagationIds,
+      });
       soundAlert.setMuted(false);
       soundAlert.startContinuousAlarm();
       setIsAlarmActive(true);
+      setIsLightActive(true);
       setDismissEmergencyBanner(false);
-      showAlarmFeedback(`Alarma activada: comando_web="ENCENDER" enviado a /dispositivos/${targetId}.`, 'success');
+      const propSet = new Set(propagationIds);
+      setDevices((prev) => prev.map((d) => (propSet.has(d.id) ? { ...d, alarmaActiva: true } : d)));
+      showAlarmFeedback(
+        `Alarma sonora y baliza luminosa activadas automáticamente en ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        'success'
+      );
     } catch (err: any) {
-      showAlarmFeedback(err?.message || 'Error al enviar comando ENCENDER a Firebase RTDB.', 'error');
+      showAlarmFeedback(err?.message || 'Error al activar la alarma en los nodos.', 'error');
     }
-  }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, currentUser, showAlarmFeedback, handleShutdownAlarmCompletely]);
+  }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, currentUser, collectPropagationDeviceIds, showAlarmFeedback, handleShutdownAlarmCompletely]);
 
   const handleToggleLight = useCallback(async () => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden controlar actuadores de luz/baliza.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden controlar actuadores de luz/baliza.', 'error');
       return;
     }
     if (!activeTelemetryDeviceId) {
@@ -1503,7 +1663,7 @@ export default function App({
 
   const handleAddSite = useCallback((newSite: MiningSite) => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden registrar faenas mineras.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden registrar faenas mineras.', 'error');
       return;
     }
     const fallbackOrg = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
@@ -1525,7 +1685,7 @@ export default function App({
 
   const handleUpdateSite = useCallback((updatedSite: MiningSite) => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Monotoriadores no pueden modificar sectores ni cuadrillas.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden modificar sectores ni cuadrillas.', 'error');
       return;
     }
     const targetOrg = updatedSite.organizationId || (effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId);
@@ -1647,9 +1807,9 @@ export default function App({
         safeRole === 'admin_minesafe'
           ? 'Admin Corporativo MineSafe'
           : safeRole === 'admin'
-          ? 'Administrador / Prevencionista Sernageomin'
-          : safeRole === 'monotoriador'
-          ? 'Monotoriador Ambiental'
+          ? 'Administrador de Empresa'
+          : safeRole === 'supervisor'
+          ? 'Supervisor Ambiental'
           : 'Usuario Normal / Operador de Faena',
     };
     const prevUsers = usersList;
@@ -1680,8 +1840,8 @@ export default function App({
     const roleLabels: Record<UserRole, string> = {
       superadmin: 'Super Administrador de Seguridad Minera',
       admin_minesafe: 'Admin Corporativo MineSafe',
-      admin: 'Administrador / Prevencionista Sernageomin',
-      monotoriador: 'Monotoriador Ambiental',
+      admin: 'Administrador de Empresa',
+      supervisor: 'Supervisor Ambiental',
       operador: 'Usuario Normal / Operador de Faena',
     };
 
@@ -2052,7 +2212,7 @@ export default function App({
                 {isDustCritical && <span>Polvo PM2.5 ({activeDevice?.rawPM25 || activeDevice?.metrics?.polvoPM} µg/m³)</span>}
                 {isDrillActive && <span>• [SIMULACRO OPERATIVO]</span>}
               </div>
-              {currentUser.role === 'superadmin' ? (
+              {canControlMineAlarm(currentUser).allowed ? (
                 <button
                   type="button"
                   onClick={async () => {
@@ -2062,15 +2222,15 @@ export default function App({
                     isDrillActive ? 'bg-black text-amber-300 hover:bg-slate-900 border border-amber-400' : 'bg-white hover:bg-slate-100 text-red-700'
                   } text-xs font-black uppercase rounded shadow transition-colors whitespace-nowrap`}
                 >
-                  {isDrillActive ? 'Finalizar y Apagar Todo' : 'Apagar Alarma Completamente'}
+                  {isDrillActive ? 'Finalizar y Apagar Todo' : 'Apagar Alarma y Baliza'}
                 </button>
               ) : (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-black/50 border border-white/25 text-[11px] font-bold text-amber-200 whitespace-nowrap">
                   <Lock className="w-3.5 h-3.5 text-amber-300 shrink-0" />
-                  Solo SuperAdmin puede apagar
+                  Control reservado a Administración
                 </span>
               )}
-              {currentUser.role === 'superadmin' && (
+              {canControlMineAlarm(currentUser).allowed && (
                 <button
                   type="button"
                   onClick={() => setDismissEmergencyBanner(true)}
@@ -2126,6 +2286,11 @@ export default function App({
                 telemetryHistory={telemetryHistory}
                 activeAlerts={activeAlerts}
                 currentSite={scopedCurrentSite}
+                sites={scopedSites}
+                crews={scopedCrews}
+                organizations={scopedOrganizations}
+                activeOrganizationId={effectiveOrgId}
+                onSelectOrganization={setActiveOrganizationId}
                 devices={visibleDevices}
                 activeTelemetryDeviceId={activeTelemetryDeviceId}
                 onSelectTelemetryDevice={setActiveTelemetryDeviceId}
@@ -2139,6 +2304,7 @@ export default function App({
                 isAlarmActive={isAlarmActive}
                 onToggleAlarm={handleToggleAlarm}
                 onShutdownAlarmCompletely={handleShutdownAlarmCompletely}
+                onToggleGatewayAlarm={handleToggleGatewayAlarm}
                 isLightActive={isLightActive}
                 onToggleLight={handleToggleLight}
                 currentUser={currentUser}
@@ -2152,6 +2318,11 @@ export default function App({
               <MonitoringView
                 devices={visibleDevices}
                 currentSite={scopedCurrentSite}
+                sites={scopedSites}
+                crews={scopedCrews}
+                organizations={scopedOrganizations}
+                activeOrganizationId={effectiveOrgId}
+                onSelectOrganization={setActiveOrganizationId}
                 currentUser={currentUser}
                 selectedSensorId={selectedSensorId}
                 onSelectSensor={setSelectedSensorId}
@@ -2261,6 +2432,9 @@ export default function App({
               <CompanyBulkManagementView
                 currentUser={currentUser}
                 organizations={scopedOrganizations}
+                sites={scopedSites}
+                crews={scopedCrews}
+                devices={visibleDevices}
                 activeOrganizationId={effectiveOrgId}
                 platformConfig={platformConfig}
                 onSelectOrganization={setActiveOrganizationId}
@@ -2275,6 +2449,25 @@ export default function App({
                       : [...prev, changedOrg];
                   });
                 }}
+                onSiteSaved={(savedSite) => {
+                  setSites((prev) => mergeMiningSites(prev, [savedSite]));
+                  setCurrentSite((prev) => (prev.id === savedSite.id ? savedSite : prev));
+                }}
+                onCrewSaved={(savedCrew) => {
+                  setCrews((prev) => mergeMiningCrews(prev, [savedCrew]));
+                }}
+                onDeviceHierarchySaved={(savedReg) => {
+                  setPlatformConfig((prev) => {
+                    const list = prev.registeredDevices || [];
+                    const exists = list.some((d) => d.id === savedReg.id);
+                    return {
+                      ...prev,
+                      registeredDevices: exists
+                        ? list.map((d) => (d.id === savedReg.id ? savedReg : d))
+                        : [...list, savedReg],
+                    };
+                  });
+                }}
                 onBulkImportCompleted={(result: BulkImportExecutionResult) => {
                   if (result.createdUsers.length > 0) {
                     setUsersList((prev) => {
@@ -2285,6 +2478,19 @@ export default function App({
                   }
                   if (result.createdSites.length > 0) {
                     setSites((prev) => mergeMiningSites(prev, result.createdSites));
+                  }
+                  if (result.createdCrews.length > 0) {
+                    setCrews((prev) => mergeMiningCrews(prev, result.createdCrews));
+                  }
+                  if (result.createdDevices.length > 0) {
+                    setPlatformConfig((prev) => {
+                      const map = new Map((prev.registeredDevices || []).map((d) => [d.id, d]));
+                      result.createdDevices.forEach((d) => map.set(d.id, d));
+                      return {
+                        ...prev,
+                        registeredDevices: Array.from(map.values()),
+                      };
+                    });
                   }
                   if (result.createdRentals.length > 0) {
                     setRentals((prev) => {
@@ -2365,10 +2571,13 @@ export default function App({
 
       </main>
 
-      {/* Account Switcher / Session Modal */}
+      {/* User Credential / Carnet Modal */}
       {showLoginModal && (
         <LoginModal
           currentUser={currentUser}
+          organizations={scopedOrganizations}
+          sites={scopedSites}
+          crews={scopedCrews}
           onLogin={handleLogin}
           onLogout={handleLogout}
           onClose={() => setShowLoginModal(false)}

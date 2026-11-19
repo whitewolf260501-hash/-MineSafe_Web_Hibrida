@@ -42,7 +42,7 @@ export function validateContactForm(
   }
 
   if (org.length < 2 || org.length > 120) {
-    errors.organization = 'Indica la organización o faena (entre 2 y 120 caracteres).';
+    errors.organization = 'Indica la empresa o institución (entre 2 y 120 caracteres).';
   }
 
   if (!EMAIL_REGEX.test(email) || email.length > 160) {
@@ -68,7 +68,7 @@ export function buildContactMailtoHref(
 
   const subject = payload?.organization?.trim()
     ? `Consulta MineSafe — ${payload.organization.trim()}`
-    : 'Consulta sobre prototipo MineSafe';
+    : 'Consulta comercial MineSafe';
 
   const bodyLines = [
     payload?.name?.trim() ? `Nombre: ${payload.name.trim()}` : '',

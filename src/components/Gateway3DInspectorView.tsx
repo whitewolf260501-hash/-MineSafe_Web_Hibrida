@@ -1909,7 +1909,7 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
 
           <div className="mt-4 text-center text-[11px] text-slate-500 border-t border-slate-800/80 pt-3 flex items-center justify-center gap-1.5">
             <Box className="w-3.5 h-3.5 text-orange-400" />
-            <span>Proyecto de Título MineSafe • Gateway 3D Inspector</span>
+            <span>MineSafe Ingeniería IoT • Gateway 3D Inspector</span>
           </div>
         </aside>
       </div>

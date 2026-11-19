@@ -44,6 +44,7 @@ import {
   GoogleAuthProvider,
   signInWithPopup,
   updateProfile,
+  updatePassword,
   deleteUser,
   User as FirebaseUser
 } from 'firebase/auth';
@@ -79,10 +80,12 @@ import {
 } from '../types';
 import {
   assertActiveSession,
+  canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
   canManageContractsAndPayments,
   canManageCrews,
+  canManageOrganizationHierarchy,
   canModifyTargetUser,
   canProvisionUserInOrganization,
   DEFAULT_ORGANIZATION_ID,
@@ -95,12 +98,20 @@ import {
 } from '../utils/accessControl';
 import {
   BulkAssignmentImportItem,
+  BulkCrewImportItem,
+  BulkDeviceImportItem,
+  BulkHierarchyImportItem,
   BulkRentalImportItem,
   BulkSiteImportItem,
   BulkUserImportItem,
   buildCompanyUserProfile,
+  expandHierarchyRowsToEntities,
 } from '../utils/bulkCompanyImport';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import {
+  CURRENT_PASSWORD_POLICY_VERSION,
+  validatePasswordPolicy,
+} from '../utils/passwordPolicy';
 
 const DEFAULT_RTDB_URL = "https://minefase-fc5f5-default-rtdb.firebaseio.com/";
 
@@ -273,38 +284,49 @@ export function mapRTDBDeviceToSensorDevice(
   }
 
   let deviceName = data?.name || key;
-  let sectorName = data?.sectorName || 'Faena Central';
-  let assigned = data?.userEmail ? 'Manuel Crisostomo' : 'Cuadrilla Operativa';
+  let siteName = data?.siteName || '';
+  let crewName = data?.crewName || '';
+  let sectorName = data?.sectorName || 'Sector Operativo';
 
   if (key === 'device_38A839E81F84') {
-    deviceName = data?.name || 'Nodo Sensor & Gateway Principal (1F84)';
-    sectorName = data?.sectorName || 'Mina Chuquicamata - Rampa Principal';
-    assigned = 'Manuel Crisostomo';
+    deviceName = data?.name || 'Gateway Principal Mina Norte';
+    siteName = data?.siteName || 'Faena Chuquicamata';
+    crewName = data?.crewName || 'Cuadrilla Alfa';
+    sectorName = data?.sectorName || 'Rampa Principal';
   } else if (key === 'device_A4CB2F124B00') {
-    deviceName = data?.name || 'Detector San José (Gateway ESP32 Nodo B)';
-    sectorName = data?.sectorName || 'Mina San José - Nivel -400m';
-    assigned = 'Gerardo Cuellar';
+    deviceName = data?.name || 'Gateway Sector San José';
+    siteName = data?.siteName || 'Faena San José';
+    crewName = data?.crewName || 'Cuadrilla Beta';
+    sectorName = data?.sectorName || 'Nivel -400m';
   } else if (key === 'NODO_U-01') {
     deviceName = data?.name || 'Nodo Fijo Monitoreo U-01';
+    siteName = data?.siteName || 'Faena Chuquicamata';
+    crewName = data?.crewName || 'Cuadrilla Alfa';
     sectorName = data?.sectorName || 'Socavón Norte Frente de Avance';
-    assigned = 'Estación Automatizada';
   }
+
+  const hasReportedBattery = typeof data?.bateria === 'number' && !Number.isNaN(data.bateria);
 
   return {
     id: key,
     code: key,
     name: deviceName,
-    type: key.startsWith('NODO') ? 'estacion_fija' : 'multigas_portatil',
+    type: key.startsWith('NODO') || data?.deviceCategory === 'nodo' ? 'estacion_fija' : 'multigas_portatil',
     organizationId: data?.organizationId || DEFAULT_ORGANIZATION.id,
-    sectorId: `sec-${key}`,
+    siteId: data?.siteId || undefined,
+    siteName: siteName || undefined,
+    crewId: data?.crewId || undefined,
+    crewName: crewName || undefined,
+    sectorId: data?.sectorId || `sec-${key}`,
     sectorName: sectorName,
-    batteryPct: typeof data?.bateria === 'number' ? data.bateria : (key === 'device_38A839E81F84' ? 95 : 88),
+    batteryPct: hasReportedBattery ? Math.max(0, Math.min(100, Math.round(data.bateria))) : 0,
+    batteryReported: hasReportedBattery,
     signalStrength: isOnline ? 'optima' : 'sin_conexion',
     lastPing: serverTime > 0
       ? (diffSeconds < 60 ? `hace ${diffSeconds} seg` : `hace ${Math.floor(diffSeconds / 60)} min`)
       : 'sin marca temporal',
     status: status,
-    assignedTo: assigned,
+    assignedTo: '',
     rawCO: coVal === null ? undefined : coVal,
     rawPM25: pmVal === null ? undefined : pmVal,
     rawTemp: tempVal === null ? undefined : tempVal,
@@ -320,7 +342,7 @@ export function mapRTDBDeviceToSensorDevice(
     hora: data?.hora || '',
     via: data?.via || '',
     localIp: data?.localIp || undefined,
-    deviceCategory: data?.deviceCategory || undefined,
+    deviceCategory: data?.deviceCategory || (key.startsWith('NODO') ? 'nodo' : 'gateway'),
     parentGatewayId: data?.parentGatewayId || undefined,
     registroAlarmas: data?.registro_alarmas,
     metrics: {
@@ -408,11 +430,15 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     isAdminMineSafe ||
     data?.isAdmin === true ||
     tipoRaw === 'admin' ||
-    data?.cargo === 'Administrador' ||
-    tipoRaw === 'supervisor';
-  const isMonotoriador =
+    data?.cargo === 'Administrador';
+  const isSupervisor =
     !isAdmin &&
-    (tipoRaw === 'monotoriador' || cargoRaw === 'monotoriador');
+    (tipoRaw === 'supervisor' ||
+      cargoRaw === 'supervisor' ||
+      tipoRaw === 'monotoriador' ||
+      cargoRaw === 'monotoriador' ||
+      tipoRaw === 'monitoreador' ||
+      cargoRaw === 'monitoreador');
 
   let role: UserRole = 'operador';
   let roleLabel = 'Usuario Normal / Operador Minero';
@@ -425,10 +451,10 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     roleLabel = 'Admin Corporativo MineSafe';
   } else if (isAdmin) {
     role = 'admin';
-    roleLabel = 'Administrador / Prevencionista de Faena';
-  } else if (isMonotoriador) {
-    role = 'monotoriador';
-    roleLabel = 'Monotoriador Ambiental';
+    roleLabel = 'Administrador de Empresa';
+  } else if (isSupervisor) {
+    role = 'supervisor';
+    roleLabel = 'Supervisor Ambiental';
   }
 
   const assignedSector = data?.geoMina 
@@ -455,7 +481,58 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     claimedFromKey: data?.claimedFromKey || undefined,
     lastLogin: data?.pendingActivation === true ? 'Pendiente crear nueva cuenta (/acceso)' : 'En línea (Firebase Auth)',
     assignedSector: assignedSector,
+    assignedSiteId: data?.assignedSiteId || undefined,
+    assignedSiteName: data?.assignedSiteName || undefined,
+    assignedCrewId: data?.assignedCrewId || undefined,
+    assignedCrewName: data?.assignedCrewName || undefined,
+    assignedSectors: Array.isArray(data?.assignedSectors) ? data.assignedSectors : undefined,
     assignedDeviceCode: assignedDev,
+    mustChangePassword: data?.mustChangePassword === true,
+    passwordPolicyVersion:
+      typeof data?.passwordPolicyVersion === 'number' ? data.passwordPolicyVersion : undefined,
+    passwordUpdatedAt:
+      typeof data?.passwordUpdatedAt === 'number' ? data.passwordUpdatedAt : undefined,
+  };
+}
+
+export async function updateCurrentUserPasswordWithPolicy(
+  newPassword: string,
+  user: UserProfile
+): Promise<UserProfile> {
+  const policyCheck = validatePasswordPolicy(newPassword);
+  if (!policyCheck.valid) {
+    throw new Error(policyCheck.errors[0] || 'La nueva contraseña no cumple la política de seguridad.');
+  }
+
+  const fbUser = auth.currentUser;
+  if (!fbUser) {
+    throw new Error('Tu sesión de autenticación expiró. Inicia sesión nuevamente para actualizar tu contraseña.');
+  }
+
+  try {
+    await updatePassword(fbUser, newPassword);
+  } catch (err: any) {
+    if (err?.code === 'auth/requires-recent-login') {
+      throw new Error(
+        'Por seguridad, vuelve a iniciar sesión e intenta cambiar la contraseña de inmediato, o solicita un enlace de restablecimiento a tu correo.'
+      );
+    }
+    throw mapFirebaseAuthError(err);
+  }
+
+  const now = Date.now();
+  const targetUid = fbUser.uid || user.id;
+  await update(ref(rtdb, `usuarios/${targetUid}`), {
+    mustChangePassword: false,
+    passwordPolicyVersion: CURRENT_PASSWORD_POLICY_VERSION,
+    passwordUpdatedAt: now,
+  }).catch(() => {});
+
+  return {
+    ...user,
+    mustChangePassword: false,
+    passwordPolicyVersion: CURRENT_PASSWORD_POLICY_VERSION,
+    passwordUpdatedAt: now,
   };
 }
 
@@ -473,8 +550,8 @@ async function claimPendingProfileForAuthUser(
       ? 'admin_minesafe'
       : pendingTipo === 'admin'
       ? 'admin'
-      : pendingTipo === 'monotoriador'
-      ? 'monotoriador'
+      : pendingTipo === 'supervisor' || pendingTipo === 'monotoriador' || pendingTipo === 'monitoreador'
+      ? 'supervisor'
       : 'operador';
   const claimedPayload: Record<string, any> = {
     nombre: pendingRawData?.nombre || fbUser.displayName || emailLower,
@@ -664,7 +741,7 @@ export async function createUserAccountByAdmin(params: {
   name: string;
   email: string;
   password: string;
-  role: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador';
+  role: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor';
   rut: string;
   shift: string;
   assignedSector: string;
@@ -695,8 +772,8 @@ export async function createUserAccountByAdmin(params: {
       ? 'admin_minesafe'
       : params.role === 'admin'
       ? 'admin'
-      : params.role === 'monotoriador'
-      ? 'monotoriador'
+      : params.role === 'supervisor'
+      ? 'supervisor'
       : 'operador';
 
   let authorizedOrgs = params.organizations;
@@ -762,9 +839,9 @@ export async function createUserAccountByAdmin(params: {
     safeRole === 'admin_minesafe'
       ? 'Admin Corporativo MineSafe'
       : safeRole === 'admin'
-      ? 'Administrador / Prevencionista de Faena'
-      : safeRole === 'monotoriador'
-      ? 'Monotoriador Ambiental'
+      ? 'Administrador de Empresa'
+      : safeRole === 'supervisor'
+      ? 'Supervisor Ambiental'
       : 'Operador / Minero en Faena';
 
   try {
@@ -1402,8 +1479,8 @@ export function subscribeToRTDBUsers(
   callback: (users: UserProfile[]) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  // Operadores y Monotoriadores no tienen permiso de lectura sobre la colección completa /usuarios
-  if (scope?.role === 'operador' || scope?.role === 'monotoriador') {
+  // Operadores y Supervisores no tienen permiso de lectura sobre la colección completa /usuarios
+  if (scope?.role === 'operador' || scope?.role === 'supervisor') {
     callback([]);
     return () => {};
   }
@@ -1468,7 +1545,7 @@ export function subscribeToRTDBUsers(
           return {
             ...u,
             role: 'admin' as UserRole,
-            roleLabel: 'Administrador / Prevencionista de Faena',
+            roleLabel: 'Administrador de Empresa',
           };
         }
         return u;
@@ -1482,7 +1559,7 @@ export function subscribeToRTDBUsers(
         return {
           ...u,
           role: 'admin' as UserRole,
-          roleLabel: 'Administrador / Prevencionista de Faena',
+          roleLabel: 'Administrador de Empresa',
         };
       }
       return u;
@@ -1492,7 +1569,7 @@ export function subscribeToRTDBUsers(
       superadmin: 0,
       admin_minesafe: 1,
       admin: 2,
-      monotoriador: 3,
+      supervisor: 3,
       operador: 4,
     };
     normalizedList.sort((a, b) => {
@@ -2274,15 +2351,17 @@ export async function resetGatewayDataInRTDB(
 export async function toggleGatewayAlarmInRTDB(
   deviceId: string,
   active: boolean,
-  actingUser?: UserProfile | null
+  actingUser?: UserProfile | null,
+  options?: { targetDeviceIds?: string[]; organizationId?: string }
 ): Promise<void> {
-  if (!active) {
-    const isSuper = await verifySuperAdminPrivileges(actingUser);
-    if (!isSuper) {
-      throw new Error('Acceso denegado: Solo un SuperAdministrador autenticado en Firebase Auth puede apagar la alarma.');
+  if (actingUser) {
+    const authCheck = canControlMineAlarm(actingUser, options?.organizationId || actingUser.organizationId);
+    if (!authCheck.allowed) {
+      throw new Error(
+        authCheck.reason ||
+          'Acceso denegado: Solo el Administrador de la empresa minera o SuperAdmin puede operar la alarma.'
+      );
     }
-  } else if (actingUser && !isAnyAdminRole(actingUser.role)) {
-    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede activar manualmente la alarma del nodo.');
   }
 
   const now = Date.now();
@@ -2292,27 +2371,37 @@ export async function toggleGatewayAlarmInRTDB(
     alarma: active,
     alarma_activa: active,
     buzzer: active,
+    // La baliza/luz se activa y apaga automáticamente en conjunto con la alarma
+    luz: active,
+    iluminacion_led: active,
     origen_alarma: active ? 'ACTIVACION_MANUAL_WEB' : 'NINGUNO',
     last_update_server: now,
   };
 
-  const targetId = deviceId || 'device_38A839E81F84';
-  await ensureValidDevicePayload(targetId, payload);
+  const primaryId = deviceId || 'device_38A839E81F84';
+  const targetSet = new Set<string>([primaryId, ...(options?.targetDeviceIds || []).filter(Boolean)]);
 
-  const orgScopeId = actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
-  if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
-    await ensureValidDevicePayload('device_38A839E81F84', payload).catch(() => {});
-  }
+  await Promise.all(
+    Array.from(targetSet).map((id) =>
+      ensureValidDevicePayload(id, payload).catch((err) => {
+        if (id === primaryId) throw err;
+        console.warn(`No se pudo propagar comando de alarma a nodo subordinado ${id}:`, err);
+      })
+    )
+  );
 }
 
 export async function shutdownAlarmCompletelyInRTDB(
   deviceId: string,
   actingUser: UserProfile | null,
-  options?: { resetSensorBaselines?: boolean; organizationId?: string }
+  options?: { resetSensorBaselines?: boolean; organizationId?: string; targetDeviceIds?: string[] }
 ): Promise<void> {
-  const isSuper = await verifySuperAdminPrivileges(actingUser);
-  if (!isSuper) {
-    throw new Error('Acceso denegado: Se requieren privilegios reales de SuperAdministrador en Firebase Auth para apagar la alarma.');
+  const authCheck = canControlMineAlarm(actingUser, options?.organizationId);
+  if (!authCheck.allowed) {
+    throw new Error(
+      authCheck.reason ||
+        'Acceso denegado: Se requieren permisos de Administrador de Empresa o SuperAdmin para apagar la alarma.'
+    );
   }
 
   const now = Date.now();
@@ -2320,7 +2409,8 @@ export async function shutdownAlarmCompletelyInRTDB(
     (options?.organizationId && options.organizationId !== 'all' ? options.organizationId : null) ||
     actingUser?.organizationId ||
     DEFAULT_ORGANIZATION.id;
-  const targetId = deviceId || 'device_38A839E81F84';
+  const primaryId = deviceId || 'device_38A839E81F84';
+  const actorLabel = actingUser?.name || auth.currentUser?.email || 'Administrador';
   const devPayload: Record<string, any> = {
     comando_web: 'APAGAR',
     silencio_remoto: true,
@@ -2331,7 +2421,7 @@ export async function shutdownAlarmCompletelyInRTDB(
     iluminacion_led: false,
     simulacro_activo: false,
     origen_alarma: 'NINGUNO',
-    descripcion_monitoreo: `Alarma apagada completamente por SuperAdmin (${actingUser?.name || auth.currentUser?.email || 'SuperAdmin'}).`,
+    descripcion_monitoreo: `Alarma y baliza apagadas por ${actorLabel}.`,
     last_update_server: now,
   };
 
@@ -2341,24 +2431,28 @@ export async function shutdownAlarmCompletelyInRTDB(
     devPayload.estado_adquisicion = 'activo';
   }
 
-  await ensureValidDevicePayload(targetId, devPayload);
-
-  if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
-    await ensureValidDevicePayload('device_38A839E81F84', devPayload).catch(() => {});
-  }
+  const targetSet = new Set<string>([primaryId, ...(options?.targetDeviceIds || []).filter(Boolean)]);
+  await Promise.all(
+    Array.from(targetSet).map((id) =>
+      ensureValidDevicePayload(id, devPayload).catch((err) => {
+        if (id === primaryId) throw err;
+        console.warn(`No se pudo apagar nodo subordinado ${id}:`, err);
+      })
+    )
+  );
 
   await update(ref(rtdb, `simulacro/${orgScopeId}`), {
     activo: false,
     finalizado: true,
     organizationId: orgScopeId,
-    detenidoPor: actingUser?.name || auth.currentUser?.email || 'SuperAdmin',
+    detenidoPor: actorLabel,
     timestamp: now,
   }).catch(() => {});
 
   await update(ref(rtdb, `emergencia/${orgScopeId}`), {
     activa: false,
     organizationId: orgScopeId,
-    detenidoPor: actingUser?.name || auth.currentUser?.email || 'SuperAdmin',
+    detenidoPor: actorLabel,
     timestamp: now,
   }).catch(() => {});
 }
@@ -2610,7 +2704,8 @@ export async function broadcastAlertToRTDB(alert: SafetyAlert): Promise<void> {
 
 export async function acknowledgeAlertInRTDB(
   alertOrId: SafetyAlert | string,
-  acknowledgedBy: string
+  acknowledgedBy: string,
+  relatedAlertIds: string[] = []
 ): Promise<void> {
   const alertId = typeof alertOrId === 'string' ? alertOrId : alertOrId.id;
   const now = Date.now();
@@ -2619,13 +2714,54 @@ export async function acknowledgeAlertInRTDB(
       ? buildAlertBasePayload(alertOrId, alertOrId.timestampMs || now)
       : {};
 
-  await update(ref(rtdb, `alertas/${alertId}`), {
-    ...baseFields,
-    id: alertId,
-    atendida: true,
-    atendida_por: acknowledgedBy,
-    timestamp_atendida: now,
+  const updates: Record<string, any> = {
+    [`alertas/${alertId}`]: {
+      ...baseFields,
+      id: alertId,
+      atendida: true,
+      atendida_por: acknowledgedBy,
+      timestamp_atendida: now,
+    },
+  };
+
+  relatedAlertIds
+    .filter((id) => id && id !== alertId)
+    .forEach((relId) => {
+      updates[`alertas/${relId}/atendida`] = true;
+      updates[`alertas/${relId}/atendida_por`] = acknowledgedBy;
+      updates[`alertas/${relId}/timestamp_atendida`] = now;
+    });
+
+  await update(ref(rtdb), updates);
+}
+
+export function deduplicateActiveSafetyAlerts(mapped: SafetyAlert[]): SafetyAlert[] {
+  const normVar = (v?: string) => (v || '').trim().toLowerCase();
+  const sorted = [...mapped].sort((a, b) => {
+    // Priorizar alertas reconocidas y más recientes dentro de las activas del mismo sensor+variable
+    if (!a.resolved && !b.resolved && a.sensorId === b.sensorId && normVar(a.variableName) === normVar(b.variableName)) {
+      if (a.acknowledged !== b.acknowledged) {
+        return a.acknowledged ? -1 : 1;
+      }
+    }
+    return (b.timestampMs || 0) - (a.timestampMs || 0);
   });
+
+  const seenActiveKeys = new Set<string>();
+  const deduped: SafetyAlert[] = [];
+
+  for (const item of sorted) {
+    if (!item.resolved && item.sensorId) {
+      const dedupKey = `${item.sensorId}::${normVar(item.variableName)}`;
+      if (seenActiveKeys.has(dedupKey)) {
+        continue;
+      }
+      seenActiveKeys.add(dedupKey);
+    }
+    deduped.push(item);
+  }
+
+  return deduped.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
 }
 
 export function subscribeToRTDBAlerts(
@@ -2648,25 +2784,7 @@ export function subscribeToRTDBAlerts(
       mapped.push(mapRTDBAlertRecord(id, data, bit));
     });
 
-    mapped.sort((a, b) => (b.timestampMs || 0) - (a.timestampMs || 0));
-
-    const seenActiveEvtKeys = new Set<string>();
-    const deduped: SafetyAlert[] = [];
-
-    for (const item of mapped) {
-      const isAutoThresholdEvent =
-        item.id.startsWith('evt_') && !item.resolved && !item.acknowledged && !item.resolutionDetails?.comment;
-      if (isAutoThresholdEvent) {
-        const dedupKey = `${item.sensorId}::${item.variableName}`;
-        if (seenActiveEvtKeys.has(dedupKey)) {
-          continue;
-        }
-        seenActiveEvtKeys.add(dedupKey);
-      }
-      deduped.push(item);
-    }
-
-    callback(deduped);
+    callback(deduplicateActiveSafetyAlerts(mapped));
   };
 
   const unsubAlertas = onValue(
@@ -2788,7 +2906,8 @@ export function buildAtomicAlertResolutionUpdates(
  */
 export async function resolveAlertInRTDB(
   alertOrId: SafetyAlert | string,
-  details: AlertResolutionDetails
+  details: AlertResolutionDetails,
+  relatedAlertIds: string[] = []
 ): Promise<void> {
   const alertId = typeof alertOrId === 'string' ? alertOrId : alertOrId.id;
   const now = Date.now();
@@ -2801,6 +2920,19 @@ export async function resolveAlertInRTDB(
   const updates = buildAtomicAlertResolutionUpdates(alertOrId, details, now, {
     isExistingThresholdEvent,
   });
+
+  // Cerrar también eventos evt_ antiguos duplicados del mismo sensor + variable para que no reaparezcan
+  for (const relId of relatedAlertIds) {
+    if (!relId || relId === alertId) continue;
+    updates[`alertas/${relId}/status`] = 'resuelta';
+    updates[`alertas/${relId}/resuelta`] = true;
+    updates[`alertas/${relId}/atendida`] = true;
+    updates[`alertas/${relId}/descripcion_cierre`] = `Consolidada en cierre de alerta ${alertId}: ${details.comment}`;
+    updates[`alertas/${relId}/resuelto_por`] = details.resolvedBy;
+    updates[`alertas/${relId}/resuelto_en`] = details.resolvedAt;
+    updates[`alertas/${relId}/timestamp_cierre`] = now;
+  }
+
   await update(ref(rtdb), updates);
 }
 
@@ -3318,7 +3450,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         visor_3d: false,
         gateway_3d: false,
       },
-      monotoriador: {
+      supervisor: {
         dashboard: true,
         monitoreo: true,
         alertas: true,
@@ -3353,7 +3485,7 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
         pagos: false,
         inventario: false,
       },
-      monotoriador: {
+      supervisor: {
         asignaciones: true,
         arriendos: true,
         pagos: true,
@@ -3472,13 +3604,13 @@ export function isTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
     user.role === 'admin_minesafe'
       ? 'admin_minesafe'
       : user.role === 'admin'
       ? 'admin'
-      : user.role === 'monotoriador'
-      ? 'monotoriador'
+      : user.role === 'supervisor'
+      ? 'supervisor'
       : 'operador';
   const configuredRoleVal = config?.visibility?.rolePermissions?.[roleKey]?.[controllableTab];
   if (typeof configuredRoleVal === 'boolean') {
@@ -3515,13 +3647,13 @@ export function isEquiposSubTabVisibleForUser(
   if (userOverride === 'allow') return true;
   if (userOverride === 'block') return false;
 
-  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador' =
+  const roleKey: 'admin_minesafe' | 'admin' | 'operador' | 'supervisor' =
     user.role === 'admin_minesafe'
       ? 'admin_minesafe'
       : user.role === 'admin'
       ? 'admin'
-      : user.role === 'monotoriador'
-      ? 'monotoriador'
+      : user.role === 'supervisor'
+      ? 'supervisor'
       : 'operador';
   const configuredRoleVal = config?.visibility?.equiposSubTabRolePermissions?.[roleKey]?.[subTab];
   if (typeof configuredRoleVal === 'boolean') {
@@ -3548,9 +3680,10 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.operador,
         },
-        monotoriador: {
-          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.monotoriador,
+        supervisor: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.rolePermissions.supervisor,
           ...(raw?.visibility?.rolePermissions?.monotoriador || {}),
+          ...(raw?.visibility?.rolePermissions?.supervisor || {}),
         },
       },
       userOverrides: raw?.visibility?.userOverrides || {},
@@ -3567,9 +3700,10 @@ function mergePlatformConfig(raw: any): PlatformConfig {
         operador: {
           ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.operador,
         },
-        monotoriador: {
-          ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.monotoriador,
+        supervisor: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions!.supervisor,
           ...(raw?.visibility?.equiposSubTabRolePermissions?.monotoriador || {}),
+          ...(raw?.visibility?.equiposSubTabRolePermissions?.supervisor || {}),
         },
       },
       equiposSubTabUserOverrides: raw?.visibility?.equiposSubTabUserOverrides || {},
@@ -4697,6 +4831,66 @@ export async function deleteAlertAttachment(attachment: AlertAttachment): Promis
   await remove(ref(rtdb, `adjuntos/${attachment.id}`));
 }
 
+export async function saveRegisteredDeviceHierarchy(
+  device: RegisteredDeviceConfig,
+  actingUser: UserProfile | null | undefined,
+  organizations?: Organization[]
+): Promise<RegisteredDeviceConfig> {
+  assertActiveSession(actingUser);
+  const targetOrgId = device.organizationId || actingUser!.organizationId || DEFAULT_ORGANIZATION.id;
+  const check = canManageOrganizationHierarchy(actingUser, targetOrgId, organizations);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Permisos insuficientes para vincular dispositivos en esta empresa.');
+  }
+
+  const cleanId = device.id.trim();
+  if (!cleanId) {
+    throw new Error('El identificador del dispositivo es obligatorio.');
+  }
+
+  const isNodeCategory = device.category === 'nodo' || device.category === 'sensor';
+  const normalized: RegisteredDeviceConfig = {
+    ...device,
+    id: cleanId,
+    name: device.name.trim() || cleanId,
+    organizationId: targetOrgId,
+    category: isNodeCategory ? 'nodo' : 'gateway',
+    enabled: device.enabled !== false && device.active !== false,
+    active: device.active !== false && device.enabled !== false,
+    createdAt: device.createdAt || Date.now(),
+    parentGatewayId: isNodeCategory ? device.parentGatewayId || undefined : undefined,
+  };
+
+  // 1) Actualizar registro en /dispositivos/{id} con su ubicación jerárquica completa
+  await update(ref(rtdb, `dispositivos/${cleanId}`), {
+    name: normalized.name,
+    organizationId: normalized.organizationId,
+    siteId: normalized.siteId || null,
+    siteName: normalized.siteName || null,
+    crewId: normalized.crewId || null,
+    crewName: normalized.crewName || null,
+    sectorId: normalized.sectorId || null,
+    sectorName: normalized.sectorName || 'Sector Operativo',
+    deviceCategory: normalized.category,
+    parentGatewayId: normalized.parentGatewayId || null,
+  });
+
+  // 2) Intentar sincronizar catálogo maestro /configuracion_plataforma/registeredDevices (si tiene permisos)
+  try {
+    const snap = await get(ref(rtdb, 'configuracion_plataforma/registeredDevices'));
+    const existing: RegisteredDeviceConfig[] = snap.exists() && Array.isArray(snap.val()) ? snap.val() : [];
+    const nextList = [
+      ...existing.filter((d) => d.id !== normalized.id),
+      JSON.parse(JSON.stringify(normalized)),
+    ];
+    await set(ref(rtdb, 'configuracion_plataforma/registeredDevices'), nextList);
+  } catch {
+    // Admin de empresa puede no tener escritura en /configuracion_plataforma; /dispositivos ya guarda la jerarquía real.
+  }
+
+  return normalized;
+}
+
 /**
  * ============================================================================
  * CARGA MASIVA DE DATOS POR EMPRESA (ADMIN Y SUPERADMIN)
@@ -4709,6 +4903,8 @@ export interface BulkImportExecutionResult {
   createdOrganization?: Organization;
   createdUsers: UserProfile[];
   createdSites: MiningSite[];
+  createdCrews: MiningCrew[];
+  createdDevices: RegisteredDeviceConfig[];
   createdRentals: DeviceRental[];
   createdAssignments: WorkerAssignment[];
   errors: Array<{ section: string; label: string; reason: string }>;
@@ -4722,6 +4918,9 @@ export async function executeBulkCompanyImport(params: {
   organizationToCreate?: Omit<Organization, 'createdAt'>;
   users?: BulkUserImportItem[];
   sites?: BulkSiteImportItem[];
+  crews?: BulkCrewImportItem[];
+  devices?: BulkDeviceImportItem[];
+  hierarchy?: BulkHierarchyImportItem[];
   rentals?: BulkRentalImportItem[];
   assignments?: BulkAssignmentImportItem[];
   createAuthAccounts?: boolean;
@@ -4738,14 +4937,45 @@ export async function executeBulkCompanyImport(params: {
   let resolvedOrgId = params.targetOrgId;
   let createdOrganization: Organization | undefined;
 
+  if (params.organizationToCreate) {
+    const createCheck = canCreateOrEditOrganization(params.actingUser, null);
+    if (!createCheck.allowed) {
+      throw new Error(
+        createCheck.reason || 'Solo SuperAdmin o Admin MineSafe pueden crear nuevas empresas en carga masiva.'
+      );
+    }
+  } else {
+    const authOrgs = await resolveAuthorizedOrganizationsForActor(
+      params.actingUser,
+      resolvedOrgId,
+      effectiveOrgs
+    );
+    if (!isOrgAuthorizedForUser(params.actingUser, resolvedOrgId, authOrgs)) {
+      throw new Error(
+        `Acción denegada: no tienes permisos para cargar datos masivos en la organización "${resolvedOrgId}".`
+      );
+    }
+    if (authOrgs) effectiveOrgs = authOrgs;
+  }
+
+  // Expandir filas de jerarquía completa si vienen en el lote
+  const expandedHierarchy =
+    params.hierarchy && params.hierarchy.length > 0
+      ? expandHierarchyRowsToEntities(params.hierarchy, resolvedOrgId)
+      : { sites: [], crews: [], devices: [] };
+
   const users = params.users || [];
-  const sites = params.sites || [];
+  const sites = [...(params.sites || []), ...expandedHierarchy.sites];
+  const crews = [...(params.crews || []), ...expandedHierarchy.crews];
+  const devices = [...(params.devices || []), ...expandedHierarchy.devices];
   const rentals = params.rentals || [];
   const assignments = params.assignments || [];
   const total =
     (params.organizationToCreate ? 1 : 0) +
     users.length +
     sites.length +
+    crews.length +
+    devices.length +
     rentals.length +
     assignments.length;
 
@@ -4753,6 +4983,8 @@ export async function executeBulkCompanyImport(params: {
   const errors: BulkImportExecutionResult['errors'] = [];
   const createdUsers: UserProfile[] = [];
   const createdSites: MiningSite[] = [];
+  const createdCrews: MiningCrew[] = [];
+  const createdDevices: RegisteredDeviceConfig[] = [];
   const createdRentals: DeviceRental[] = [];
   const createdAssignments: WorkerAssignment[] = [];
 
@@ -4768,18 +5000,6 @@ export async function executeBulkCompanyImport(params: {
     resolvedOrgId = createdOrganization.id;
     effectiveOrgs = [createdOrganization, ...effectiveOrgs.filter((o) => o.id !== createdOrganization!.id)];
     completed += 1;
-  } else {
-    const authOrgs = await resolveAuthorizedOrganizationsForActor(
-      params.actingUser,
-      resolvedOrgId,
-      effectiveOrgs
-    );
-    if (!isOrgAuthorizedForUser(params.actingUser, resolvedOrgId, authOrgs)) {
-      throw new Error(
-        `Acción denegada: no tienes permisos para cargar datos masivos en la organización "${resolvedOrgId}".`
-      );
-    }
-    if (authOrgs) effectiveOrgs = authOrgs;
   }
 
   for (let i = 0; i < users.length; i++) {
@@ -4788,7 +5008,7 @@ export async function executeBulkCompanyImport(params: {
     params.onProgress?.(completed, total, `Usuario: ${label}`);
     try {
       const authPassword = item.password || params.defaultAuthPassword || '';
-      if (params.createAuthAccounts && authPassword.length >= 6) {
+      if (params.createAuthAccounts && authPassword.length >= 8) {
         const created = await createUserAccountByAdmin({
           name: item.name,
           email: item.email,
@@ -4834,6 +5054,46 @@ export async function executeBulkCompanyImport(params: {
         section: 'Faenas',
         label: scopedSite.name,
         reason: res.error || 'No se pudo persistir la faena en Firebase RTDB.',
+      });
+    }
+    completed += 1;
+  }
+
+  for (let i = 0; i < crews.length; i++) {
+    const item = crews[i];
+    const scopedCrew: MiningCrew = {
+      ...item.crew,
+      organizationId: resolvedOrgId,
+    };
+    params.onProgress?.(completed, total, `Cuadrilla: ${scopedCrew.name}`);
+    try {
+      const res = await saveCrewToRTDB(scopedCrew, params.actingUser, effectiveOrgs);
+      createdCrews.push(res.crew);
+    } catch (err: any) {
+      errors.push({
+        section: 'Cuadrillas',
+        label: scopedCrew.name,
+        reason: err?.message || 'Error al guardar cuadrilla.',
+      });
+    }
+    completed += 1;
+  }
+
+  for (let i = 0; i < devices.length; i++) {
+    const item = devices[i];
+    const scopedDevice: RegisteredDeviceConfig = {
+      ...item.device,
+      organizationId: resolvedOrgId,
+    };
+    params.onProgress?.(completed, total, `Dispositivo: ${scopedDevice.name}`);
+    try {
+      const savedDev = await saveRegisteredDeviceHierarchy(scopedDevice, params.actingUser, effectiveOrgs);
+      createdDevices.push(savedDev);
+    } catch (err: any) {
+      errors.push({
+        section: 'Dispositivos',
+        label: scopedDevice.name,
+        reason: err?.message || 'Error al vincular dispositivo.',
       });
     }
     completed += 1;
@@ -4891,6 +5151,8 @@ export async function executeBulkCompanyImport(params: {
     (createdOrganization ? 1 : 0) +
     createdUsers.length +
     createdSites.length +
+    createdCrews.length +
+    createdDevices.length +
     createdRentals.length +
     createdAssignments.length;
 
@@ -4901,6 +5163,8 @@ export async function executeBulkCompanyImport(params: {
     createdOrganization,
     createdUsers,
     createdSites,
+    createdCrews,
+    createdDevices,
     createdRentals,
     createdAssignments,
     errors,

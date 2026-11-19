@@ -13,6 +13,7 @@ import {
 } from './utils/navigation';
 import { PublicLanding } from './components/PublicLanding';
 import { LoginView } from './components/LoginView';
+import { PasswordPolicyModal } from './components/PasswordPolicyModal';
 
 const MineSafePanel = lazy(() => import('./App'));
 
@@ -22,6 +23,10 @@ export const RootApp: React.FC = () => {
     return parseAppRoute(window.location.pathname, window.location.hash);
   });
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [pendingPasswordUpgrade, setPendingPasswordUpgrade] = useState<{
+    user: UserProfile;
+    reason: string;
+  } | null>(null);
   const [isAuthChecking, setIsAuthChecking] = useState<boolean>(true);
   const [authError, setAuthError] = useState<string | null>(null);
   const [theme, setTheme] = useState<'dark' | 'light'>(() => {
@@ -45,30 +50,28 @@ export const RootApp: React.FC = () => {
     };
   }, []);
 
-  // Aplica theme-light únicamente dentro del panel privado para no alterar la dirección visual de portada/acceso
+  // Sincroniza modo oscuro / modo claro manualmente en todas las vistas (portada, acceso y panel)
   useEffect(() => {
     try {
       localStorage.setItem('minesafe_theme', theme);
     } catch { /* ignore */ }
     const root = document.documentElement;
-    const isPanelLight = routeState.route === 'panel' && theme === 'light';
-    if (isPanelLight) {
-      root.classList.add('theme-light');
+    if (theme === 'light') {
+      root.classList.remove('dark');
+      if (routeState.route === 'panel') {
+        root.classList.add('theme-light');
+      } else {
+        root.classList.remove('theme-light');
+      }
       root.setAttribute('data-theme', 'light');
     } else {
+      root.classList.add('dark');
       root.classList.remove('theme-light');
-      root.setAttribute('data-theme', routeState.route === 'panel' ? 'dark' : 'public');
+      root.setAttribute('data-theme', 'dark');
     }
     const meta = document.querySelector('meta[name="theme-color"]');
     if (meta) {
-      meta.setAttribute(
-        'content',
-        routeState.route === 'panel'
-          ? theme === 'light'
-            ? '#f1f5f9'
-            : '#060b13'
-          : '#131E31'
-      );
+      meta.setAttribute('content', theme === 'light' ? '#f1f5f9' : '#060b13');
     }
   }, [theme, routeState.route]);
 
@@ -83,7 +86,15 @@ export const RootApp: React.FC = () => {
     } catch { /* ignore */ }
 
     const unsubAuth = subscribeToFirebaseAuth((user, err) => {
-      setCurrentUser(user && user.status === 'activo' ? user : null);
+      const activeUser = user && user.status === 'activo' ? user : null;
+      setCurrentUser(activeUser);
+      if (activeUser?.mustChangePassword) {
+        setPendingPasswordUpgrade({
+          user: activeUser,
+          reason:
+            'Tu cuenta tiene marcado un cambio obligatorio de contraseña por política de seguridad MineSafe.',
+        });
+      }
       setAuthError(err || null);
       setIsAuthChecking(false);
     });
@@ -181,16 +192,24 @@ export const RootApp: React.FC = () => {
     setRouteState({ route: 'panel' });
   }, [currentUser]);
 
-  const handleLoginSuccess = useCallback((user: UserProfile) => {
-    if (user.status !== 'activo') {
-      setAuthError('Tu cuenta se encuentra desactivada por administración.');
-      return;
-    }
-    setAuthError(null);
-    setCurrentUser(user);
-    navigateToAppRoute('panel', { replace: true });
-    setRouteState({ route: 'panel' });
-  }, []);
+  const handleLoginSuccess = useCallback(
+    (user: UserProfile, mustUpdatePasswordReason?: string) => {
+      if (user.status !== 'activo') {
+        setAuthError('Tu cuenta se encuentra desactivada por administración.');
+        return;
+      }
+      setAuthError(null);
+      setCurrentUser(user);
+      if (mustUpdatePasswordReason) {
+        setPendingPasswordUpgrade({ user, reason: mustUpdatePasswordReason });
+        return;
+      }
+      setPendingPasswordUpgrade(null);
+      navigateToAppRoute('panel', { replace: true });
+      setRouteState({ route: 'panel' });
+    },
+    []
+  );
 
   const handleLogout = useCallback(async () => {
     await logoutFromFirebaseAuth().catch(() => {});
@@ -198,6 +217,7 @@ export const RootApp: React.FC = () => {
       localStorage.removeItem('minesafe_active_user');
     } catch { /* ignore */ }
     setCurrentUser(null);
+    setPendingPasswordUpgrade(null);
     setAuthError(null);
     navigateToAppRoute('landing', { replace: true });
     setRouteState({ route: 'landing' });
@@ -211,6 +231,8 @@ export const RootApp: React.FC = () => {
         onGoToPanel={currentUser ? goToPanel : undefined}
         isAuthenticated={Boolean(currentUser)}
         authenticatedUserName={currentUser?.name}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
       />
     );
   }
@@ -218,13 +240,30 @@ export const RootApp: React.FC = () => {
   // 2. ESPERA DE VERIFICACIÓN SOLO EN RUTAS PRIVADAS (/acceso o /panel)
   if (isAuthChecking) {
     return (
-      <div className="min-h-screen w-full bg-[#F8FAFC] flex flex-col items-center justify-center p-6 text-[#334155]">
+      <div className="min-h-screen w-full bg-[#F8FAFC] dark:bg-[#060b13] flex flex-col items-center justify-center p-6 text-[#334155] dark:text-slate-300">
         <div className="w-9 h-9 rounded-full border-2 border-[#0D9488] border-t-transparent animate-spin mb-4" />
-        <p className="text-sm font-semibold text-[#0F172A]">
+        <p className="text-sm font-semibold text-[#0F172A] dark:text-white">
           Verificando sesión autorizada...
         </p>
-        <p className="text-xs text-[#64748B] mt-1">MineSafe · Control de Acceso</p>
+        <p className="text-xs text-[#64748B] dark:text-slate-400 mt-1">MineSafe · Control de Acceso</p>
       </div>
+    );
+  }
+
+  // 2.5 ACTUALIZACIÓN OBLIGATORIA DE CONTRASEÑA SI LA CLAVE ACTUAL NO CUMPLE POLÍTICA MÍNIMA
+  if (currentUser && pendingPasswordUpgrade) {
+    return (
+      <PasswordPolicyModal
+        user={pendingPasswordUpgrade.user}
+        reason={pendingPasswordUpgrade.reason}
+        onCompleted={(updatedUser) => {
+          setCurrentUser(updatedUser);
+          setPendingPasswordUpgrade(null);
+          navigateToAppRoute('panel', { replace: true });
+          setRouteState({ route: 'panel' });
+        }}
+        onCancelLogout={handleLogout}
+      />
     );
   }
 
@@ -235,6 +274,8 @@ export const RootApp: React.FC = () => {
         onLoginSuccess={handleLoginSuccess}
         onBackToLanding={goToLanding}
         externalAuthError={authError}
+        theme={theme}
+        onToggleTheme={handleToggleTheme}
       />
     );
   }

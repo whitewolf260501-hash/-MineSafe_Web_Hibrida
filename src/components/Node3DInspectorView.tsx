@@ -1966,7 +1966,7 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
           </section>
 
           <div className="mt-auto text-center text-[11px] text-slate-500">
-            Proyecto de Título MineSafe • Inspector Hardware IoT
+            MineSafe Ingeniería IoT • Inspector Hardware IoT
           </div>
         </aside>
       </div>

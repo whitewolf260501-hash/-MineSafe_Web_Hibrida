@@ -1,15 +1,26 @@
 import {
+  DeviceCategory,
   DeviceRental,
+  MiningCrew,
   MiningSector,
   MiningSite,
   Organization,
+  RegisteredDeviceConfig,
   UserProfile,
   UserRole,
   WorkerAssignment,
 } from '../types';
 import { isPlaceholderRut, validateChileanRut } from './rut';
 
-export type BulkEntityType = 'users' | 'sites' | 'rentals' | 'assignments' | 'bundle';
+export type BulkEntityType =
+  | 'hierarchy'
+  | 'users'
+  | 'sites'
+  | 'crews'
+  | 'devices'
+  | 'rentals'
+  | 'assignments'
+  | 'bundle';
 
 export interface ParsedBulkRow<T> {
   rowNumber: number;
@@ -23,7 +34,7 @@ export interface BulkUserImportItem {
   name: string;
   email: string;
   rut: string;
-  role: 'operador' | 'monotoriador' | 'admin';
+  role: 'operador' | 'supervisor' | 'admin';
   shift: string;
   assignedSector: string;
   assignedDeviceCode: string;
@@ -33,6 +44,29 @@ export interface BulkUserImportItem {
 
 export interface BulkSiteImportItem {
   site: MiningSite;
+}
+
+export interface BulkCrewImportItem {
+  crew: MiningCrew;
+}
+
+export interface BulkDeviceImportItem {
+  device: RegisteredDeviceConfig;
+}
+
+export interface BulkHierarchyImportItem {
+  organizationName?: string;
+  siteName: string;
+  crewName: string;
+  crewCode: string;
+  sectorName: string;
+  sectorCode: string;
+  deviceId: string;
+  deviceName: string;
+  deviceCategory: DeviceCategory;
+  parentGatewayId?: string;
+  region?: string;
+  comuna?: string;
 }
 
 export interface BulkRentalImportItem {
@@ -47,6 +81,8 @@ export interface BulkCompanyBundleInput {
   organization?: Partial<Organization> & { name: string };
   users?: Array<Record<string, any>>;
   sites?: Array<Record<string, any>>;
+  crews?: Array<Record<string, any>>;
+  devices?: Array<Record<string, any>>;
   rentals?: Array<Record<string, any>>;
   assignments?: Array<Record<string, any>>;
 }
@@ -68,6 +104,8 @@ export interface BulkBundleParseResult {
   };
   users: BulkParseResult<BulkUserImportItem>;
   sites: BulkParseResult<BulkSiteImportItem>;
+  crews: BulkParseResult<BulkCrewImportItem>;
+  devices: BulkParseResult<BulkDeviceImportItem>;
   rentals: BulkParseResult<BulkRentalImportItem>;
   assignments: BulkParseResult<BulkAssignmentImportItem>;
   formatError?: string;
@@ -165,12 +203,15 @@ export function parseCsvRecords(rawCsv: string): Record<string, string>[] {
 
 function pickField(record: Record<string, any>, aliases: string[]): string {
   const normalizedMap: Record<string, any> = {};
+  const compactMap: Record<string, any> = {};
   Object.keys(record || {}).forEach((k) => {
-    normalizedMap[normalizeHeaderKey(k)] = record[k];
+    const norm = normalizeHeaderKey(k);
+    normalizedMap[norm] = record[k];
+    compactMap[norm.replace(/_/g, '')] = record[k];
   });
   for (const alias of aliases) {
     const key = normalizeHeaderKey(alias);
-    const val = normalizedMap[key];
+    const val = normalizedMap[key] ?? compactMap[key.replace(/_/g, '')];
     if (val !== undefined && val !== null && String(val).trim() !== '') {
       return String(val).trim();
     }
@@ -205,7 +246,7 @@ function isValidEmail(email: string): boolean {
   return /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
 
-function normalizeBulkUserRole(rawRole: string): { role?: 'operador' | 'monotoriador' | 'admin'; error?: string } {
+function normalizeBulkUserRole(rawRole: string): { role?: 'operador' | 'supervisor' | 'admin'; error?: string } {
   const clean = rawRole
     .trim()
     .toLowerCase()
@@ -215,8 +256,14 @@ function normalizeBulkUserRole(rawRole: string): { role?: 'operador' | 'monotori
   if (!clean || clean === 'operador' || clean === 'usuario' || clean === 'usuario_normal' || clean === 'usuario normal') {
     return { role: 'operador' };
   }
-  if (clean === 'monotoriador' || clean === 'monitoreador' || clean === 'monitor') {
-    return { role: 'monotoriador' };
+  if (
+    clean === 'supervisor' ||
+    clean === 'supervisor ambiental' ||
+    clean === 'monotoriador' ||
+    clean === 'monitoreador' ||
+    clean === 'monitor'
+  ) {
+    return { role: 'supervisor' };
   }
   if (clean === 'admin' || clean === 'administrador' || clean === 'prevencionista') {
     return { role: 'admin' };
@@ -227,7 +274,7 @@ function normalizeBulkUserRole(rawRole: string): { role?: 'operador' | 'monotori
   if (clean === 'admin_minesafe' || clean === 'adminminesafe' || clean === 'admin_corporativo') {
     return { error: 'Bloqueado: el rol Admin Corporativo MineSafe solo puede ser otorgado directamente por el SuperAdministrador.' };
   }
-  return { error: `Rol inválido "${rawRole}". Usa: operador, monotoriador o admin.` };
+  return { error: `Rol inválido "${rawRole}". Usa: operador, supervisor o admin.` };
 }
 
 export function validateBulkUsersRecords(records: Record<string, any>[]): BulkParseResult<BulkUserImportItem> {
@@ -604,6 +651,383 @@ export function validateBulkAssignmentsRecords(
   };
 }
 
+function normalizeDeviceCategory(raw: string): { category?: DeviceCategory; error?: string } {
+  const clean = raw
+    .trim()
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '');
+
+  if (!clean || clean === 'nodo' || clean === 'sensor' || clean === 'nodo_sensor' || clean === 'node') {
+    return { category: 'nodo' };
+  }
+  if (clean === 'gateway' || clean === 'concentrador' || clean === 'gw') {
+    return { category: 'gateway' };
+  }
+  return { error: `Tipo de dispositivo inválido "${raw}". Usa: gateway o nodo.` };
+}
+
+function slugifyId(val: string, fallback: string): string {
+  const clean = val
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '')
+    .slice(0, 32);
+  return clean || fallback;
+}
+
+export function validateBulkCrewsRecords(
+  records: Record<string, any>[],
+  organizationId: string
+): BulkParseResult<BulkCrewImportItem> {
+  const seenNames = new Set<string>();
+  const now = Date.now();
+  const allRows: ParsedBulkRow<BulkCrewImportItem>[] = records.map((rec, idx) => {
+    const rowNumber = idx + 2;
+    const errors: string[] = [];
+    const name = pickField(rec, ['cuadrilla', 'nombre_cuadrilla', 'nombre', 'name', 'crewName']);
+    const code =
+      pickField(rec, ['codigo_cuadrilla', 'codigo', 'code', 'crewCode']) ||
+      `CUA-${String(idx + 1).padStart(2, '0')}`;
+    const siteName = pickField(rec, ['faena', 'nombre_faena', 'siteName', 'mina']);
+    const sectorName = pickField(rec, ['sector', 'nombre_sector', 'sectorName']);
+    const shift = pickField(rec, ['turno', 'shift']) || 'Turno Mañana (07:00 - 15:30)';
+    const rawStatus = pickField(rec, ['estado', 'status']).toLowerCase();
+    const status: MiningCrew['status'] =
+      rawStatus === 'inactiva' ? 'inactiva' : rawStatus === 'en_descanso' ? 'en_descanso' : 'activa';
+    const notes = pickField(rec, ['notas', 'observaciones', 'notes']);
+
+    if (!name) {
+      errors.push('Nombre de cuadrilla obligatorio');
+    } else if (seenNames.has(name.toLowerCase())) {
+      errors.push(`Cuadrilla duplicada en archivo (${name})`);
+    } else {
+      seenNames.add(name.toLowerCase());
+    }
+    if (!siteName) {
+      errors.push('Faena asignada obligatoria (cadena Faena → Cuadrilla)');
+    }
+
+    const valid = errors.length === 0;
+    const siteSlug = slugifyId(siteName, `site-${idx + 1}`);
+    const crewSlug = slugifyId(name, `crew-${idx + 1}`);
+    return {
+      rowNumber,
+      rawLabel: name ? `${code} · ${name} (${siteName || 'sin faena'})` : `Fila ${rowNumber}`,
+      valid,
+      errors,
+      data: valid
+        ? {
+            crew: {
+              id: `crew-${organizationId.slice(-6)}-${crewSlug}`,
+              organizationId,
+              name,
+              code,
+              shift,
+              status,
+              siteId: `site-${organizationId.slice(-8)}-${siteSlug}`,
+              siteName,
+              sectorId: sectorName ? `sec-${siteSlug}-${slugifyId(sectorName, '1')}` : undefined,
+              sectorName: sectorName || undefined,
+              notes: notes || undefined,
+              members: [],
+              createdAt: now,
+              updatedAt: now,
+            },
+          }
+        : undefined,
+    };
+  });
+
+  return {
+    entityType: 'crews',
+    totalRows: allRows.length,
+    validRows: allRows.filter((r) => r.valid),
+    invalidRows: allRows.filter((r) => !r.valid),
+    allRows,
+  };
+}
+
+export function validateBulkDevicesRecords(
+  records: Record<string, any>[],
+  organizationId: string
+): BulkParseResult<BulkDeviceImportItem> {
+  const seenIds = new Set<string>();
+  const now = Date.now();
+  const allRows: ParsedBulkRow<BulkDeviceImportItem>[] = records.map((rec, idx) => {
+    const rowNumber = idx + 2;
+    const errors: string[] = [];
+    const rawId = pickField(rec, ['id_dispositivo', 'deviceId', 'codigo', 'code', 'id']).replace(
+      /[.#$/[\]\s]/g,
+      '_'
+    );
+    const name = pickField(rec, ['nombre_dispositivo', 'nombre', 'name', 'deviceName']) || rawId;
+    const rawType = pickField(rec, ['tipo', 'tipo_dispositivo', 'category', 'deviceCategory', 'rol_equipo']);
+    const typeCheck = normalizeDeviceCategory(rawType);
+    if (typeCheck.error) errors.push(typeCheck.error);
+
+    const siteName = pickField(rec, ['faena', 'mina', 'siteName']);
+    const crewName = pickField(rec, ['cuadrilla', 'crewName']);
+    const sectorName = pickField(rec, ['sector', 'sectorName', 'galeria']);
+    const parentGatewayId = pickField(rec, ['gateway_padre', 'parentGatewayId', 'gateway', 'id_gateway']).replace(
+      /[.#$/[\]\s]/g,
+      '_'
+    );
+
+    if (!rawId) {
+      errors.push('ID o código de dispositivo obligatorio');
+    } else if (seenIds.has(rawId.toLowerCase())) {
+      errors.push(`Dispositivo duplicado en archivo (${rawId})`);
+    } else {
+      seenIds.add(rawId.toLowerCase());
+    }
+    if (!sectorName) {
+      errors.push('Sector asignado obligatorio (cadena Sector → Dispositivo)');
+    }
+
+    const valid = errors.length === 0;
+    const siteSlug = siteName ? slugifyId(siteName, 'faena') : '';
+    const crewSlug = crewName ? slugifyId(crewName, 'cuadrilla') : '';
+    const sectorSlug = slugifyId(sectorName, `sec-${idx + 1}`);
+    const category = typeCheck.category || 'nodo';
+
+    return {
+      rowNumber,
+      rawLabel: rawId
+        ? `${name} (${category === 'gateway' ? 'Gateway' : 'Nodo'} → ${sectorName || 'sin sector'})`
+        : `Fila ${rowNumber}`,
+      valid,
+      errors,
+      data: valid
+        ? {
+            device: {
+              id: rawId,
+              organizationId,
+              siteId: siteSlug ? `site-${organizationId.slice(-8)}-${siteSlug}` : undefined,
+              siteName: siteName || undefined,
+              crewId: crewSlug ? `crew-${organizationId.slice(-6)}-${crewSlug}` : undefined,
+              crewName: crewName || undefined,
+              sectorId: `sec-${siteSlug || 'org'}-${sectorSlug}`,
+              name,
+              category,
+              sectorName,
+              parentGatewayId:
+                (category === 'nodo' || category === 'sensor') && parentGatewayId ? parentGatewayId : undefined,
+              enabled: true,
+              active: true,
+              createdAt: now,
+            },
+          }
+        : undefined,
+    };
+  });
+
+  return {
+    entityType: 'devices',
+    totalRows: allRows.length,
+    validRows: allRows.filter((r) => r.valid),
+    invalidRows: allRows.filter((r) => !r.valid),
+    allRows,
+  };
+}
+
+export function validateBulkHierarchyRecords(
+  records: Record<string, any>[],
+  _organizationId: string
+): BulkParseResult<BulkHierarchyImportItem> {
+  const seenDeviceIds = new Set<string>();
+  const allRows: ParsedBulkRow<BulkHierarchyImportItem>[] = records.map((rec, idx) => {
+    const rowNumber = idx + 2;
+    const errors: string[] = [];
+    const organizationName = pickField(rec, ['empresa', 'organizacion', 'organizationName', 'company']);
+    const siteName = pickField(rec, ['faena', 'mina', 'siteName']);
+    const crewName = pickField(rec, ['cuadrilla', 'crewName']);
+    const crewCode =
+      pickField(rec, ['codigo_cuadrilla', 'crewCode']) || `CUA-${String(idx + 1).padStart(2, '0')}`;
+    const sectorName = pickField(rec, ['sector', 'sectorName']);
+    const sectorCode =
+      pickField(rec, ['codigo_sector', 'sectorCode']) || `SEC-${String(idx + 1).padStart(2, '0')}`;
+    const deviceId = pickField(rec, ['id_dispositivo', 'deviceId', 'codigo_dispositivo', 'dispositivo']).replace(
+      /[.#$/[\]\s]/g,
+      '_'
+    );
+    const deviceName = pickField(rec, ['nombre_dispositivo', 'deviceName']) || deviceId;
+    const rawType = pickField(rec, ['tipo_dispositivo', 'tipo', 'category']);
+    const typeCheck = normalizeDeviceCategory(rawType);
+    const parentGatewayId = pickField(rec, ['gateway_padre', 'parentGatewayId', 'gateway']).replace(
+      /[.#$/[\]\s]/g,
+      '_'
+    );
+    const region = pickField(rec, ['region']) || 'Antofagasta';
+    const comuna = pickField(rec, ['comuna']) || '';
+
+    if (!siteName) errors.push('Faena obligatoria');
+    if (!crewName) errors.push('Cuadrilla obligatoria');
+    if (!sectorName) errors.push('Sector obligatorio');
+    if (!deviceId) {
+      errors.push('ID de dispositivo obligatorio');
+    } else if (seenDeviceIds.has(deviceId.toLowerCase())) {
+      errors.push(`Dispositivo duplicado (${deviceId})`);
+    } else {
+      seenDeviceIds.add(deviceId.toLowerCase());
+    }
+    if (typeCheck.error) errors.push(typeCheck.error);
+
+    const valid = errors.length === 0;
+    const category = typeCheck.category || 'nodo';
+
+    return {
+      rowNumber,
+      rawLabel: `${siteName || '?'} → ${crewName || '?'} → ${sectorName || '?'} → ${deviceName || '?'} (${
+        category === 'gateway' ? 'Gateway' : 'Nodo'
+      })`,
+      valid,
+      errors,
+      data: valid
+        ? {
+            organizationName: organizationName || undefined,
+            siteName,
+            crewName,
+            crewCode,
+            sectorName,
+            sectorCode,
+            deviceId,
+            deviceName,
+            deviceCategory: category,
+            parentGatewayId:
+              (category === 'nodo' || category === 'sensor') && parentGatewayId ? parentGatewayId : undefined,
+            region,
+            comuna,
+          }
+        : undefined,
+    };
+  });
+
+  return {
+    entityType: 'hierarchy',
+    totalRows: allRows.length,
+    validRows: allRows.filter((r) => r.valid),
+    invalidRows: allRows.filter((r) => !r.valid),
+    allRows,
+  };
+}
+
+export function expandHierarchyRowsToEntities(
+  rows: BulkHierarchyImportItem[],
+  organizationId: string,
+  defaultCompanyName?: string
+): {
+  sites: BulkSiteImportItem[];
+  crews: BulkCrewImportItem[];
+  devices: BulkDeviceImportItem[];
+} {
+  const now = Date.now();
+  const sitesMap = new Map<string, MiningSite>();
+  const crewsMap = new Map<string, MiningCrew>();
+  const devices: BulkDeviceImportItem[] = [];
+
+  rows.forEach((row, idx) => {
+    const siteSlug = slugifyId(row.siteName, `faena-${idx + 1}`);
+    const siteId = `site-${organizationId.slice(-8)}-${siteSlug}`;
+    const crewSlug = slugifyId(row.crewName, `cuadrilla-${idx + 1}`);
+    const crewId = `crew-${organizationId.slice(-6)}-${crewSlug}`;
+    const sectorSlug = slugifyId(row.sectorName, `sector-${idx + 1}`);
+    const sectorId = `sec-${siteSlug}-${sectorSlug}`;
+
+    let site = sitesMap.get(siteId);
+    if (!site) {
+      site = {
+        id: siteId,
+        organizationId,
+        name: row.siteName,
+        company: row.organizationName || defaultCompanyName || 'Empresa Minera',
+        region: row.region || 'Antofagasta',
+        comuna: row.comuna || undefined,
+        location: row.comuna ? `${row.comuna}, ${row.region || 'Antofagasta'}` : row.region || 'Antofagasta',
+        type: 'subterranea',
+        elevationMsl: 2400,
+        activeSectors: [],
+      };
+      sitesMap.set(siteId, site);
+    }
+
+    if (!site.activeSectors.some((s) => s.id === sectorId)) {
+      site.activeSectors.push({
+        id: sectorId,
+        siteId,
+        crewId,
+        crewName: row.crewName,
+        name: row.sectorName,
+        code: row.sectorCode,
+        depthMeters: 250,
+        type: 'socavon',
+        activeWorkers: 0,
+        sensorsCount: 1,
+        generalStatus: 'normal',
+        ventilationFanStatus: 'operativo_normal',
+        assignedCrews: [row.crewName],
+      });
+    } else {
+      const existingSec = site.activeSectors.find((s) => s.id === sectorId);
+      if (existingSec) {
+        existingSec.sensorsCount += 1;
+        if (!existingSec.crewId) {
+          existingSec.crewId = crewId;
+          existingSec.crewName = row.crewName;
+        }
+        const crewsList = existingSec.assignedCrews || [];
+        if (!crewsList.includes(row.crewName)) {
+          existingSec.assignedCrews = [...crewsList, row.crewName];
+        }
+      }
+    }
+
+    if (!crewsMap.has(crewId)) {
+      crewsMap.set(crewId, {
+        id: crewId,
+        organizationId,
+        name: row.crewName,
+        code: row.crewCode,
+        shift: 'Turno Mañana (07:00 - 15:30)',
+        status: 'activa',
+        siteId,
+        siteName: row.siteName,
+        sectorId,
+        sectorName: row.sectorName,
+        members: [],
+        createdAt: now,
+        updatedAt: now,
+      });
+    }
+
+    devices.push({
+      device: {
+        id: row.deviceId,
+        organizationId,
+        siteId,
+        siteName: row.siteName,
+        crewId,
+        crewName: row.crewName,
+        sectorId,
+        name: row.deviceName,
+        category: row.deviceCategory,
+        sectorName: row.sectorName,
+        parentGatewayId: row.parentGatewayId,
+        enabled: true,
+        createdAt: now,
+      },
+    });
+  });
+
+  return {
+    sites: Array.from(sitesMap.values()).map((site) => ({ site })),
+    crews: Array.from(crewsMap.values()).map((crew) => ({ crew })),
+    devices,
+  };
+}
+
 export function parseBulkInput(
   entityType: Exclude<BulkEntityType, 'bundle'>,
   rawInput: string,
@@ -621,10 +1045,16 @@ export function parseBulkInput(
     };
   }
   switch (entityType) {
+    case 'hierarchy':
+      return validateBulkHierarchyRecords(records, options.organizationId);
     case 'users':
       return validateBulkUsersRecords(records);
     case 'sites':
       return validateBulkSitesRecords(records, options.organizationId, options.defaultCompanyName);
+    case 'crews':
+      return validateBulkCrewsRecords(records, options.organizationId);
+    case 'devices':
+      return validateBulkDevicesRecords(records, options.organizationId);
     case 'rentals':
       return validateBulkRentalsRecords(records, options.organizationId);
     case 'assignments':
@@ -650,9 +1080,12 @@ export function parseBulkCompanyBundle(
       return {
         users: empty('users'),
         sites: empty('sites'),
+        crews: empty('crews'),
+        devices: empty('devices'),
         rentals: empty('rentals'),
         assignments: empty('assignments'),
-        formatError: 'El paquete JSON debe ser un objeto con claves opcionales: organization, users, sites, rentals, assignments.',
+        formatError:
+          'El paquete JSON debe ser un objeto con claves opcionales: organization, sites, crews, devices, users, rentals, assignments.',
       };
     }
 
@@ -707,6 +1140,12 @@ export function parseBulkCompanyBundle(
       sites: Array.isArray(parsed.sites)
         ? validateBulkSitesRecords(parsed.sites, resolvedOrgId, companyName)
         : empty('sites'),
+      crews: Array.isArray(parsed.crews)
+        ? validateBulkCrewsRecords(parsed.crews, resolvedOrgId)
+        : empty('crews'),
+      devices: Array.isArray(parsed.devices)
+        ? validateBulkDevicesRecords(parsed.devices, resolvedOrgId)
+        : empty('devices'),
       rentals: Array.isArray(parsed.rentals)
         ? validateBulkRentalsRecords(parsed.rentals, resolvedOrgId)
         : empty('rentals'),
@@ -718,6 +1157,8 @@ export function parseBulkCompanyBundle(
     return {
       users: empty('users'),
       sites: empty('sites'),
+      crews: empty('crews'),
+      devices: empty('devices'),
       rentals: empty('rentals'),
       assignments: empty('assignments'),
       formatError: `Error parseando paquete JSON: ${err?.message || 'JSON inválido'}`,
@@ -727,11 +1168,31 @@ export function parseBulkCompanyBundle(
 
 export function getBulkCsvTemplate(entityType: Exclude<BulkEntityType, 'bundle'>): string {
   switch (entityType) {
+    case 'hierarchy':
+      return [
+        'faena,cuadrilla,codigoCuadrilla,sector,codigoSector,idDispositivo,nombreDispositivo,tipoDispositivo,gatewayPadre,region,comuna',
+        'Faena Cordón Norte,Cuadrilla Alfa,CUA-01,Galería Norte Nivel -320,SEC-01,GW_NORTE_01,Gateway Principal Norte,gateway,,Antofagasta,Calama',
+        'Faena Cordón Norte,Cuadrilla Alfa,CUA-01,Galería Norte Nivel -320,SEC-01,NODO_NORTE_01,Nodo Ambiental Galería 1,nodo,GW_NORTE_01,Antofagasta,Calama',
+        'Faena Cordón Norte,Cuadrilla Beta,CUA-02,Rampa Extracción Sur,SEC-02,NODO_SUR_01,Nodo Ambiental Rampa Sur,nodo,GW_NORTE_01,Antofagasta,Calama',
+      ].join('\n');
+    case 'crews':
+      return [
+        'cuadrilla,codigoCuadrilla,faena,sector,turno,estado,notas',
+        'Cuadrilla Alfa,CUA-01,Faena Cordón Norte,Galería Norte Nivel -320,Turno Mañana (07:00 - 15:30),activa,Frente de avance subterráneo',
+        'Cuadrilla Beta,CUA-02,Faena Cordón Norte,Rampa Extracción Sur,Turno Tarde (15:30 - 23:30),activa,Ventilación y carguío',
+      ].join('\n');
+    case 'devices':
+      return [
+        'idDispositivo,nombreDispositivo,tipoDispositivo,faena,cuadrilla,sector,gatewayPadre',
+        'GW_NORTE_01,Gateway Sector Norte,gateway,Faena Cordón Norte,Cuadrilla Alfa,Galería Norte Nivel -320,',
+        'NODO_NORTE_01,Nodo Sensor Galería 1,nodo,Faena Cordón Norte,Cuadrilla Alfa,Galería Norte Nivel -320,GW_NORTE_01',
+        'NODO_NORTE_02,Nodo Sensor Galería 2,nodo,Faena Cordón Norte,Cuadrilla Alfa,Galería Norte Nivel -320,GW_NORTE_01',
+      ].join('\n');
     case 'users':
       return [
         'nombre,email,rut,rol,turno,sector,dispositivo,estado',
-        'Carlos Araya Soto,caraya@empresa.cl,17.456.789-1,operador,Turno Mañana (07:00 - 15:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
-        'Lucía Muñoz Vera,lmunoz@empresa.cl,18.901.234-9,monotoriador,Turno Tarde (15:30 - 23:30),Nivel -320 Rampa Norte,device_38A839E81F84,activo',
+        'Carlos Araya Soto,caraya@empresa.cl,17.456.789-1,operador,Turno Mañana (07:00 - 15:30),Nivel -320 Rampa Norte,NODO_NORTE_01,activo',
+        'Lucía Muñoz Vera,lmunoz@empresa.cl,18.901.234-9,supervisor,Turno Tarde (15:30 - 23:30),Nivel -320 Rampa Norte,NODO_NORTE_01,activo',
         'Rodrigo Fuentes Díaz,rfuentes@empresa.cl,15.222.333-1,admin,Turno Administrativo,Faena Principal,,activo',
       ].join('\n');
     case 'sites':
@@ -743,14 +1204,14 @@ export function getBulkCsvTemplate(entityType: Exclude<BulkEntityType, 'bundle'>
     case 'rentals':
       return [
         'numeroContrato,codigoDispositivo,tipoEquipo,proveedor,fechaInicio,fechaTermino,costoMensualClp,estadoPago,tecnico,notas',
-        'CT-2026-101,device_38A839E81F84,Gateway ESP32 MultiGas,Dräger Safety Chile S.A.,2026-01-15,2026-12-31,290000,al_dia,Equipo Terreno,Arriendo anual nodo principal',
-        'CT-2026-102,MS-PORT-204,Detector Portátil 4-Gases,MineSafe Equipments,2026-02-01,2026-11-30,185000,pago_pendiente,Luis Rojas,Equipo respaldo cuadrilla B',
+        'CT-2026-101,GW_NORTE_01,Gateway Industrial MultiGas,Dräger Safety Chile S.A.,2026-01-15,2026-12-31,290000,al_dia,Equipo Terreno,Arriendo anual gateway principal',
+        'CT-2026-102,NODO_NORTE_01,Nodo Ambiental 4-Gases,MineSafe Equipments,2026-02-01,2026-11-30,185000,pago_pendiente,Luis Rojas,Nodo sector norte',
       ].join('\n');
     case 'assignments':
       return [
         'rutTrabajador,trabajador,cargo,cuadrilla,sector,codigoDispositivo,fechaAsignacion,bateria,contactoEmergencia',
-        '17.456.789-1,Carlos Araya Soto,Operador Perforación,Cuadrilla Alfa - Turno A,Socavón Principal Nivel -320,device_38A839E81F84,2026-11-15,96,+56 9 8111 2233',
-        '18.901.234-9,Lucía Muñoz Vera,Monotoriador Ambiental,Cuadrilla Seguridad,Galería Ventilación Sur,MS-PORT-204,2026-11-15,92,+56 9 7222 3344',
+        '17.456.789-1,Carlos Araya Soto,Operador Perforación,Cuadrilla Alfa - Turno A,Socavón Principal Nivel -320,NODO_NORTE_01,2026-11-15,96,+56 9 8111 2233',
+        '18.901.234-9,Lucía Muñoz Vera,Supervisor Ambiental,Cuadrilla Seguridad,Galería Ventilación Sur,NODO_NORTE_02,2026-11-15,92,+56 9 7222 3344',
       ].join('\n');
   }
 }
@@ -763,25 +1224,6 @@ export function getBulkJsonBundleTemplate(): string {
       industry: 'Minería Subterránea Cobre',
       status: 'activa',
     },
-    users: [
-      {
-        nombre: 'Carlos Araya Soto',
-        email: 'caraya@andes-sur.cl',
-        rut: '17.456.789-1',
-        rol: 'operador',
-        turno: 'Turno Mañana (07:00 - 15:30)',
-        sector: 'Socavón Principal Nivel -320',
-        dispositivo: 'device_38A839E81F84',
-      },
-      {
-        nombre: 'Lucía Muñoz Vera',
-        email: 'lmunoz@andes-sur.cl',
-        rut: '18.901.234-9',
-        rol: 'monotoriador',
-        turno: 'Turno Tarde (15:30 - 23:30)',
-        sector: 'Galería Ventilación Sur',
-      },
-    ],
     sites: [
       {
         faena: 'Faena Cordón Norte',
@@ -795,16 +1237,64 @@ export function getBulkJsonBundleTemplate(): string {
         profundidad: 320,
         tipoSector: 'socavon',
         trabajadores: 18,
-        sensores: 4,
+        sensores: 2,
         ventilacion: 'operativo_normal',
-        cuadrillas: 'Cuadrilla Alfa|Cuadrilla Beta',
+        cuadrillas: 'Cuadrilla Alfa',
+      },
+    ],
+    crews: [
+      {
+        cuadrilla: 'Cuadrilla Alfa',
+        codigoCuadrilla: 'CUA-01',
+        faena: 'Faena Cordón Norte',
+        sector: 'Socavón Principal Nivel -320',
+        turno: 'Turno Mañana (07:00 - 15:30)',
+        estado: 'activa',
+      },
+    ],
+    devices: [
+      {
+        idDispositivo: 'GW_ANDES_01',
+        nombreDispositivo: 'Gateway Sector Norte',
+        tipoDispositivo: 'gateway',
+        faena: 'Faena Cordón Norte',
+        cuadrilla: 'Cuadrilla Alfa',
+        sector: 'Socavón Principal Nivel -320',
+      },
+      {
+        idDispositivo: 'NODO_ANDES_01',
+        nombreDispositivo: 'Nodo Ambiental Nivel -320',
+        tipoDispositivo: 'nodo',
+        faena: 'Faena Cordón Norte',
+        cuadrilla: 'Cuadrilla Alfa',
+        sector: 'Socavón Principal Nivel -320',
+        gatewayPadre: 'GW_ANDES_01',
+      },
+    ],
+    users: [
+      {
+        nombre: 'Carlos Araya Soto',
+        email: 'caraya@andes-sur.cl',
+        rut: '17.456.789-1',
+        rol: 'operador',
+        turno: 'Turno Mañana (07:00 - 15:30)',
+        sector: 'Socavón Principal Nivel -320',
+        dispositivo: 'NODO_ANDES_01',
+      },
+      {
+        nombre: 'Lucía Muñoz Vera',
+        email: 'lmunoz@andes-sur.cl',
+        rut: '18.901.234-9',
+        rol: 'supervisor',
+        turno: 'Turno Tarde (15:30 - 23:30)',
+        sector: 'Socavón Principal Nivel -320',
       },
     ],
     rentals: [
       {
         numeroContrato: 'CT-2026-501',
-        codigoDispositivo: 'MS-PORT-204',
-        tipoEquipo: 'Detector Portátil MultiGas',
+        codigoDispositivo: 'NODO_ANDES_01',
+        tipoEquipo: 'Nodo Ambiental MultiGas',
         proveedor: 'MineSafe Equipments',
         fechaInicio: '2026-01-15',
         fechaTermino: '2026-12-31',
@@ -812,18 +1302,6 @@ export function getBulkJsonBundleTemplate(): string {
         estadoPago: 'al_dia',
         tecnico: 'Soporte Terreno',
         notas: 'Carga inicial empresa',
-      },
-    ],
-    assignments: [
-      {
-        rutTrabajador: '17.456.789-1',
-        trabajador: 'Carlos Araya Soto',
-        cargo: 'Operador Subterráneo',
-        cuadrilla: 'Cuadrilla Alfa',
-        sector: 'Socavón Principal Nivel -320',
-        codigoDispositivo: 'MS-PORT-204',
-        bateria: 95,
-        contactoEmergencia: '+56 9 8111 2233',
       },
     ],
   };
@@ -838,9 +1316,9 @@ export function buildCompanyUserProfile(
   const roleLabels: Record<UserRole, string> = {
     superadmin: 'Super Administrador de Seguridad Minera',
     admin_minesafe: 'Admin Corporativo MineSafe',
-    admin: 'Administrador / Prevencionista Sernageomin',
-    monotoriador: 'Monotoriador Ambiental',
-    operador: 'Usuario Normal / Operador de Faena',
+    admin: 'Administrador de Empresa',
+    supervisor: 'Supervisor Ambiental',
+    operador: 'Operador de Faena',
   };
   return {
     id: `usr-${Date.now()}-${idx}-${Math.random().toString(36).slice(2, 6)}`,

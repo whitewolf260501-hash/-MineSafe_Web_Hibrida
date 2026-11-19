@@ -83,7 +83,7 @@ service cloud.firestore {
         isValidId(data.id) &&
         data.name is string && data.name.size() >= 1 && data.name.size() <= 120 &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
-        data.role in ['superadmin', 'admin_minesafe', 'admin', 'operador', 'monotoriador'] &&
+        data.role in ['superadmin', 'admin_minesafe', 'admin', 'operador', 'supervisor'] &&
         (!('roleLabel' in data) || (data.roleLabel is string && data.roleLabel.size() <= 80)) &&
         (!('organizationId' in data) || isValidId(data.organizationId)) &&
         (!('rut' in data) || (data.rut is string && data.rut.size() <= 32)) &&

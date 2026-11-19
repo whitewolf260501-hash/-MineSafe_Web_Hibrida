@@ -33,6 +33,10 @@ export interface AlertEnginePersistenceHandlers {
 
 class AlertEngine {
   private activeIncidents: Map<string, ActiveIncident> = new Map();
+  private resolvedSuppressions: Map<
+    string,
+    { severity: 'preventivo' | 'advertencia' | 'critico'; resolvedAt: number }
+  > = new Map();
   private deviceConfigs: Map<string, DeviceThresholdsConfig> = new Map();
   private globalConfig: DeviceThresholdsConfig = DEFAULT_GLOBAL_THRESHOLDS;
 
@@ -154,6 +158,14 @@ class AlertEngine {
       const existingIncident = this.activeIncidents.get(incidentKey);
 
       if (currentLevel !== 'normal') {
+        const suppressed = this.resolvedSuppressions.get(incidentKey);
+        if (suppressed && this.getSeverityRank(currentLevel) <= this.getSeverityRank(suppressed.severity)) {
+          continue;
+        }
+        if (suppressed && this.getSeverityRank(currentLevel) > this.getSeverityRank(suppressed.severity)) {
+          this.resolvedSuppressions.delete(incidentKey);
+        }
+
         const isNewIncident = !existingIncident;
         const hasEscalated =
           Boolean(existingIncident) &&
@@ -227,6 +239,9 @@ class AlertEngine {
           existingIncident.lastValue = val;
         }
       } else {
+        if (this.resolvedSuppressions.has(incidentKey)) {
+          this.resolvedSuppressions.delete(incidentKey);
+        }
         if (existingIncident) {
           const now = Date.now();
           const recoveredRecord: AlertEventRecord = {
@@ -305,12 +320,65 @@ class AlertEngine {
 
   public clearActiveIncidents(): void {
     this.activeIncidents.clear();
+    this.resolvedSuppressions.clear();
+  }
+
+  public markIncidentManuallyResolved(
+    alertOrId: SafetyAlert | string,
+    fallbackDeviceId?: string,
+    fallbackVariable?: string
+  ): void {
+    const validVars = new Set(['pm25', 'mq2', 'temperatura', 'humedad']);
+    const id = typeof alertOrId === 'string' ? alertOrId : alertOrId.id;
+    let deviceId = fallbackDeviceId || (typeof alertOrId === 'object' ? alertOrId.sensorId : '');
+    let varKey = fallbackVariable || '';
+    let severity: 'preventivo' | 'advertencia' | 'critico' = 'critico';
+
+    if (typeof alertOrId === 'object') {
+      severity =
+        alertOrId.severity === 'critico'
+          ? 'critico'
+          : alertOrId.severity === 'preventivo'
+          ? 'preventivo'
+          : 'advertencia';
+      const vLower = (alertOrId.variableName || '').toLowerCase();
+      if (!varKey) {
+        if (vLower.includes('pm2') || vLower.includes('polvo')) varKey = 'pm25';
+        else if (vLower.includes('co') || vLower.includes('mq')) varKey = 'mq2';
+        else if (vLower.includes('temp')) varKey = 'temperatura';
+        else if (vLower.includes('hum')) varKey = 'humedad';
+      }
+    }
+
+    if (id.startsWith('evt_')) {
+      const parts = id.split('_');
+      if (parts.length >= 4) {
+        const parsedVar = parts[parts.length - 2];
+        if (validVars.has(parsedVar)) {
+          varKey = parsedVar;
+          deviceId = parts.slice(1, parts.length - 2).join('_');
+        }
+      }
+    }
+
+    if (deviceId && validVars.has(varKey)) {
+      const incidentKey = `${deviceId}:${varKey}`;
+      const existing = this.activeIncidents.get(incidentKey);
+      if (existing) {
+        severity = existing.severity;
+        this.activeIncidents.delete(incidentKey);
+      }
+      this.resolvedSuppressions.set(incidentKey, {
+        severity,
+        resolvedAt: Date.now(),
+      });
+    }
   }
 
   public syncExistingActiveAlerts(existingAlerts: SafetyAlert[]): void {
     const validVars = new Set(['pm25', 'mq2', 'temperatura', 'humedad']);
     existingAlerts.forEach((a) => {
-      if (a.resolved || !a.id.startsWith('evt_')) return;
+      if (!a.id.startsWith('evt_')) return;
       const parts = a.id.split('_');
       if (parts.length < 4) return;
       const tsStr = parts[parts.length - 1];
@@ -318,6 +386,13 @@ class AlertEngine {
       if (!validVars.has(varKey)) return;
       const deviceId = parts.slice(1, parts.length - 2).join('_');
       const incidentKey = `${deviceId}:${varKey}`;
+      if (a.resolved) {
+        const current = this.activeIncidents.get(incidentKey);
+        if (current && current.id === a.id) {
+          this.activeIncidents.delete(incidentKey);
+        }
+        return;
+      }
       if (!this.activeIncidents.has(incidentKey)) {
         const mappedSeverity: 'preventivo' | 'advertencia' | 'critico' =
           a.severity === 'critico'

@@ -30,10 +30,12 @@ import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspecto
 import {
   assignWorkersToCrew,
   buildCrewMemberFromUser,
+  canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
   canManageContractsAndPayments,
   canManageCrews,
+  canManageOrganizationHierarchy,
   canModifyTargetUser,
   canProvisionUserInOrganization,
   canViewSystemUsersPanel,
@@ -48,11 +50,18 @@ import {
   selectBestLoginProfileForEmail,
 } from '../src/utils/accessControl';
 import {
+  expandHierarchyRowsToEntities,
   getBulkCsvTemplate,
   getBulkJsonBundleTemplate,
   parseBulkCompanyBundle,
   parseBulkInput,
 } from '../src/utils/bulkCompanyImport';
+import {
+  requiresPasswordResetForAccount,
+  validatePasswordPolicy,
+} from '../src/utils/passwordPolicy';
+import { deduplicateActiveSafetyAlerts } from '../src/services/firebase';
+import { alertEngine } from '../src/services/alertEngine';
 import {
   P031_DELIVERABLE_FILENAMES,
   buildSuperAdminDocumentsCatalog,
@@ -66,7 +75,7 @@ import {
   validateChileanRut,
 } from '../src/utils/rut';
 import { ROOT_MARKDOWN_FILES } from '../src/data/generatedDocs';
-import { MiningCrew, Organization, PlatformConfig, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
+import { MiningCrew, Organization, PlatformConfig, SafetyAlert, SensorDevice, TelemetryHistoryPoint, UserProfile } from '../src/types';
 
 const rootDir = process.cwd();
 const readRepoFile = (relPath: string) => fs.readFileSync(path.join(rootDir, relPath), 'utf8');
@@ -727,54 +736,62 @@ async function runTests() {
     },
   ];
 
-  // Tab visibility: empresas enabled for superadmin & admin, hidden for operador & monotoriador
-  const monA = makeUser({ id: 'mon-a', role: 'monotoriador', organizationId: 'org-alpha' });
+  // Tab visibility: empresas enabled for superadmin & admin, hidden for operador & supervisor
+  const monA = makeUser({ id: 'mon-a', role: 'supervisor', organizationId: 'org-alpha' });
   assert.equal(isTabVisibleForUser('empresas', sa, DEFAULT_PLATFORM_CONFIG), true);
   assert.equal(isTabVisibleForUser('empresas', admA, DEFAULT_PLATFORM_CONFIG), true);
   assert.equal(isTabVisibleForUser('empresas', monA, DEFAULT_PLATFORM_CONFIG), false);
   assert.equal(isTabVisibleForUser('empresas', opA, DEFAULT_PLATFORM_CONFIG), false);
 
-  // Admin can create new orgs and edit/delete orgs they own, but NOT default org or third-party orgs
-  assert.equal(canCreateOrEditOrganization(admA, null).allowed, true);
-  assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[1]).allowed, true);
+  // Admin de Empresa is strictly locked to their own Empresa (cannot create/edit/delete organizations)
+  assert.equal(canCreateOrEditOrganization(admA, null).allowed, false);
+  assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[1]).allowed, false);
   assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[0]).allowed, false);
   assert.equal(canCreateOrEditOrganization(admA, ownedOrgs[2]).allowed, false);
   assert.equal(canCreateOrEditOrganization(opA, null).allowed, false);
-  assert.equal(canDeleteOrganization(admA, ownedOrgs[1]).allowed, true);
+  assert.equal(canDeleteOrganization(admA, ownedOrgs[1]).allowed, false);
   assert.equal(canDeleteOrganization(admA, ownedOrgs[0]).allowed, false);
   assert.equal(canDeleteOrganization(admA, ownedOrgs[2]).allowed, false);
 
   assert.deepEqual(
     getAuthorizedOrganizationIds(admA, ownedOrgs),
-    ['org-alpha', 'org-gamma']
+    ['org-alpha']
   );
-  assert.equal(resolveEffectiveOrgId(admA, 'org-gamma', ownedOrgs), 'org-gamma');
+  assert.equal(resolveEffectiveOrgId(admA, 'org-gamma', ownedOrgs), 'org-alpha');
   assert.equal(resolveEffectiveOrgId(admA, 'org-beta', ownedOrgs), 'org-alpha');
-  assert.equal(canProvisionUserInOrganization(admA, 'org-gamma', 'monotoriador', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admA, 'org-alpha', 'supervisor', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admA, 'org-gamma', 'supervisor', ownedOrgs).allowed, false);
   assert.equal(canProvisionUserInOrganization(admA, 'org-beta', 'operador', ownedOrgs).allowed, false);
-  assert.equal(canManageContractsAndPayments(admA, 'org-gamma', ownedOrgs).allowed, true);
+  assert.equal(canManageContractsAndPayments(admA, 'org-alpha', ownedOrgs).allowed, true);
+  assert.equal(canManageContractsAndPayments(admA, 'org-gamma', ownedOrgs).allowed, false);
   assert.equal(canManageContractsAndPayments(admA, 'org-beta', ownedOrgs).allowed, false);
   assert.equal(
-    canModifyTargetUser(admA, makeUser({ id: 'u-gamma', organizationId: 'org-gamma' }), 'admin', ownedOrgs).allowed,
+    canModifyTargetUser(admA, makeUser({ id: 'u-alpha', organizationId: 'org-alpha' }), 'admin', ownedOrgs).allowed,
     true
   );
+  assert.equal(
+    canModifyTargetUser(admA, makeUser({ id: 'u-gamma', organizationId: 'org-gamma' }), 'admin', ownedOrgs).allowed,
+    false
+  );
 
-  // Bulk CSV parsing (comma + semicolon + UTF-8 BOM + quotes + superadmin rejection)
+  // Bulk CSV parsing (comma + semicolon + UTF-8 BOM + quotes + superadmin rejection + legacy alias)
   const usersCsvWithBomAndSuperAdmin = [
     '\uFEFFnombre;email;rut;rol;turno',
     '"Juan Pérez, Jr.";jperez@gamma.cl;16.111.222-4;operador;Turno A',
-    'Ana Silva;asilva@gamma.cl;17.222.333-8;monotoriador;Turno B',
+    'Ana Silva;asilva@gamma.cl;17.222.333-8;supervisor;Turno B',
+    'Luis Legacy;llegacy@gamma.cl;18.444.555-7;monotoriador;Turno C',
     'Intento Escalado;hacker@gamma.cl;19.333.444-K;superadmin;Turno C',
     'Duplicado;jperez@gamma.cl;16.111.222-4;admin;Turno A',
   ].join('\n');
   const parsedUsers = parseBulkInput('users', usersCsvWithBomAndSuperAdmin, {
     organizationId: 'org-gamma',
   });
-  assert.equal(parsedUsers.totalRows, 4);
-  assert.equal(parsedUsers.validRows.length, 2);
+  assert.equal(parsedUsers.totalRows, 5);
+  assert.equal(parsedUsers.validRows.length, 3);
   assert.equal(parsedUsers.invalidRows.length, 2);
   assert.equal(parsedUsers.validRows[0].data.name, 'Juan Pérez, Jr.');
-  assert.equal(parsedUsers.validRows[1].data.role, 'monotoriador');
+  assert.equal(parsedUsers.validRows[1].data.role, 'supervisor');
+  assert.equal(parsedUsers.validRows[2].data.role, 'supervisor');
   assert.ok(parsedUsers.invalidRows[0].errors[0].includes('SuperAdmin'));
 
   // Bulk CSV templates parse cleanly 100%
@@ -813,20 +830,21 @@ async function runTests() {
   assert.equal(bundleParsed.users.validRows.length, 2);
   assert.equal(bundleParsed.sites.validRows.length, 1);
   assert.equal(bundleParsed.rentals.validRows.length, 1);
-  assert.equal(bundleParsed.assignments.validRows.length, 1);
+  assert.ok(bundleParsed.crews.validRows.length >= 1, 'JSON bundle includes crews');
+  assert.ok(bundleParsed.devices.validRows.length >= 2, 'JSON bundle includes gateway & node devices');
 
   console.log('✅ 14. Admin company creation, ownerUid scoping & bulk CSV/JSON import passed');
 
   // ---------------------------------------------------------------------------
-  // 15. Aislamiento estricto por nueva empresa y limitaciones de Operador/Monotoriador
+  // 15. Aislamiento estricto por nueva empresa y limitaciones de Operador/Supervisor
   // ---------------------------------------------------------------------------
   const admB = makeUser({ id: 'adm-b', email: 'adm-b@minesafe.cl', role: 'admin', organizationId: 'org-beta' });
   const admG = makeUser({ id: 'adm-g', email: 'adm-g@gamma.cl', role: 'admin', organizationId: 'org-gamma' });
   const monG = makeUser({
     id: 'mon-g',
     email: 'mon-g@gamma.cl',
-    role: 'monotoriador',
-    roleLabel: 'Monotoriador Ambiental',
+    role: 'supervisor',
+    roleLabel: 'Supervisor Ambiental',
     organizationId: 'org-gamma',
   });
   const opG = makeUser({
@@ -901,7 +919,7 @@ async function runTests() {
   assert.equal(emptyTelemetry.length, 6);
   assert.ok(emptyTelemetry.every((v) => v.value === 0 && v.status === 'desconectado'));
 
-  // Strict role lock for operador & monotoriador even with tampered platformConfig overrides
+  // Strict role lock for operador & supervisor even with tampered platformConfig overrides
   const tamperedOpMonConfig = {
     ...DEFAULT_PLATFORM_CONFIG,
     visibility: {
@@ -933,7 +951,7 @@ async function runTests() {
     assert.equal(
       isTabVisibleForUser(lockedTab, monG, tamperedOpMonConfig),
       false,
-      `Monotoriador blocked from ${lockedTab} even with override`
+      `Supervisor blocked from ${lockedTab} even with override`
     );
     assert.equal(
       isTabVisibleForUser(lockedTab, opG, tamperedOpMonConfig),
@@ -978,13 +996,13 @@ async function runTests() {
     appSrc.includes('createEmptyTelemetryVariables()') && appSrc.includes('resolveScopedCurrentSite('),
     'App.tsx uses neutral scoped fallback helpers'
   );
-  assert.ok(sectorsSrc.includes('canManageSites'), 'MiningSectorsView enforces read-only view for operador/monotoriador');
-  assert.ok(monitoringSrc.includes('canSimulateEvents'), 'MonitoringView hides simulator for operador/monotoriador');
-  assert.ok(emergencySrc.includes('isAdminOrSuper'), 'EmergencyModal hides drill mode for operador/monotoriador');
-  assert.ok(gatewaySecSrc.includes('canOperateHardware'), 'ESP32GatewaySection gates hardware actuators');
+  assert.ok(sectorsSrc.includes('canManageSites'), 'MiningSectorsView enforces read-only view for operador/supervisor');
+  assert.ok(!monitoringSrc.includes('minefase-fc5f5') && !monitoringSrc.includes('assignedTo'), 'MonitoringView hides Firebase DB name and worker-to-sensor assignments');
+  assert.ok(emergencySrc.includes('isAdminOrSuper'), 'EmergencyModal hides drill mode for operador/supervisor');
+  assert.ok(gatewaySecSrc.includes('canControlMineAlarm'), 'ESP32GatewaySection gates alarm actuation by company admin/global admin');
   assert.ok(alertCfgSrc.includes('subscribeToAllThresholdConfigs'), 'AlertConfigurationView subscribes with org/device scope');
 
-  console.log('✅ 15. Cross-company isolation & operador/monotoriador limitations passed');
+  console.log('✅ 15. Cross-company isolation & operador/supervisor limitations passed');
 
   // ---------------------------------------------------------------------------
   // 16. Bloqueo de usuarios despedidos y nueva cuenta con correo anterior en otra empresa
@@ -1009,7 +1027,7 @@ async function runTests() {
   const pendingBetaWorker = makeUser({
     id: 'pend_org_beta_1700600000_ab12',
     email: 'juan.perez@correo.cl',
-    role: 'monotoriador',
+    role: 'supervisor',
     status: 'activo',
     pendingActivation: true,
     organizationId: 'org-beta',
@@ -1106,9 +1124,8 @@ async function runTests() {
   assert.ok(
     loginViewSrc.includes('createNewCompanyAccountWithPreviousEmail') &&
       loginViewSrc.includes('auth/account-recreation-required') &&
-      loginModalSrc.includes('createNewCompanyAccountWithPreviousEmail') &&
-      loginModalSrc.includes('auth/account-recreation-required'),
-    'LoginView and LoginModal expose previous-email new-account flow'
+      loginModalSrc.includes('Credencial'),
+    'LoginView exposes previous-email new-account flow and LoginModal renders digital credential carnet'
   );
   assert.ok(
     bulkViewSrc.includes('pendingActivation'),
@@ -1347,7 +1364,7 @@ async function runTests() {
   assert.equal(canManageContractsAndPayments(admMs, 'org-gamma', ownedOrgs).allowed, true);
 
   assert.equal(canProvisionUserInOrganization(admMs, 'org-gamma', 'admin', ownedOrgs).allowed, true);
-  assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'monotoriador', ownedOrgs).allowed, true);
+  assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'supervisor', ownedOrgs).allowed, true);
   assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'admin_minesafe', ownedOrgs).allowed, false);
   assert.equal(canProvisionUserInOrganization(admMs, 'org-beta', 'superadmin', ownedOrgs).allowed, false);
   assert.equal(canProvisionUserInOrganization(sa, DEFAULT_ORGANIZATION_ID, 'admin_minesafe', ownedOrgs).allowed, true);
@@ -1412,10 +1429,11 @@ async function runTests() {
     organizationId: 'org-alpha',
   });
   assert.equal(canManageCrews(opG, 'org-gamma', ownedOrgs).allowed, false, 'Operador cannot manage crews');
-  assert.equal(canManageCrews(monG, 'org-gamma', ownedOrgs).allowed, false, 'Monotoriador cannot manage crews');
+  assert.equal(canManageCrews(monG, 'org-gamma', ownedOrgs).allowed, false, 'Supervisor cannot manage crews');
   assert.equal(canManageCrews(inactiveAdm, 'org-alpha', ownedOrgs).allowed, false, 'Inactive user cannot manage crews');
   assert.equal(canManageCrews(admG, 'org-gamma', ownedOrgs).allowed, true, 'Admin can manage crews in primary org');
-  assert.equal(canManageCrews(admA, 'org-gamma', ownedOrgs).allowed, true, 'Admin can manage crews in owned org');
+  assert.equal(canManageCrews(admA, 'org-alpha', ownedOrgs).allowed, true, 'Admin Alpha can manage crews in own org');
+  assert.equal(canManageCrews(admA, 'org-gamma', ownedOrgs).allowed, false, 'Admin Alpha cannot manage crews in another org');
   assert.equal(canManageCrews(admG, 'org-beta', ownedOrgs).allowed, false, 'Admin cannot manage crews in non-owned third-party org');
   assert.equal(canManageCrews(admMs, 'org-alpha', ownedOrgs).allowed, true, 'admin_minesafe can manage crews across orgs');
   assert.equal(canManageCrews(sa, 'org-beta', ownedOrgs).allowed, true, 'superadmin can manage crews');
@@ -1435,7 +1453,7 @@ async function runTests() {
     name: 'Elena Soto',
     email: 'esoto@gamma.cl',
     rut: '17.654.321-K',
-    role: 'monotoriador',
+    role: 'supervisor',
     organizationId: 'org-gamma',
   });
 
@@ -1488,6 +1506,7 @@ async function runTests() {
       rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("tipoUsuario').val() === 'admin'") &&
       rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("tipoUsuario').val() === 'admin_minesafe'") &&
       !rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("'operador'") &&
+      !rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("'supervisor'") &&
       !rtdbRules.rules.cuadrillas['$crewId']['.write'].includes("'monotoriador'") &&
       rtdbRules.rules.cuadrillas['$crewId']['.validate'].includes('organizationId'),
     'RTDB /cuadrillas enforces organizationId indexing, admin/corporate allowlist writes, and validation'
@@ -1532,7 +1551,7 @@ async function runTests() {
   assert.equal(canViewSystemUsersPanel(sa), true, 'Superadmin can view system users panel');
   assert.equal(canViewSystemUsersPanel(admMs), true, 'admin_minesafe can view system users panel');
   assert.equal(canViewSystemUsersPanel(admG), true, 'admin can view system users panel');
-  assert.equal(canViewSystemUsersPanel(monG), false, 'monotoriador cannot view system users panel');
+  assert.equal(canViewSystemUsersPanel(monG), false, 'supervisor cannot view system users panel');
   assert.equal(canViewSystemUsersPanel(opG), false, 'operador cannot view system users panel');
   assert.equal(canViewSystemUsersPanel(inactiveAdm), false, 'inactive user cannot view system users panel');
   assert.equal(canViewSystemUsersPanel(null), false, 'null user cannot view system users panel');
@@ -1541,15 +1560,16 @@ async function runTests() {
   const chartAndUsersSrc = readRepoFile('src/components/InteractiveDeviceChartAndUsers.tsx');
 
   assert.ok(
-    chartAndUsersSrc.includes('showSystemUsers') &&
-      chartAndUsersSrc.includes("showSystemUsers ? 'lg:col-span-7' : 'lg:col-span-12'") &&
+    !chartAndUsersSrc.includes('Usuarios del Sistema') &&
       chartAndUsersSrc.includes('{betweenWelcomeAndChart}') &&
-      dashboardViewSrc.includes('betweenWelcomeAndChart={atmosphericAndMetricCards}') &&
-      dashboardViewSrc.includes('canViewSystemUsers={canSeeUsuarios}'),
-    'DashboardView and InteractiveDeviceChartAndUsers enforce non-admin user-panel hiding and atmospheric cards before chart'
+      dashboardViewSrc.includes('betweenWelcomeAndChart={consolidatedAtmosphericSection}') &&
+      dashboardViewSrc.includes('Nodos Activos del Total') &&
+      !dashboardViewSrc.includes('Personal en Turno') &&
+      !dashboardViewSrc.includes('Profundidad Máxima'),
+    'DashboardView and InteractiveDeviceChartAndUsers remove Usuarios del Sistema, Personal en Turno, Profundidad Máxima, and render atmospheric cards before sector chart'
   );
 
-  console.log('✅ 20. Dashboard layout order & Usuarios del Sistema role restriction passed');
+  console.log('✅ 20. Dashboard layout order & streamlined summary cards passed');
 
   // ---------------------------------------------------------------------------
   // 21. Validación RUT chileno mediante Módulo 11
@@ -1656,14 +1676,15 @@ async function runTests() {
 
   const landingPageSrc = readRepoFile('src/components/PublicLanding.tsx');
   const envExampleSrc = readRepoFile('.env.example');
+  const passwordModalSrc = readRepoFile('src/components/PasswordPolicyModal.tsx');
   assert.ok(
     firebaseSvcSrc.includes('params.password.length < 8') &&
       firebaseSvcSrc.includes('params.newPassword.length < 8') &&
       usersViewSrc.includes('newPassword.length < 8') &&
       bulkViewSrc.includes('defaultAuthPassword.length < 8') &&
-      loginViewSrc.includes('newPassword.length < 8') &&
-      loginModalSrc.includes('newPassword.length < 8'),
-    'All password creation/reset/bulk-import paths require minimum 8 characters'
+      loginViewSrc.includes('validatePasswordPolicy') &&
+      passwordModalSrc.includes('validatePasswordPolicy'),
+    'All password creation/reset/bulk-import/policy paths enforce minimum 8-character policy'
   );
   assert.ok(
     landingPageSrc.includes('minesafe99@gmail.com') &&
@@ -1706,10 +1727,147 @@ async function runTests() {
 
   console.log('✅ 23. Control Maestro global text scale & hero title scale passed');
 
+  // ---------------------------------------------------------------------------
+  // 24. Auditoría Integral 6 Módulos (Jerarquía, Landing/Auth, Dashboard, Gateway, Monitoreo, Alertas)
+  // ---------------------------------------------------------------------------
+  // 24.1 Jerarquía Empresa -> Faena -> Cuadrilla -> Sector -> Dispositivo (Gateway | Nodo) y carga masiva
+  assert.equal(canManageOrganizationHierarchy(sa, 'org-beta').allowed, true);
+  assert.equal(canManageOrganizationHierarchy(admMs, 'org-beta').allowed, true);
+  assert.equal(canManageOrganizationHierarchy(admA, 'org-alpha').allowed, true);
+  assert.equal(canManageOrganizationHierarchy(admA, 'org-beta').allowed, false);
+  assert.equal(canManageOrganizationHierarchy(monG, 'org-gamma').allowed, false);
+  assert.equal(canManageOrganizationHierarchy(opG, 'org-gamma').allowed, false);
+
+  const parsedHierarchy = parseBulkInput('hierarchy', getBulkCsvTemplate('hierarchy'), {
+    organizationId: 'org-alpha',
+    defaultCompanyName: 'Minera Alpha S.A.',
+  });
+  assert.equal(parsedHierarchy.invalidRows.length, 0, 'Hierarchy CSV template parses with 0 errors');
+  assert.ok(parsedHierarchy.validRows.length >= 2, 'Hierarchy CSV template includes gateway and node rows');
+  const expanded = expandHierarchyRowsToEntities(
+    parsedHierarchy.validRows.map((r) => r.data),
+    'org-alpha',
+    'Minera Alpha S.A.'
+  );
+  assert.ok(expanded.sites.length >= 1, 'Hierarchy expands MiningSites');
+  assert.ok(expanded.crews.length >= 1, 'Hierarchy expands MiningCrews');
+  assert.ok(expanded.devices.some((d) => d.device.category === 'gateway'), 'Hierarchy includes gateway device');
+  assert.ok(expanded.devices.some((d) => d.device.category === 'nodo'), 'Hierarchy includes nodo device');
+
+  // 24.2 Política de contraseñas, Landing corporativa y tema claro/oscuro
+  assert.equal(validatePasswordPolicy('abc123').valid, false, 'Rejects 6-char legacy password');
+  assert.equal(validatePasswordPolicy('abcdefgh').valid, false, 'Requires uppercase and digit');
+  assert.equal(validatePasswordPolicy('MineSafe2026').valid, true, 'Accepts strong 8+ char password');
+  assert.equal(requiresPasswordResetForAccount('123456').required, true, 'Flags weak password for forced update');
+  assert.equal(requiresPasswordResetForAccount('MineSafe2026', { mustChangePassword: true }).required, true, 'Flags mustChangePassword flag');
+  assert.equal(requiresPasswordResetForAccount('MineSafe2026', { mustChangePassword: false }).required, false, 'Strong active password passes');
+  assert.ok(
+    !/prototipo|proyecto de título|universitario/i.test(landingPageSrc) &&
+      landingPageSrc.includes('Empresa o Institución') &&
+      landingPageSrc.includes('onToggleTheme'),
+    'Landing removes university/prototype copy, uses Empresa o Institución, and exposes theme toggle'
+  );
+
+  // 24.3 Dashboard: sin Ventilación/Ruido/Oxígeno ni Prevencionista
+  assert.ok(
+    !chartAndUsersSrc.includes('Ventilación') &&
+      !chartAndUsersSrc.includes('Ruido') &&
+      !chartAndUsersSrc.includes('Oxígeno') &&
+      !dashboardViewSrc.includes('Prevencionista'),
+    'Dashboard and bar chart eliminate Ventilación, Ruido, Oxígeno, and Prevencionista'
+  );
+
+  // 24.4 Gateway & Alarma: Admin de empresa controla alarma propia y propaga a nodos, sin Resetear/Encender Luz
+  assert.equal(canControlMineAlarm(admA, 'org-alpha').allowed, true, 'Company admin can control own org alarm');
+  assert.equal(canControlMineAlarm(admA, 'org-beta').allowed, false, 'Company admin cannot control other org alarm');
+  assert.equal(canControlMineAlarm(sa, 'org-beta').allowed, true, 'SuperAdmin can control any org alarm');
+  assert.equal(canControlMineAlarm(monA, 'org-alpha').allowed, false, 'Supervisor cannot control alarm');
+  assert.equal(canControlMineAlarm(opA, 'org-alpha').allowed, false, 'Operador cannot control alarm');
+  assert.ok(
+    !gatewaySecSrc.includes('Resetear Página') &&
+      !gatewaySecSrc.includes('Encender Luz') &&
+      !gatewaySecSrc.includes('ESP-WROOM-32'),
+    'ESP32GatewaySection hides Resetear Página, Encender Luz, and raw ESP32 identifiers'
+  );
+
+  // 24.5 Alertas: sin Probar Sirena, deduplicación, supresión tras cierre manual, detalle in-place, rango de fechas
+  const resolutionModalSrc = readRepoFile('src/components/AlertResolutionModal.tsx');
+  assert.ok(
+    !alertsViewSrc.includes('Probar Sirena') &&
+      alertsViewSrc.includes('alertToInspect') &&
+      alertsViewSrc.includes('auditDateFrom') &&
+      alertsViewSrc.includes('auditDateTo'),
+    'AlertsView removes Probar Sirena, adds in-place detail modal, and date-range filters in Auditoría'
+  );
+  assert.ok(
+    resolutionModalSrc.includes('MIN_TITLE_LEN') && resolutionModalSrc.includes('MIN_COMMENT_LEN'),
+    'AlertResolutionModal enforces minimum character lengths'
+  );
+
+  const dupA: SafetyAlert = {
+    id: 'alt-dup-1',
+    code: 'ALT-1',
+    organizationId: 'org-alpha',
+    title: 'CO Alto',
+    severity: 'critico',
+    variableName: 'Gases MQ-2 (ADC)',
+    sensorId: 'dev-1',
+    sensorCode: 'DEV-1',
+    sectorName: 'Sector Norte',
+    recordedValue: '1300 ADC',
+    safeLimit: '< 1200 ADC',
+    timestamp: '18/11/2026 10:00',
+    timestampMs: 1_700_000_000_000,
+    acknowledged: false,
+    resolved: false,
+    suggestedAction: 'Evacuar',
+  };
+  const dupB: SafetyAlert = {
+    ...dupA,
+    id: 'alt-dup-2',
+    code: 'ALT-2',
+    acknowledged: true,
+    timestampMs: 1_700_000_005_000,
+  };
+  const deduped = deduplicateActiveSafetyAlerts([dupA, dupB]);
+  assert.equal(deduped.length, 1, 'deduplicateActiveSafetyAlerts collapses duplicate active alerts');
+  assert.equal(deduped[0].acknowledged, true, 'deduplicateActiveSafetyAlerts preserves acknowledged state');
+
+  // Supresión en alertEngine al resolver manualmente (no re-crea inmediatamente la misma alerta)
+  alertEngine.clearActiveIncidents();
+  const suppressedDev = makeDevice({ id: 'dev_supp', rawTemp: 41 });
+  alertEngine.setDeviceConfig('dev_supp', {
+    dispositivo_id: 'dev_supp',
+    pm25: { activo: true, notificaciones: true, preventivo: 350, advertencia: 750, critico: 1200, unidad: 'ADC', minVal: 0, maxVal: 4095, label: 'PM2.5' },
+    mq2: { activo: true, notificaciones: true, preventivo: 300, advertencia: 800, critico: 1200, unidad: 'ADC', minVal: 0, maxVal: 4095, label: 'MQ-2' },
+    temperatura: { activo: true, notificaciones: true, preventivo: 26, advertencia: 32, critico: 38, unidad: '°C', minVal: -20, maxVal: 80, label: 'Temperatura' },
+    humedad: { activo: true, notificaciones: true, preventivo: 70, advertencia: 80, critico: 90, unidad: '%', minVal: 0, maxVal: 100, label: 'Humedad' },
+    actualizado_en: Date.now(),
+    actualizado_por: 'Test',
+  });
+  const firstCrit = alertEngine.processDeviceTelemetry(suppressedDev);
+  assert.equal(firstCrit.newEvents.length, 1, 'Generates initial critical temp event');
+  alertEngine.markIncidentManuallyResolved({
+    ...dupA,
+    id: firstCrit.newEvents[0].id,
+    sensorId: 'dev_supp',
+    sensorCode: 'dev_supp',
+    variableName: 'Temperatura',
+    severity: 'critico',
+  });
+  const afterManualClose = alertEngine.processDeviceTelemetry(suppressedDev);
+  assert.equal(afterManualClose.newEvents.length, 0, 'Does not duplicate alert immediately after manual resolution');
+
+  console.log('✅ 24. All 6 audit modules (hierarchy, auth/landing, dashboard, gateway, monitoring, alerts) passed');
+
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }
 
-runTests().catch((err) => {
-  console.error('❌ P031 suite failed:', err);
-  process.exit(1);
-});
+runTests()
+  .then(() => {
+    process.exit(0);
+  })
+  .catch((err) => {
+    console.error('❌ P031 suite failed:', err);
+    process.exit(1);
+  });

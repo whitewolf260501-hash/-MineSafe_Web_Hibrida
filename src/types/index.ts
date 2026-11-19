@@ -15,6 +15,7 @@ export interface Organization {
 }
 
 export interface TelemetryHistoryPoint {
+  deviceId?: string;
   timestamp: number;
   co: number | null;
   pm25: number | null;
@@ -69,9 +70,14 @@ export interface SensorDevice {
   name: string;
   type: 'multigas_portatil' | 'estacion_fija' | 'flujo_ventilacion' | 'sensor_geomecanico' | 'camara_termica';
   organizationId?: string;
+  siteId?: string;
+  siteName?: string;
+  crewId?: string;
+  crewName?: string;
   sectorId: string;
   sectorName: string;
   batteryPct: number;
+  batteryReported?: boolean;
   signalStrength: 'optima' | 'media' | 'debil' | 'sin_conexion';
   lastPing: string;
   status: AlertSeverity;
@@ -148,6 +154,9 @@ export interface MiningSector {
   id: string;
   name: string;
   code: string;
+  siteId?: string;
+  crewId?: string;
+  crewName?: string;
   depthMeters: number;
   type: 'socavon' | 'piquepal' | 'galeria_extraccion' | 'taller_mantencion' | 'chimenea_ventilacion';
   activeWorkers: number;
@@ -212,6 +221,7 @@ export interface SafetyAlert {
   safeLimit: string;
   timestamp: string;
   timestampMs?: number;
+  createdAtMs?: number;
   acknowledged: boolean;
   acknowledgedBy?: string;
   acknowledgedAt?: number;
@@ -288,7 +298,7 @@ export interface WorkerAssignment {
   emergencyContact: string;
 }
 
-export type UserRole = 'superadmin' | 'admin_minesafe' | 'admin' | 'operador' | 'monotoriador';
+export type UserRole = 'superadmin' | 'admin_minesafe' | 'admin' | 'operador' | 'supervisor';
 
 export interface UserProfile {
   id: string;
@@ -307,8 +317,16 @@ export interface UserProfile {
   pendingActivation?: boolean;
   claimedFromKey?: string;
   lastLogin?: string;
+  assignedSiteId?: string;
+  assignedSiteName?: string;
+  assignedCrewId?: string;
+  assignedCrewName?: string;
   assignedSector?: string;
+  assignedSectors?: string[];
   assignedDeviceCode?: string;
+  mustChangePassword?: boolean;
+  passwordPolicyVersion?: number;
+  passwordUpdatedAt?: number;
 }
 
 export type ControllableTab =
@@ -335,7 +353,7 @@ export interface PlatformVisibilityConfig {
     admin_minesafe?: Record<ControllableTab, boolean>;
     admin: Record<ControllableTab, boolean>;
     operador: Record<ControllableTab, boolean>;
-    monotoriador: Record<ControllableTab, boolean>;
+    supervisor: Record<ControllableTab, boolean>;
   };
   userOverrides: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
   userOverridesByEmail?: Record<string, Partial<Record<ControllableTab, WindowOverrideValue>>>;
@@ -343,7 +361,7 @@ export interface PlatformVisibilityConfig {
     admin_minesafe?: Record<EquiposSubTab, boolean>;
     admin: Record<EquiposSubTab, boolean>;
     operador: Record<EquiposSubTab, boolean>;
-    monotoriador: Record<EquiposSubTab, boolean>;
+    supervisor: Record<EquiposSubTab, boolean>;
   };
   equiposSubTabUserOverrides?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
   equiposSubTabUserOverridesByEmail?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
@@ -403,18 +421,24 @@ export interface PlatformAppearanceConfig {
   allowEmergencyButtonForOperador: boolean;
 }
 
-export type DeviceCategory = 'sensor' | 'gateway' | 'gateway_sensor';
+export type DeviceCategory = 'sensor' | 'nodo' | 'gateway' | 'gateway_sensor';
 
 export interface RegisteredDeviceConfig {
   id: string;
   organizationId?: string;
+  siteId?: string;
+  siteName?: string;
+  crewId?: string;
+  crewName?: string;
+  sectorId?: string;
   name: string;
   category: DeviceCategory;
   sectorName: string;
   parentGatewayId?: string;
   localIp?: string;
-  enabled: boolean;
-  createdAt: number;
+  enabled?: boolean;
+  active?: boolean;
+  createdAt?: number;
 }
 
 export interface PlatformConfig {

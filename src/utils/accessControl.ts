@@ -22,17 +22,7 @@ export function isOrganizationOwner(
   org: Pick<Organization, 'id' | 'ownerId' | 'ownerUid' | 'ownerEmail'> | null | undefined
 ): boolean {
   if (!actingUser || actingUser.status !== 'activo' || !org) return false;
-  if (actingUser.role === 'superadmin') return true;
-  if (actingUser.role !== 'admin') return false;
-  if (org.ownerUid && org.ownerUid === actingUser.id) return true;
-  if (org.ownerId && org.ownerId === actingUser.id) return true;
-  if (
-    org.ownerEmail &&
-    actingUser.email &&
-    org.ownerEmail.trim().toLowerCase() === actingUser.email.trim().toLowerCase()
-  ) {
-    return true;
-  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) return true;
   return false;
 }
 
@@ -46,31 +36,20 @@ export function getAuthorizedOrganizationIds(
     const allIds = (organizations || []).map((o) => o.id).filter(Boolean);
     return Array.from(new Set([primaryOrg, ...allIds]));
   }
-  if (actingUser.role !== 'admin') {
-    return [primaryOrg];
-  }
-  const ownedIds = (organizations || [])
-    .filter((org) => isOrganizationOwner(actingUser, org))
-    .map((org) => org.id);
-  return Array.from(new Set([primaryOrg, ...ownedIds]));
+  // Admin de Empresa, Supervisor y Operador quedan estrictamente restringidos a su propia Empresa
+  return [primaryOrg];
 }
 
 export function isOrgAuthorizedForUser(
   actingUser: UserProfile | null | undefined,
   targetOrgId: string | undefined,
-  organizations?: Organization[]
+  _organizations?: Organization[]
 ): boolean {
   if (!actingUser || actingUser.status !== 'activo') return false;
   if (isGlobalMineSafeAdmin(actingUser.role)) return true;
   const normalizedTarget = targetOrgId || DEFAULT_ORGANIZATION_ID;
   const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
-  if (normalizedTarget === actorOrg) return true;
-  if (actingUser.role === 'admin' && Array.isArray(organizations) && organizations.length > 0) {
-    return organizations.some(
-      (org) => org.id === normalizedTarget && isOrganizationOwner(actingUser, org)
-    );
-  }
-  return false;
+  return normalizedTarget === actorOrg;
 }
 
 export function canCreateOrEditOrganization(
@@ -83,30 +62,19 @@ export function canCreateOrEditOrganization(
   if (actingUser.role === 'superadmin') {
     return { allowed: true };
   }
-  if (actingUser.role !== 'admin' && actingUser.role !== 'admin_minesafe') {
-    return {
-      allowed: false,
-      reason: 'Solo Administradores o SuperAdministrador pueden crear o administrar empresas.',
-    };
-  }
-  if (!existingOrg) {
-    return { allowed: true };
-  }
-  if (existingOrg.id === DEFAULT_ORGANIZATION_ID) {
-    return {
-      allowed: false,
-      reason: 'Solo el SuperAdministrador puede modificar los datos de la organización principal.',
-    };
-  }
   if (actingUser.role === 'admin_minesafe') {
-    return { allowed: true };
-  }
-  if (isOrganizationOwner(actingUser, existingOrg)) {
+    if (existingOrg && existingOrg.id === DEFAULT_ORGANIZATION_ID) {
+      return {
+        allowed: false,
+        reason: 'Solo el SuperAdministrador puede modificar los datos de la organización principal.',
+      };
+    }
     return { allowed: true };
   }
   return {
     allowed: false,
-    reason: 'Acción denegada: solo puedes editar empresas creadas por tu cuenta.',
+    reason:
+      'Solo SuperAdmin o Admin MineSafe pueden crear o modificar empresas. Un Administrador de Empresa solo gestiona la jerarquía interna de su propia organización.',
   };
 }
 
@@ -132,31 +100,73 @@ export function canDeleteOrganization(
       reason: 'El rol Admin MineSafe puede suspender o editar empresas cliente, pero solo el SuperAdministrador puede eliminarlas permanentemente.',
     };
   }
-  if (actingUser.role === 'admin' && isOrganizationOwner(actingUser, org)) {
+  return {
+    allowed: false,
+    reason: 'Solo el SuperAdministrador puede eliminar empresas.',
+  };
+}
+
+export function canManageOrganizationHierarchy(
+  actingUser: UserProfile | null | undefined,
+  targetOrgId?: string,
+  _organizations?: Organization[]
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
     return { allowed: true };
+  }
+  if (actingUser.role === 'admin') {
+    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+    if (!targetOrgId || targetOrgId === actorOrg) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: 'Un Administrador de Empresa solo puede gestionar cuadrillas, sectores y dispositivos dentro de su propia empresa.',
+    };
   }
   return {
     allowed: false,
-    reason: 'Solo el SuperAdministrador o el Administrador propietario puede eliminar esta empresa.',
+    reason: 'Solo Administradores autorizados pueden gestionar la jerarquía organizacional.',
+  };
+}
+
+export function canControlMineAlarm(
+  actingUser: UserProfile | null | undefined,
+  targetOrgId?: string
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  if (actingUser.role === 'admin') {
+    const actorOrg = actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
+    if (!targetOrgId || targetOrgId === 'all' || targetOrgId === actorOrg) {
+      return { allowed: true };
+    }
+    return {
+      allowed: false,
+      reason: 'Un Administrador de Empresa solo puede controlar la alarma de su propia empresa minera.',
+    };
+  }
+  return {
+    allowed: false,
+    reason: 'Solo el Administrador de la empresa minera (o administración autorizada) puede activar o apagar alarmas.',
   };
 }
 
 export function resolveEffectiveOrgId(
   actingUser: UserProfile | null,
   selectedOrgId: string,
-  organizations?: Organization[]
+  _organizations?: Organization[]
 ): string {
   if (!actingUser) return DEFAULT_ORGANIZATION_ID;
   if (isGlobalMineSafeAdmin(actingUser.role)) {
     return selectedOrgId || 'all';
-  }
-  if (
-    actingUser.role === 'admin' &&
-    selectedOrgId &&
-    selectedOrgId !== 'all' &&
-    isOrgAuthorizedForUser(actingUser, selectedOrgId, organizations)
-  ) {
-    return selectedOrgId;
   }
   return actingUser.organizationId || DEFAULT_ORGANIZATION_ID;
 }
@@ -553,7 +563,7 @@ export function canManageCrews(
   if (!isAnyAdminRole(actingUser!.role)) {
     return {
       allowed: false,
-      reason: 'Permisos insuficientes: Operadores y Monotoriadores no pueden crear ni modificar cuadrillas.',
+      reason: 'Permisos insuficientes: Operadores y Supervisores no pueden crear ni modificar cuadrillas.',
     };
   }
   if (actingUser!.role === 'admin' && targetOrgId) {
@@ -576,7 +586,7 @@ export function buildCrewMemberFromUser(
     userId: user.id,
     name: user.name,
     rut: user.rut || 'Sin RUT',
-    role: user.roleLabel || (user.role === 'monotoriador' ? 'Monotoriador Ambiental' : 'Operador de Faena'),
+    role: user.roleLabel || (user.role === 'supervisor' ? 'Supervisor Ambiental' : 'Operador de Faena'),
     email: user.email,
     assignedDeviceCode: user.assignedDeviceCode || undefined,
     isLeader: Boolean(options?.isLeader),

@@ -12,6 +12,8 @@ import {
   CheckCircle2,
   Fingerprint,
   UserPlus,
+  Sun,
+  Moon,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import {
@@ -20,17 +22,25 @@ import {
   sendPasswordResetWithFirebase,
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
+import {
+  requiresPasswordResetForAccount,
+  validatePasswordPolicy,
+} from '../utils/passwordPolicy';
 
 interface LoginViewProps {
-  onLoginSuccess: (user: UserProfile) => void;
+  onLoginSuccess: (user: UserProfile, mustUpdatePasswordReason?: string) => void;
   onBackToLanding: () => void;
   externalAuthError?: string | null;
+  theme?: 'dark' | 'light';
+  onToggleTheme?: () => void;
 }
 
 export const LoginView: React.FC<LoginViewProps> = ({
   onLoginSuccess,
   onBackToLanding,
   externalAuthError,
+  theme = 'dark',
+  onToggleTheme,
 }) => {
   const [mode, setMode] = useState<'login' | 'recover' | 'recreate'>('login');
   const [email, setEmail] = useState('');
@@ -69,7 +79,8 @@ export const LoginView: React.FC<LoginViewProps> = ({
     try {
       const authenticatedUser = await loginWithFirebaseAuth(cleanEmail, password, rememberMe);
       soundAlert.playFeedbackBeep();
-      onLoginSuccess(authenticatedUser);
+      const policyReq = requiresPasswordResetForAccount(password, authenticatedUser);
+      onLoginSuccess(authenticatedUser, policyReq.required ? policyReq.reason : undefined);
     } catch (err: any) {
       soundAlert.playFeedbackBeep();
       if (err?.code === 'auth/account-recreation-required') {
@@ -102,8 +113,9 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setErrorMessage('Ingresa tu contraseña anterior para validar tu identidad.');
       return;
     }
-    if (newPassword.length < 8) {
-      setErrorMessage('La nueva contraseña debe tener al menos 8 caracteres.');
+    const policyCheck = validatePasswordPolicy(newPassword);
+    if (!policyCheck.valid) {
+      setErrorMessage(policyCheck.errors[0] || 'La nueva contraseña no cumple la política de seguridad.');
       return;
     }
     if (newPassword !== confirmNewPassword) {
@@ -161,7 +173,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
     'focus:outline-none focus-visible:ring-2 focus-visible:ring-[#0D9488] focus-visible:ring-offset-2 focus-visible:ring-offset-white';
 
   return (
-    <div className="min-h-screen bg-[#F8FAFC] text-[#0F172A] flex flex-col font-sans selection:bg-[#0D9488] selection:text-[#FFFFFF]">
+    <div className="min-h-screen bg-[#F8FAFC] dark:bg-[#060b13] text-[#0F172A] dark:text-slate-100 flex flex-col font-sans selection:bg-[#0D9488] selection:text-[#FFFFFF] transition-colors">
       {/* Barra superior azul grafito coherente con la portada */}
       <header className="bg-[#131E31] border-b border-[#253349] text-[#F8FAFC]">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 h-16 flex items-center justify-between gap-4">
@@ -178,23 +190,45 @@ export const LoginView: React.FC<LoginViewProps> = ({
             </span>
           </button>
 
-          <button
-            type="button"
-            onClick={onBackToLanding}
-            className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold text-[#E2E8F0] bg-[#1E293B] hover:bg-[#334155] border border-[#334155] transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#14B8A6]"
-          >
-            <ArrowLeft className="w-4 h-4 text-[#2DD4BF]" />
-            <span>Volver a la portada</span>
-          </button>
+          <div className="flex items-center gap-2">
+            {onToggleTheme && (
+              <button
+                type="button"
+                onClick={onToggleTheme}
+                aria-label={theme === 'dark' ? 'Cambiar a modo claro' : 'Cambiar a modo oscuro'}
+                className="inline-flex items-center gap-1.5 px-3 py-2 rounded-lg text-xs font-semibold text-[#E2E8F0] bg-[#1E293B] hover:bg-[#334155] border border-[#334155] transition-colors cursor-pointer"
+              >
+                {theme === 'dark' ? (
+                  <>
+                    <Sun className="w-4 h-4 text-amber-400" />
+                    <span className="hidden sm:inline">Claro</span>
+                  </>
+                ) : (
+                  <>
+                    <Moon className="w-4 h-4 text-[#2DD4BF]" />
+                    <span className="hidden sm:inline">Oscuro</span>
+                  </>
+                )}
+              </button>
+            )}
+            <button
+              type="button"
+              onClick={onBackToLanding}
+              className="inline-flex items-center gap-1.5 px-3.5 py-2 rounded-lg text-xs sm:text-sm font-semibold text-[#E2E8F0] bg-[#1E293B] hover:bg-[#334155] border border-[#334155] transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-[#14B8A6]"
+            >
+              <ArrowLeft className="w-4 h-4 text-[#2DD4BF]" />
+              <span>Volver a la portada</span>
+            </button>
+          </div>
         </div>
       </header>
 
       {/* Contenedor central de acceso */}
       <main className="flex-1 flex items-center justify-center px-4 py-10 sm:py-14">
         <div className="w-full max-w-md space-y-5">
-          <div className="bg-[#FFFFFF] border border-[#E2E8F0] rounded-2xl shadow-sm p-6 sm:p-8 space-y-5">
+          <div className="bg-[#FFFFFF] dark:bg-slate-900 border border-[#E2E8F0] dark:border-slate-800 rounded-2xl shadow-sm p-6 sm:p-8 space-y-5">
             <div className="flex items-start gap-3">
-              <div className="w-10 h-10 rounded-xl bg-[#F0FDFA] border border-[#99F6E4] text-[#0F766E] flex items-center justify-center shrink-0">
+              <div className="w-10 h-10 rounded-xl bg-[#F0FDFA] dark:bg-teal-950/60 border border-[#99F6E4] dark:border-teal-800 text-[#0F766E] dark:text-[#2DD4BF] flex items-center justify-center shrink-0">
                 {mode === 'recreate' ? (
                   <UserPlus className="w-5 h-5" />
                 ) : (
@@ -202,14 +236,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 )}
               </div>
               <div>
-                <h1 className="text-xl font-extrabold tracking-tight text-[#0F172A]">
+                <h1 className="text-xl font-extrabold tracking-tight text-[#0F172A] dark:text-white">
                   {mode === 'login'
                     ? 'Acceso al panel MineSafe'
                     : mode === 'recreate'
                     ? 'Nueva cuenta con correo anterior'
                     : 'Recuperar contraseña'}
                 </h1>
-                <p className="text-xs sm:text-sm text-[#475569] mt-0.5">
+                <p className="text-xs sm:text-sm text-[#475569] dark:text-slate-400 mt-0.5">
                   {mode === 'login'
                     ? 'Ingresa con la cuenta asignada por el responsable de tu organización.'
                     : mode === 'recreate'
@@ -242,7 +276,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             {mode === 'login' ? (
               <form onSubmit={handleSubmitLogin} className="space-y-4">
                 <div>
-                  <label htmlFor="login-email" className="block text-xs font-semibold text-[#334155] mb-1.5">
+                  <label htmlFor="login-email" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1.5">
                     Correo electrónico
                   </label>
                   <div className="relative">
@@ -255,13 +289,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="usuario@organizacion.cl"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                   </div>
                 </div>
 
                 <div>
-                  <label htmlFor="login-password" className="block text-xs font-semibold text-[#334155] mb-1.5">
+                  <label htmlFor="login-password" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1.5">
                     Contraseña
                   </label>
                   <div className="relative">
@@ -275,7 +309,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="Ingresa tu contraseña"
                       value={password}
                       onChange={(e) => setPassword(e.target.value)}
-                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                     <button
                       type="button"
@@ -345,7 +379,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
 
                 <div>
-                  <label htmlFor="recreate-email" className="block text-xs font-semibold text-[#334155] mb-1">
+                  <label htmlFor="recreate-email" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1">
                     Correo electrónico anterior (autorizado en la nueva empresa)
                   </label>
                   <div className="relative">
@@ -358,14 +392,14 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="correo@ejemplo.cl"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                   </div>
                 </div>
 
                 <div>
                   <div className="flex items-center justify-between mb-1">
-                    <label htmlFor="recreate-prev-password" className="block text-xs font-semibold text-[#334155]">
+                    <label htmlFor="recreate-prev-password" className="block text-xs font-semibold text-[#334155] dark:text-slate-300">
                       Contraseña de tu cuenta anterior
                     </label>
                     <button
@@ -390,7 +424,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="Contraseña anterior para validar identidad"
                       value={previousPassword}
                       onChange={(e) => setPreviousPassword(e.target.value)}
-                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                     <button
                       type="button"
@@ -404,7 +438,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
 
                 <div>
-                  <label htmlFor="recreate-new-password" className="block text-xs font-semibold text-[#334155] mb-1">
+                  <label htmlFor="recreate-new-password" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1">
                     Nueva contraseña para esta empresa (mín. 8 caracteres)
                   </label>
                   <div className="relative">
@@ -418,7 +452,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="Define una nueva contraseña"
                       value={newPassword}
                       onChange={(e) => setNewPassword(e.target.value)}
-                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-10 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                     <button
                       type="button"
@@ -432,7 +466,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                 </div>
 
                 <div>
-                  <label htmlFor="recreate-confirm-password" className="block text-xs font-semibold text-[#334155] mb-1">
+                  <label htmlFor="recreate-confirm-password" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1">
                     Confirmar nueva contraseña
                   </label>
                   <input
@@ -444,7 +478,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                     placeholder="Repite tu nueva contraseña"
                     value={confirmNewPassword}
                     onChange={(e) => setConfirmNewPassword(e.target.value)}
-                    className={`w-full px-3.5 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                    className={`w-full px-3.5 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                   />
                 </div>
 
@@ -486,7 +520,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             ) : (
               <form onSubmit={handleSubmitRecover} className="space-y-4">
                 <div>
-                  <label htmlFor="recover-email" className="block text-xs font-semibold text-[#334155] mb-1.5">
+                  <label htmlFor="recover-email" className="block text-xs font-semibold text-[#334155] dark:text-slate-300 mb-1.5">
                     Correo electrónico registrado
                   </label>
                   <div className="relative">
@@ -499,7 +533,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
                       placeholder="usuario@organizacion.cl"
                       value={email}
                       onChange={(e) => setEmail(e.target.value)}
-                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] border border-[#CBD5E1] rounded-lg text-[#0F172A] placeholder-[#94A3B8] ${focusRing}`}
+                      className={`w-full pl-10 pr-3.5 py-2.5 text-sm bg-[#FFFFFF] dark:bg-slate-950 border border-[#CBD5E1] dark:border-slate-700 rounded-lg text-[#0F172A] dark:text-white placeholder-[#94A3B8] dark:placeholder-slate-500 ${focusRing}`}
                     />
                   </div>
                 </div>

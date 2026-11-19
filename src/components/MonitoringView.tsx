@@ -1,32 +1,38 @@
-import React, { useState } from 'react';
-import { 
-  Radio, 
-  Search, 
-  Filter, 
-  Battery, 
-  Wifi, 
-  AlertTriangle, 
-  CheckCircle, 
-  XCircle, 
-  Layers, 
-  Thermometer, 
-  Wind, 
-  Flame, 
-  Droplets,
-  Activity,
-  Play,
+import React, { useMemo, useState } from 'react';
+import {
+  Radio,
+  Search,
+  Battery,
+  Wifi,
+  Flame,
   RotateCcw,
-  User,
   Sliders,
-  X
+  X,
+  Building2,
+  MapPin,
+  Users,
+  Server,
+  Cpu,
 } from 'lucide-react';
-import { SensorDevice, MiningSite, AlertSeverity, UserProfile } from '../types';
+import {
+  SensorDevice,
+  MiningSite,
+  MiningCrew,
+  Organization,
+  AlertSeverity,
+  UserProfile,
+} from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { isAnyAdminRole } from '../utils/accessControl';
+import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 
 interface MonitoringViewProps {
   devices: SensorDevice[];
   currentSite: MiningSite;
+  sites?: MiningSite[];
+  crews?: MiningCrew[];
+  organizations?: Organization[];
+  activeOrganizationId?: string;
+  onSelectOrganization?: (orgId: string) => void;
   currentUser?: UserProfile | null;
   selectedSensorId: string | null;
   onSelectSensor: (sensorId: string | null) => void;
@@ -37,6 +43,11 @@ interface MonitoringViewProps {
 export const MonitoringView: React.FC<MonitoringViewProps> = ({
   devices,
   currentSite,
+  sites = [],
+  crews = [],
+  organizations = [],
+  activeOrganizationId = 'all',
+  onSelectOrganization,
   currentUser,
   selectedSensorId,
   onSelectSensor,
@@ -44,29 +55,127 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   onResetSensor,
 }) => {
   const canSimulateEvents = isAnyAdminRole(currentUser?.role);
+  const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser?.role);
+  const isCompanyAdmin = currentUser?.role === 'admin';
+
   const [searchQuery, setSearchQuery] = useState('');
+  const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>('all');
+  const [selectedCrewFilter, setSelectedCrewFilter] = useState<string>('all');
   const [selectedSector, setSelectedSector] = useState<string>('all');
   const [selectedStatus, setSelectedStatus] = useState<string>('all');
-  const [selectedType, setSelectedType] = useState<string>('all');
+  const [selectedCategory, setSelectedCategory] = useState<'all' | 'gateway' | 'nodo'>('all');
 
-  const selectedDevice = devices.find(d => d.id === selectedSensorId);
+  const selectedDevice = devices.find((d) => d.id === selectedSensorId);
 
-  // Available sectors from devices
-  const availableSectors = Array.from(new Set(devices.map(d => d.sectorName))).filter(Boolean);
+  // Build available hierarchy options from props + live devices
+  const availableSites = useMemo(() => {
+    const map = new Map<string, string>();
+    sites.forEach((s) => {
+      if (s.id && s.name) map.set(s.id, s.name);
+    });
+    devices.forEach((d) => {
+      const id = d.siteId || d.siteName;
+      const name = d.siteName || d.siteId;
+      if (id && name && !map.has(id)) map.set(id, name);
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [sites, devices]);
 
-  // Filter devices
-  const filteredDevices = devices.filter((device) => {
-    const matchesSearch = 
-      device.code.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      device.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      (device.assignedTo && device.assignedTo.toLowerCase().includes(searchQuery.toLowerCase()));
-    
-    const matchesSector = selectedSector === 'all' || device.sectorId === selectedSector || device.sectorName === selectedSector;
-    const matchesStatus = selectedStatus === 'all' || device.status === selectedStatus;
-    const matchesType = selectedType === 'all' || device.type === selectedType;
+  const availableCrews = useMemo(() => {
+    const map = new Map<string, string>();
+    crews.forEach((c) => {
+      if (selectedSiteFilter !== 'all' && c.siteId && c.siteId !== selectedSiteFilter) return;
+      if (c.id && c.name) map.set(c.id, c.name);
+    });
+    devices.forEach((d) => {
+      if (
+        selectedSiteFilter !== 'all' &&
+        d.siteId !== selectedSiteFilter &&
+        d.siteName !== selectedSiteFilter
+      ) {
+        return;
+      }
+      const id = d.crewId || d.crewName;
+      const name = d.crewName || d.crewId;
+      if (id && name && !map.has(id)) map.set(id, name);
+    });
+    return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
+  }, [crews, devices, selectedSiteFilter]);
 
-    return matchesSearch && matchesSector && matchesStatus && matchesType;
-  });
+  const availableSectors = useMemo(() => {
+    const set = new Set<string>();
+    devices.forEach((d) => {
+      if (
+        selectedSiteFilter !== 'all' &&
+        d.siteId !== selectedSiteFilter &&
+        d.siteName !== selectedSiteFilter
+      ) {
+        return;
+      }
+      if (
+        selectedCrewFilter !== 'all' &&
+        d.crewId !== selectedCrewFilter &&
+        d.crewName !== selectedCrewFilter
+      ) {
+        return;
+      }
+      if (d.sectorName?.trim()) set.add(d.sectorName.trim());
+    });
+    return Array.from(set).sort((a, b) => a.localeCompare(b));
+  }, [devices, selectedSiteFilter, selectedCrewFilter]);
+
+  // Filter devices (by hierarchy & status — never by worker name)
+  const filteredDevices = useMemo(() => {
+    const q = searchQuery.trim().toLowerCase();
+    return devices.filter((device) => {
+      const matchesSearch =
+        !q ||
+        device.name.toLowerCase().includes(q) ||
+        (device.sectorName || '').toLowerCase().includes(q) ||
+        (device.siteName || '').toLowerCase().includes(q) ||
+        (device.crewName || '').toLowerCase().includes(q);
+
+      const matchesSite =
+        selectedSiteFilter === 'all' ||
+        device.siteId === selectedSiteFilter ||
+        device.siteName === selectedSiteFilter;
+
+      const matchesCrew =
+        selectedCrewFilter === 'all' ||
+        device.crewId === selectedCrewFilter ||
+        device.crewName === selectedCrewFilter;
+
+      const matchesSector =
+        selectedSector === 'all' ||
+        device.sectorId === selectedSector ||
+        device.sectorName === selectedSector;
+
+      const matchesStatus = selectedStatus === 'all' || device.status === selectedStatus;
+
+      const isGateway = device.deviceCategory !== 'sensor';
+      const matchesCategory =
+        selectedCategory === 'all' ||
+        (selectedCategory === 'gateway' && isGateway) ||
+        (selectedCategory === 'nodo' && !isGateway);
+
+      return (
+        matchesSearch &&
+        matchesSite &&
+        matchesCrew &&
+        matchesSector &&
+        matchesStatus &&
+        matchesCategory
+      );
+    });
+  }, [
+    devices,
+    searchQuery,
+    selectedSiteFilter,
+    selectedCrewFilter,
+    selectedSector,
+    selectedStatus,
+    selectedCategory,
+  ]);
 
   const getStatusBadge = (status: AlertSeverity) => {
     switch (status) {
@@ -100,63 +209,153 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
     }
   };
 
+  const getDeviceCategoryLabel = (device: SensorDevice) => {
+    if (device.deviceCategory === 'gateway') return 'Gateway';
+    if (device.deviceCategory === 'sensor') return 'Nodo Sensor';
+    return 'Gateway + Nodo';
+  };
+
   return (
     <div className="space-y-6">
-      
-      {/* Top Banner and Filter Bar */}
+      {/* Top Banner and Role-Based Filter Bar */}
       <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-5">
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-5">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
               <Radio className="w-5 h-5 text-cyan-400" />
-              Monitoreo Telemetría IoT en Vivo
+              Monitoreo de Telemetría IoT en Vivo
             </h1>
             <p className="text-xs text-slate-400 mt-1">
-              Red de sensores de gas, ventilación y geomecánica en <span className="text-slate-200 font-medium">{currentSite.name}</span>.
+              Red de Gateways y Nodos ambientales desplegados por faena, cuadrilla y sector en{' '}
+              <span className="text-slate-200 font-medium">{currentSite.name}</span>.
             </p>
             <div className="flex items-center gap-2 mt-2">
-              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono bg-emerald-950/70 border border-emerald-700/60 text-emerald-300">
+              <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-medium bg-emerald-950/70 border border-emerald-700/60 text-emerald-300">
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
-                <span>Base de Datos: minefase-fc5f5 (RTDB en tiempo real)</span>
+                <span>Telemetría en tiempo real activa</span>
               </span>
             </div>
           </div>
 
           <div className="flex items-center gap-2 text-xs">
-            <span className="text-slate-400">Total dispositivos:</span>
+            <span className="text-slate-400">Equipos visibles:</span>
             <span className="px-2.5 py-1 rounded bg-slate-800 text-white font-mono font-bold">
               {filteredDevices.length} / {devices.length}
             </span>
           </div>
         </div>
 
-        {/* Filter controls row */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-3">
-          {/* Search box */}
-          <div className="relative">
+        {/* Role-based hierarchy filter bar */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
+          {/* Search */}
+          <div className="relative xl:col-span-2">
             <Search className="w-4 h-4 text-slate-400 absolute left-3 top-2.5" />
             <input
               type="text"
-              placeholder="Buscar por código, nombre u operador..."
+              placeholder="Buscar por nombre, faena, cuadrilla o sector..."
               value={searchQuery}
               onChange={(e) => setSearchQuery(e.target.value)}
               className="w-full pl-9 pr-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 placeholder-slate-500 focus:outline-none focus:border-cyan-500"
             />
           </div>
 
+          {/* SuperAdmin / Admin MineSafe: Organization selector */}
+          {isGlobalAdmin && organizations.length > 0 && onSelectOrganization && (
+            <div className="relative">
+              <select
+                value={activeOrganizationId}
+                onChange={(e) => {
+                  onSelectOrganization(e.target.value);
+                  setSelectedSiteFilter('all');
+                  setSelectedCrewFilter('all');
+                  setSelectedSector('all');
+                }}
+                aria-label="Filtrar por organización"
+                className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              >
+                <option value="all">Todas las Organizaciones</option>
+                {organizations.map((org) => (
+                  <option key={org.id} value={org.id}>
+                    Org: {org.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Admin & Global Admin: Faena selector */}
+          {(isGlobalAdmin || isCompanyAdmin) && (
+            <div className="relative">
+              <select
+                value={selectedSiteFilter}
+                onChange={(e) => {
+                  setSelectedSiteFilter(e.target.value);
+                  setSelectedCrewFilter('all');
+                  setSelectedSector('all');
+                }}
+                aria-label="Filtrar por faena"
+                className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              >
+                <option value="all">Todas las Faenas</option>
+                {availableSites.map((s) => (
+                  <option key={s.id} value={s.id}>
+                    Faena: {s.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
+          {/* Admin & Global Admin: Cuadrilla selector */}
+          {(isGlobalAdmin || isCompanyAdmin) && (
+            <div className="relative">
+              <select
+                value={selectedCrewFilter}
+                onChange={(e) => {
+                  setSelectedCrewFilter(e.target.value);
+                  setSelectedSector('all');
+                }}
+                aria-label="Filtrar por cuadrilla"
+                className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+              >
+                <option value="all">Todas las Cuadrillas</option>
+                {availableCrews.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    Cuadrilla: {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          )}
+
           {/* Sector selector */}
           <div className="relative">
             <select
               value={selectedSector}
               onChange={(e) => setSelectedSector(e.target.value)}
+              aria-label="Filtrar por sector"
               className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
             >
               <option value="all">Todos los Sectores</option>
               {availableSectors.map((sectorName) => (
                 <option key={sectorName} value={sectorName}>
-                  {sectorName}
+                  Sector: {sectorName}
                 </option>
               ))}
+            </select>
+          </div>
+
+          {/* Category (Gateway / Nodo) */}
+          <div className="relative">
+            <select
+              value={selectedCategory}
+              onChange={(e) => setSelectedCategory(e.target.value as 'all' | 'gateway' | 'nodo')}
+              aria-label="Filtrar por tipo de dispositivo"
+              className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
+            >
+              <option value="all">Gateways y Nodos</option>
+              <option value="gateway">Solo Gateways</option>
+              <option value="nodo">Solo Nodos Sensores</option>
             </select>
           </div>
 
@@ -165,38 +364,37 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
             <select
               value={selectedStatus}
               onChange={(e) => setSelectedStatus(e.target.value)}
+              aria-label="Filtrar por estado"
               className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
             >
               <option value="all">Todos los Estados</option>
-              <option value="normal">Normal (Operación Segura)</option>
-              <option value="advertencia">Advertencia (Umbral Superado)</option>
-              <option value="critico">Crítico (Peligro Inmediato)</option>
-              <option value="desconectado">Desconectado / Sin Señal</option>
-            </select>
-          </div>
-
-          {/* Device Type selector */}
-          <div className="relative">
-            <select
-              value={selectedType}
-              onChange={(e) => setSelectedType(e.target.value)}
-              className="w-full px-3 py-1.5 text-xs bg-slate-950 border border-slate-800 rounded-lg text-slate-200 focus:outline-none focus:border-cyan-500"
-            >
-              <option value="all">Todos los Tipos de Sensor</option>
-              <option value="multigas_portatil">Detector Portátil MultiGas</option>
-              <option value="estacion_fija">Estación Fija de Galería</option>
-              <option value="flujo_ventilacion">Anemómetro / Ventilación</option>
-              <option value="sensor_geomecanico">Sensor Geomecánico</option>
-              <option value="camara_termica">Cámara Térmica Infrarroja</option>
+              <option value="normal">Normal</option>
+              <option value="advertencia">Advertencia</option>
+              <option value="critico">Crítico</option>
+              <option value="desconectado">Desconectado</option>
             </select>
           </div>
         </div>
       </div>
 
-      {/* Grid of Sensors */}
+      {/* Grid of Gateways & Nodes */}
       <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-4">
         {filteredDevices.map((device) => {
           const isSelected = selectedSensorId === device.id;
+          const isGateway = device.deviceCategory !== 'sensor';
+          const coDisplay =
+            device.status === 'desconectado'
+              ? '--'
+              : device.rawCO !== undefined
+              ? `${device.rawCO} ADC`
+              : `${device.metrics.co} ppm`;
+          const pmDisplay =
+            device.status === 'desconectado'
+              ? '--'
+              : device.rawPM25 !== undefined
+              ? `${device.rawPM25} ADC`
+              : `${device.metrics.polvoPM} µg/m³`;
+
           return (
             <div
               key={device.id}
@@ -205,35 +403,56 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                 soundAlert.playFeedbackBeep();
               }}
               className={`cursor-pointer rounded-xl p-4 bg-slate-900/60 border transition-all duration-150 flex flex-col justify-between ${
-                isSelected 
-                  ? 'border-cyan-500 shadow-md shadow-cyan-950 bg-slate-900/90 ring-1 ring-cyan-500/50' 
+                isSelected
+                  ? 'border-cyan-500 shadow-md shadow-cyan-950 bg-slate-900/90 ring-1 ring-cyan-500/50'
                   : 'border-slate-800 hover:border-slate-700 hover:bg-slate-900/80'
               }`}
             >
               <div>
-                {/* Header: Code, Type & Status */}
+                {/* Header: Category Badge & Status */}
                 <div className="flex items-center justify-between gap-2 mb-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className="font-mono text-xs font-bold text-cyan-300 bg-cyan-950/70 px-2 py-0.5 rounded border border-cyan-800/60">
-                      {device.code}
-                    </span>
-                    <span className="text-[11px] text-slate-400 truncate max-w-[130px]">
-                      {device.sectorName.split(' ')[0]}
-                    </span>
-                  </div>
+                  <span
+                    className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-0.5 rounded border ${
+                      isGateway
+                        ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+                        : 'bg-indigo-950/70 text-indigo-300 border-indigo-800/60'
+                    }`}
+                  >
+                    {isGateway ? <Server className="w-3 h-3" /> : <Cpu className="w-3 h-3" />}
+                    {getDeviceCategoryLabel(device)}
+                  </span>
                   <div>{getStatusBadge(device.status)}</div>
                 </div>
 
-                {/* Device Title */}
-                <h3 className="text-sm font-semibold text-white mb-1 truncate">{device.name}</h3>
+                {/* Friendly Device Title */}
+                <h3 className="text-sm font-semibold text-white mb-2 truncate">{device.name}</h3>
 
-                {/* Operator Assigned */}
-                <p className="text-xs text-slate-400 flex items-center gap-1.5 mb-3">
-                  <User className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                  <span className="truncate">{device.assignedTo || 'No asignado'}</span>
-                </p>
+                {/* Operational Hierarchy Assignment (Mina / Cuadrilla / Sector — NO worker assignment) */}
+                <div className="space-y-1 text-xs text-slate-400 mb-3 bg-slate-950/50 rounded-lg p-2.5 border border-slate-800/70">
+                  <div className="flex items-center gap-1.5 truncate">
+                    <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span className="text-slate-400">Faena:</span>
+                    <span className="text-slate-200 font-medium truncate">
+                      {device.siteName || currentSite.name}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 truncate">
+                    <Users className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                    <span className="text-slate-400">Cuadrilla:</span>
+                    <span className="text-slate-200 font-medium truncate">
+                      {device.crewName || 'Sin cuadrilla asignada'}
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-1.5 truncate">
+                    <MapPin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                    <span className="text-slate-400">Sector:</span>
+                    <span className="text-cyan-300 font-semibold truncate">
+                      {device.sectorName || 'Sector General'}
+                    </span>
+                  </div>
+                </div>
 
-                {/* Live Key Metrics Mini-Grid */}
+                {/* Live Key Metrics Mini-Grid (Temp, CO, PM2.5 — NO Ventilación/O2/Ruido) */}
                 <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 text-xs mb-3">
                   <div>
                     <span className="text-[10px] text-slate-400 block">Temp.</span>
@@ -242,26 +461,40 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-slate-400 block">CO (Gas)</span>
-                    <span className={`font-mono font-bold tabular-nums ${device.metrics.co > 25 ? 'text-rose-400' : 'text-slate-200'}`}>
-                      {device.status === 'desconectado' ? '--' : `${device.metrics.co} ppm`}
+                    <span className="text-[10px] text-slate-400 block">CO / Gas</span>
+                    <span
+                      className={`font-mono font-bold tabular-nums ${
+                        device.metrics.co > 25 ? 'text-rose-400' : 'text-slate-200'
+                      }`}
+                    >
+                      {coDisplay}
                     </span>
                   </div>
                   <div>
-                    <span className="text-[10px] text-slate-400 block">Ventilación</span>
-                    <span className={`font-mono font-bold tabular-nums ${device.metrics.flujoAire < 0.5 ? 'text-amber-400' : 'text-slate-200'}`}>
-                      {device.status === 'desconectado' ? '--' : `${device.metrics.flujoAire} m/s`}
+                    <span className="text-[10px] text-slate-400 block">Polvo PM2.5</span>
+                    <span className="font-mono font-bold text-slate-200 tabular-nums">
+                      {pmDisplay}
                     </span>
                   </div>
                 </div>
               </div>
 
-              {/* Footer: Battery, Signal & Last Ping */}
+              {/* Footer: Real Battery Status, Signal & Last Ping */}
               <div className="pt-2 border-t border-slate-800/80 flex items-center justify-between text-[11px] text-slate-400">
                 <div className="flex items-center gap-3">
                   <span className="flex items-center gap-1">
-                    <Battery className={`w-3.5 h-3.5 ${device.batteryPct < 25 ? 'text-rose-400' : 'text-emerald-400'}`} />
-                    <span className="tabular-nums">{device.batteryPct}%</span>
+                    <Battery
+                      className={`w-3.5 h-3.5 ${
+                        !device.batteryReported
+                          ? 'text-slate-500'
+                          : device.batteryPct < 25
+                          ? 'text-rose-400'
+                          : 'text-emerald-400'
+                      }`}
+                    />
+                    <span className="tabular-nums">
+                      {device.batteryReported ? `${device.batteryPct}%` : 'Sin reporte'}
+                    </span>
                   </span>
                   <span className="flex items-center gap-1">
                     <Wifi className="w-3.5 h-3.5 text-cyan-400" />
@@ -283,27 +516,29 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
         </div>
       )}
 
-      {/* Sensor Detail Modal / Drawer */}
+      {/* Node Telemetry Detail Modal */}
       {selectedDevice && (
         <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/80 backdrop-blur-sm">
-          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5 animate-in fade-in zoom-in-95 duration-150">
-            
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-2xl w-full p-6 shadow-2xl space-y-5">
             {/* Modal Header */}
-            <div className="flex items-start justify-between">
+            <div className="flex items-start justify-between gap-3">
               <div>
                 <div className="flex items-center gap-2 mb-1">
-                  <span className="font-mono text-sm font-bold text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
-                    {selectedDevice.code}
+                  <span className="text-xs font-bold text-cyan-300 bg-cyan-950 px-2.5 py-0.5 rounded border border-cyan-800">
+                    {getDeviceCategoryLabel(selectedDevice)}
                   </span>
                   {getStatusBadge(selectedDevice.status)}
                 </div>
                 <h2 className="text-lg font-bold text-white">{selectedDevice.name}</h2>
-                <p className="text-xs text-slate-400">
-                  Ubicación: <span className="text-cyan-400 font-medium">{selectedDevice.sectorName}</span> · Asignado a: <span className="text-slate-200">{selectedDevice.assignedTo}</span>
+                <p className="text-xs text-slate-400 mt-1">
+                  Faena: <strong className="text-slate-200">{selectedDevice.siteName || currentSite.name}</strong> ·
+                  Cuadrilla: <strong className="text-slate-200">{selectedDevice.crewName || 'Sin cuadrilla'}</strong> ·
+                  Sector: <strong className="text-cyan-400">{selectedDevice.sectorName}</strong>
                 </p>
               </div>
 
               <button
+                type="button"
                 onClick={() => onSelectSensor(null)}
                 className="p-1 text-slate-400 hover:text-white hover:bg-slate-800 rounded-lg transition-colors"
               >
@@ -311,56 +546,65 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               </button>
             </div>
 
-            {/* Complete Environmental Metrics Breakdown */}
+            {/* Atmospheric Metrics Breakdown (strictly real active variables: Temp, Hum, CO2, CO, CH4, PM2.5) */}
             <div className="grid grid-cols-2 sm:grid-cols-3 gap-3">
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">Temperatura</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.temperatura} °C</span>
+                <span className="text-lg font-bold text-white font-mono tabular-nums">
+                  {selectedDevice.metrics.temperatura} °C
+                </span>
                 <span className="text-[10px] text-slate-400 block">Límite: &lt; 28.0 °C</span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">Humedad Relativa</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.humedad} %</span>
+                <span className="text-lg font-bold text-white font-mono tabular-nums">
+                  {selectedDevice.metrics.humedad} %
+                </span>
                 <span className="text-[10px] text-slate-400 block">Rango: 30 - 75 %</span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">CO2 (Dióxido)</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.co2} ppm</span>
+                <span className="text-lg font-bold text-white font-mono tabular-nums">
+                  {selectedDevice.metrics.co2} ppm
+                </span>
                 <span className="text-[10px] text-slate-400 block">Límite: &lt; 1000 ppm</span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <span className="text-[11px] text-slate-400 block">CO (Monóxido)</span>
-                <span className={`text-lg font-bold font-mono tabular-nums ${selectedDevice.metrics.co > 25 ? 'text-rose-400' : 'text-white'}`}>
-                  {selectedDevice.metrics.co} ppm
+                <span className="text-[11px] text-slate-400 block">
+                  {selectedDevice.rawCO !== undefined ? 'CO / Gas (MQ-2 ADC)' : 'CO (Monóxido)'}
                 </span>
-                <span className="text-[10px] text-slate-400 block">Límite: &lt; 25 ppm</span>
+                <span
+                  className={`text-lg font-bold font-mono tabular-nums ${
+                    selectedDevice.metrics.co > 25 ? 'text-rose-400' : 'text-white'
+                  }`}
+                >
+                  {selectedDevice.rawCO !== undefined
+                    ? `${selectedDevice.rawCO} ADC`
+                    : `${selectedDevice.metrics.co} ppm`}
+                </span>
+                <span className="text-[10px] text-slate-400 block">
+                  {selectedDevice.rawCO !== undefined ? 'Prev: < 300 ADC' : 'Límite: < 25 ppm'}
+                </span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
                 <span className="text-[11px] text-slate-400 block">CH4 (Metano)</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.ch4} % LEL</span>
-                <span className="text-[10px] text-slate-400 block">Límite: &lt; 5.0 %</span>
-              </div>
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <span className="text-[11px] text-slate-400 block">Oxígeno (O2)</span>
-                <span className={`text-lg font-bold font-mono tabular-nums ${selectedDevice.metrics.o2 < 19.5 ? 'text-amber-400' : 'text-white'}`}>
-                  {selectedDevice.metrics.o2} %
+                <span className="text-lg font-bold text-white font-mono tabular-nums">
+                  {selectedDevice.metrics.ch4} % LEL
                 </span>
-                <span className="text-[10px] text-slate-400 block">Rango: 19.5 - 23.5 %</span>
+                <span className="text-[10px] text-slate-400 block">Límite: &lt; 1.5 %</span>
               </div>
               <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <span className="text-[11px] text-slate-400 block">Flujo de Aire</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.flujoAire} m/s</span>
-                <span className="text-[10px] text-slate-400 block">Mínimo: &ge; 0.50 m/s</span>
-              </div>
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <span className="text-[11px] text-slate-400 block">Presión Sonora</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.ruido} dB</span>
-                <span className="text-[10px] text-slate-400 block">Límite: 85 dB</span>
-              </div>
-              <div className="p-3 bg-slate-950 rounded-lg border border-slate-800">
-                <span className="text-[11px] text-slate-400 block">Polvo (PM2.5)</span>
-                <span className="text-lg font-bold text-white font-mono tabular-nums">{selectedDevice.metrics.polvoPM} µg/m³</span>
-                <span className="text-[10px] text-slate-400 block">Límite: 50 µg/m³</span>
+                <span className="text-[11px] text-slate-400 block">
+                  {selectedDevice.rawPM25 !== undefined ? 'Polvo PM2.5 (ADC)' : 'Polvo (PM2.5)'}
+                </span>
+                <span className="text-lg font-bold text-white font-mono tabular-nums">
+                  {selectedDevice.rawPM25 !== undefined
+                    ? `${selectedDevice.rawPM25} ADC`
+                    : `${selectedDevice.metrics.polvoPM} µg/m³`}
+                </span>
+                <span className="text-[10px] text-slate-400 block">
+                  {selectedDevice.rawPM25 !== undefined ? 'Prev: < 350 ADC' : 'Límite: 50 µg/m³'}
+                </span>
               </div>
             </div>
 
@@ -369,13 +613,14 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                   <Sliders className="w-4 h-4 text-cyan-400" />
-                  Simulador de Eventos de Seguridad (Testing de Telemetría)
+                  Pruebas de Validación Operativa
                 </h4>
                 <p className="text-xs text-slate-400">
-                  Permite forzar condiciones ambientales anómalas en este dispositivo para validar la respuesta inmediata del sistema de alertas.
+                  Permite validar la respuesta del sistema de alertas ante condiciones ambientales anómalas en este sector.
                 </p>
                 <div className="flex flex-wrap items-center gap-2 pt-2">
                   <button
+                    type="button"
                     onClick={() => onSimulateGasSpike(selectedDevice.id)}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg bg-amber-600 hover:bg-amber-500 text-white transition-colors"
                   >
@@ -383,6 +628,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                     Simular Alza de Monóxido (CO 52 ppm)
                   </button>
                   <button
+                    type="button"
                     onClick={() => onResetSensor(selectedDevice.id)}
                     className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors"
                   >
@@ -393,20 +639,18 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               </div>
             )}
 
-            {/* Modal Actions */}
             <div className="flex justify-end gap-2 pt-2 border-t border-slate-800">
               <button
+                type="button"
                 onClick={() => onSelectSensor(null)}
                 className="px-4 py-2 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-200 rounded-lg transition-colors"
               >
                 Cerrar Detalle
               </button>
             </div>
-
           </div>
         </div>
       )}
-
     </div>
   );
 };

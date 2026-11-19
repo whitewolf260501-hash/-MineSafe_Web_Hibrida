@@ -134,34 +134,34 @@ const superadmin = makeUser({ id: 'sa-1', role: 'superadmin', organizationId: 'o
 const adminAlpha = makeUser({ id: 'adm-a', role: 'admin', organizationId: 'org-alpha' });
 const adminBeta = makeUser({ id: 'adm-b', role: 'admin', organizationId: 'org-beta' });
 const opAlpha = makeUser({ id: 'op-a', role: 'operador', organizationId: 'org-alpha' });
-const monAlpha = makeUser({ id: 'mon-a', role: 'monotoriador', organizationId: 'org-alpha' });
-const monBeta = makeUser({ id: 'mon-b', role: 'monotoriador', organizationId: 'org-beta' });
+const monAlpha = makeUser({ id: 'mon-a', role: 'supervisor', organizationId: 'org-alpha' });
+const monBeta = makeUser({ id: 'mon-b', role: 'supervisor', organizationId: 'org-beta' });
 const opBeta = makeUser({ id: 'op-b', role: 'operador', organizationId: 'org-beta' });
 const inactiveAdmin = makeUser({ id: 'adm-off', role: 'admin', status: 'inactivo', organizationId: 'org-alpha' });
 
 assert.equal(resolveEffectiveOrgId(adminAlpha, 'org-beta'), 'org-alpha', 'Admin cannot switch scope to another org');
-assert.equal(resolveEffectiveOrgId(monAlpha, 'org-beta'), 'org-alpha', 'Monotoriador stays scoped to own org');
+assert.equal(resolveEffectiveOrgId(monAlpha, 'org-beta'), 'org-alpha', 'Supervisor stays scoped to own org');
 assert.equal(resolveEffectiveOrgId(superadmin, 'org-beta'), 'org-beta', 'SuperAdmin can scope to target org');
 assert.equal(belongsToOrganization('org-alpha', 'org-alpha'), true);
 assert.equal(belongsToOrganization('org-beta', 'org-alpha'), false);
 
 assert.equal(canProvisionUserInOrganization(opAlpha, 'org-alpha', 'operador').allowed, false, 'Operador cannot provision users');
-assert.equal(canProvisionUserInOrganization(monAlpha, 'org-alpha', 'operador').allowed, false, 'Monotoriador cannot provision users');
+assert.equal(canProvisionUserInOrganization(monAlpha, 'org-alpha', 'operador').allowed, false, 'Supervisor cannot provision users');
 assert.equal(canProvisionUserInOrganization(inactiveAdmin, 'org-alpha', 'operador').allowed, false, 'Inactive user cannot provision users');
 assert.equal(canProvisionUserInOrganization(adminAlpha, 'org-beta', 'operador').allowed, false, 'Admin cannot provision user into another org');
 assert.equal(canProvisionUserInOrganization(adminAlpha, 'org-alpha', 'superadmin').allowed, false, 'Admin cannot create superadmin');
 assert.equal(canProvisionUserInOrganization(adminAlpha, 'org-alpha', 'admin').allowed, true, 'Admin can create admin inside own org');
-assert.equal(canProvisionUserInOrganization(adminAlpha, 'org-alpha', 'monotoriador').allowed, true, 'Admin can create monotoriador inside own org');
+assert.equal(canProvisionUserInOrganization(adminAlpha, 'org-alpha', 'supervisor').allowed, true, 'Admin can create supervisor inside own org');
 assert.equal(canProvisionUserInOrganization(superadmin, 'org-beta', 'operador').allowed, true, 'SuperAdmin can create non-superadmin users across orgs');
-assert.equal(canProvisionUserInOrganization(superadmin, 'org-beta', 'monotoriador').allowed, true, 'SuperAdmin can create monotoriador across orgs');
+assert.equal(canProvisionUserInOrganization(superadmin, 'org-beta', 'supervisor').allowed, true, 'SuperAdmin can create supervisor across orgs');
 
 assert.equal(canModifyTargetUser(adminAlpha, opBeta).allowed, false, 'Admin Alpha cannot modify Operador Beta');
-assert.equal(canModifyTargetUser(adminAlpha, monBeta).allowed, false, 'Admin Alpha cannot modify Monotoriador Beta');
+assert.equal(canModifyTargetUser(adminAlpha, monBeta).allowed, false, 'Admin Alpha cannot modify Supervisor Beta');
 assert.equal(canModifyTargetUser(adminAlpha, adminBeta).allowed, false, 'Admin Alpha cannot modify Admin Beta');
 assert.equal(canModifyTargetUser(adminAlpha, superadmin).allowed, false, 'Admin Alpha cannot modify SuperAdmin');
-assert.equal(canModifyTargetUser(monAlpha, opAlpha).allowed, false, 'Monotoriador cannot modify users');
+assert.equal(canModifyTargetUser(monAlpha, opAlpha).allowed, false, 'Supervisor cannot modify users');
 assert.equal(canModifyTargetUser(adminAlpha, opAlpha).allowed, true, 'Admin Alpha can modify Operador Alpha');
-assert.equal(canModifyTargetUser(adminAlpha, monAlpha, 'admin').allowed, true, 'Admin Alpha can update Monotoriador Alpha');
+assert.equal(canModifyTargetUser(adminAlpha, monAlpha, 'admin').allowed, true, 'Admin Alpha can update Supervisor Alpha');
 assert.equal(canModifyTargetUser(superadmin, opBeta).allowed, true, 'SuperAdmin can modify Operador Beta');
 
 const allUsers = [superadmin, adminAlpha, adminBeta, monAlpha, monBeta, opAlpha, opBeta];

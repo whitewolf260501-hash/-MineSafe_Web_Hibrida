@@ -111,21 +111,30 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({ 
     thermalStatusColor = 'amarillo';
   }
 
+  const batteryDisplay = device.batteryReported
+    ? `Batería: ${device.batteryPct}%`
+    : 'Batería: Sin reporte';
+
   return (
-    <div className="space-y-3 mb-8">
-      <div className="flex items-center justify-between">
+    <div className="space-y-3 mb-6">
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-2">
         <div>
           <h3 className="text-sm font-bold text-white uppercase tracking-wider flex items-center gap-2">
             <Gauge className="w-4 h-4 text-cyan-400" />
             <span>Monitoreo Atmosférico: Lectura Rápida &amp; Datos Técnicos</span>
           </h3>
           <p className="text-xs text-slate-400">
-            Doble interpretación de sensores para operadores en terreno y supervisores de ventilación.
+            Interpretación directa y valores técnicos reales para operación en terreno y supervisión.
           </p>
         </div>
-        <span className="text-[11px] font-mono text-cyan-300 bg-cyan-950 px-2.5 py-1 rounded-lg border border-cyan-800">
-          Dispositivo: {device.name}
-        </span>
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-[11px] font-semibold text-cyan-300 bg-cyan-950 px-2.5 py-1 rounded-lg border border-cyan-800">
+            {device.sectorName || 'Sector Principal'} · {device.name}
+          </span>
+          <span className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-700">
+            {batteryDisplay}
+          </span>
+        </div>
       </div>
 
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">

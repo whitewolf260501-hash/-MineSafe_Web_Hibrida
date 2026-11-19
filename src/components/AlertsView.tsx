@@ -75,30 +75,55 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   const [subTab, setSubTab] = useState<'alertas_activas' | 'auditoria_rtdb'>('alertas_activas');
   const effectiveSubTab = isOperadorReadOnly ? 'alertas_activas' : subTab;
 
-  // Active alerts filters
+  // Active alerts filters (recent window + configurable visible cap)
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
   const [filterStatus, setFilterStatus] = useState<'active' | 'resolved' | 'all'>('active');
+  const [filterTimeRange, setFilterTimeRange] = useState<'24h' | '7d' | '30d' | 'all'>('24h');
+  const [visibleAlertsLimit, setVisibleAlertsLimit] = useState<number>(15);
   const [searchQuery, setSearchQuery] = useState('');
   const [alertToResolve, setAlertToResolve] = useState<SafetyAlert | null>(null);
+  const [alertToInspect, setAlertToInspect] = useState<SafetyAlert | null>(null);
 
-  // Auditoría RTDB filters
+  // Auditoría filters (including Fecha Desde / Fecha Hasta)
   const [filterAuditDevice, setFilterAuditDevice] = useState<string>('all');
   const [filterAuditOrigin, setFilterAuditOrigin] = useState<string>('all');
+  const [auditDateFrom, setAuditDateFrom] = useState<string>('');
+  const [auditDateTo, setAuditDateTo] = useState<string>('');
   const [searchAudit, setSearchAudit] = useState('');
   const [exportNotice, setExportNotice] = useState<string | null>(null);
   const [showPrintPreview, setShowPrintPreview] = useState(false);
 
-  // Combine ESP32 hardware /registro_alarmas with web-documented alert resolutions (/alertas + /bitacora_contingencias)
+  const parseRecordDateMs = (rec: AlarmAuditRecord): number => {
+    if (rec.timestampServer && rec.timestampServer > 0) return rec.timestampServer;
+    const raw = (rec.fecha || '').trim();
+    const dmy = raw.match(/^(\d{2})[-/](\d{2})[-/](\d{4})$/);
+    if (dmy) {
+      return new Date(Number(dmy[3]), Number(dmy[2]) - 1, Number(dmy[1])).getTime();
+    }
+    const ymd = raw.match(/^(\d{4})[-/](\d{2})[-/](\d{2})$/);
+    if (ymd) {
+      return new Date(Number(ymd[1]), Number(ymd[2]) - 1, Number(ymd[3])).getTime();
+    }
+    return 0;
+  };
+
+  // Combine hardware alarm records with web-documented alert resolutions
   const esp32AuditRecords: AlarmAuditRecord[] = extractAlarmAuditRecords(devices);
   const webBitacoraAuditRecords: AlarmAuditRecord[] = buildAuditRecordsFromAlerts(alerts);
   const allAuditRecords: AlarmAuditRecord[] = [...webBitacoraAuditRecords, ...esp32AuditRecords].sort(
     (a, b) => (b.timestampServer || 0) - (a.timestampServer || 0)
   );
 
-  // Filter audit records
+  // Filter audit records (including Fecha Desde / Fecha Hasta)
+  const fromMs = auditDateFrom ? new Date(`${auditDateFrom}T00:00:00`).getTime() : null;
+  const toMs = auditDateTo ? new Date(`${auditDateTo}T23:59:59.999`).getTime() : null;
+
   const filteredAuditRecords = allAuditRecords.filter((rec) => {
     const matchesDevice = filterAuditDevice === 'all' || rec.deviceId === filterAuditDevice;
     const matchesOrigin = filterAuditOrigin === 'all' || rec.origen === filterAuditOrigin;
+    const recMs = parseRecordDateMs(rec);
+    const matchesDateFrom = fromMs === null || (recMs > 0 && recMs >= fromMs);
+    const matchesDateTo = toMs === null || (recMs > 0 && recMs <= toMs);
     const q = searchAudit.toLowerCase();
     const matchesSearch =
       !q ||
@@ -111,8 +136,25 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       (rec.resolvedBy || '').toLowerCase().includes(q) ||
       rec.fecha.includes(searchAudit) ||
       rec.hora.includes(searchAudit);
-    return matchesDevice && matchesOrigin && matchesSearch;
+    return matchesDevice && matchesOrigin && matchesDateFrom && matchesDateTo && matchesSearch;
   });
+
+  // Recency window for active alerts
+  const nowMs = Date.now();
+  const rangeCutoffMs =
+    filterTimeRange === '24h'
+      ? nowMs - 24 * 60 * 60 * 1000
+      : filterTimeRange === '7d'
+      ? nowMs - 7 * 24 * 60 * 60 * 1000
+      : filterTimeRange === '30d'
+      ? nowMs - 30 * 24 * 60 * 60 * 1000
+      : 0;
+
+  const matchesRecencyWindow = (alert: SafetyAlert) => {
+    if (rangeCutoffMs <= 0) return true;
+    const ts = alert.createdAtMs || alert.timestampMs || 0;
+    return ts === 0 || ts >= rangeCutoffMs;
+  };
 
   // Filter regular alerts
   const filteredAlerts = alerts.filter((alert) => {
@@ -121,6 +163,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       filterStatus === 'all' || 
       (filterStatus === 'active' && !alert.resolved) || 
       (filterStatus === 'resolved' && alert.resolved);
+    const matchesTime = matchesRecencyWindow(alert);
     const q = searchQuery.toLowerCase();
     const matchesSearch = 
       !q ||
@@ -132,13 +175,15 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       (alert.resolutionDetails?.comment || '').toLowerCase().includes(q) ||
       (alert.resolutionDetails?.correctiveActions || '').toLowerCase().includes(q);
 
-    return matchesSeverity && matchesStatus && matchesSearch;
+    return matchesSeverity && matchesStatus && matchesTime && matchesSearch;
   });
 
-  const activeAlertsCount = alerts.filter(a => !a.resolved).length;
-  const resolvedAlertsCount = alerts.filter(a => a.resolved).length;
-  const criticalCount = alerts.filter(a => !a.resolved && a.severity === 'critico').length;
-  const warningCount = alerts.filter(a => !a.resolved && a.severity === 'advertencia').length;
+  const visibleAlerts = filteredAlerts.slice(0, visibleAlertsLimit);
+  const recentScopedAlerts = alerts.filter(matchesRecencyWindow);
+  const activeAlertsCount = recentScopedAlerts.filter(a => !a.resolved).length;
+  const resolvedAlertsCount = recentScopedAlerts.filter(a => a.resolved).length;
+  const criticalCount = recentScopedAlerts.filter(a => !a.resolved && a.severity === 'critico').length;
+  const warningCount = recentScopedAlerts.filter(a => !a.resolved && a.severity === 'advertencia').length;
 
   const getResolutionTypeLabel = (type?: string) => {
     switch (type) {
@@ -160,10 +205,14 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     setTimeout(() => setExportNotice(null), 3500);
   };
 
-  // 1. Exportar a Excel (.csv con UTF-8 BOM para máxima compatibilidad con Microsoft Excel)
+  // 1. Exportar a Excel (.csv con UTF-8 BOM respetando el rango de fechas y filtros activos)
   const handleExportAuditExcel = () => {
     soundAlert.playFeedbackBeep();
-    const rowsToExport = filteredAuditRecords.length > 0 ? filteredAuditRecords : allAuditRecords;
+    const rowsToExport = filteredAuditRecords;
+    if (rowsToExport.length === 0) {
+      showExportToast('No existen registros dentro del rango de fechas y filtros seleccionados para exportar.');
+      return;
+    }
 
     // Headers con estándar de auditoría minera DS 132
     const headers = [
@@ -288,18 +337,6 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 : 'Monitoreo centralizado de contingencias y auditoría de hardware ESP32 según normativa DS 132 (Sernageomin).'}
             </p>
           </div>
-
-          {!isOperadorReadOnly && (
-            <div className="flex items-center gap-2.5">
-              <button
-                onClick={() => soundAlert.playCriticalAlert()}
-                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
-              >
-                <Volume2 className="w-4 h-4 text-cyan-400" />
-                Probar Sirena
-              </button>
-            </div>
-          )}
         </div>
 
         {isOperadorReadOnly ? (
@@ -434,7 +471,22 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               />
             </div>
 
-            <div className="flex items-center gap-2">
+            <div className="flex flex-wrap items-center gap-2">
+              <select
+                value={filterTimeRange}
+                onChange={(e) => {
+                  setFilterTimeRange(e.target.value as '24h' | '7d' | '30d' | 'all');
+                  setVisibleAlertsLimit(15);
+                }}
+                aria-label="Rango de tiempo de alertas"
+                className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
+              >
+                <option value="24h">Últimas 24 horas</option>
+                <option value="7d">Últimos 7 días</option>
+                <option value="30d">Últimos 30 días</option>
+                <option value="all">Todo el historial</option>
+              </select>
+
               <select
                 value={filterSeverity}
                 onChange={(e) => setFilterSeverity(e.target.value)}
@@ -454,7 +506,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               >
                 <option value="active">Solo Activas ({activeAlertsCount})</option>
                 <option value="resolved">Solo Resueltas ({resolvedAlertsCount})</option>
-                <option value="all">Todas ({alerts.length})</option>
+                <option value="all">Todas ({recentScopedAlerts.length})</option>
               </select>
             </div>
           </div>
@@ -468,7 +520,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 <p className="text-xs text-slate-400 mt-1">Todos los sectores monitoreados operan dentro de los umbrales seguros.</p>
               </div>
             ) : (
-              filteredAlerts.map((alert) => {
+              visibleAlerts.map((alert) => {
                 const resBadge = alert.resolutionDetails
                   ? getResolutionTypeLabel(alert.resolutionDetails.resolutionType)
                   : null;
@@ -571,51 +623,63 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                       )}
                     </div>
 
-                    {!isOperadorReadOnly && (
-                      <div className="flex items-center gap-2 shrink-0">
+                    <div className="flex flex-wrap items-center gap-2 shrink-0">
+                      <button
+                        type="button"
+                        onClick={() => setAlertToInspect(alert)}
+                        className="px-2.5 py-1.5 text-xs font-semibold text-cyan-300 bg-cyan-950/60 hover:bg-cyan-900/70 rounded-lg border border-cyan-800/70 transition-colors flex items-center gap-1.5"
+                        title="Ver detalle completo de la alerta sin salir de esta ventana"
+                      >
+                        <FileText className="w-3.5 h-3.5" />
+                        <span>Ver Detalle</span>
+                      </button>
+
+                      {!isOperadorReadOnly && !alert.acknowledged && (
                         <button
-                          onClick={() => {
-                            onSelectSensor(alert.sensorId);
-                            onNavigateTab('monitoreo');
-                          }}
-                          className="p-1.5 text-slate-400 hover:text-cyan-400 bg-slate-800 hover:bg-slate-700 rounded-lg border border-slate-700 transition-colors"
-                          title="Ver telemetría del sensor"
+                          type="button"
+                          onClick={() => onAcknowledgeAlert(alert.id)}
+                          className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors"
                         >
-                          <ExternalLink className="w-4 h-4" />
+                          Reconocer
                         </button>
+                      )}
 
-                        {!alert.acknowledged && (
-                          <button
-                            onClick={() => onAcknowledgeAlert(alert.id)}
-                            className="px-3 py-1.5 text-xs font-semibold bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 rounded-lg transition-colors"
-                          >
-                            Reconocer
-                          </button>
-                        )}
-
-                        {!alert.resolved ? (
-                          <button
-                            onClick={() => setAlertToResolve(alert)}
-                            className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors shadow-sm cursor-pointer"
-                          >
-                            <CheckCircle className="w-3.5 h-3.5" />
-                            Describir y Dar por Resuelta
-                          </button>
-                        ) : (
-                          <button
-                            onClick={() => setAlertToResolve(alert)}
-                            className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
-                          >
-                            <Edit3 className="w-3.5 h-3.5 text-cyan-400" />
-                            Editar Bitácora
-                          </button>
-                        )}
-                      </div>
-                    )}
+                      {!isOperadorReadOnly && (!alert.resolved ? (
+                        <button
+                          type="button"
+                          onClick={() => setAlertToResolve(alert)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-emerald-700 hover:bg-emerald-600 text-white rounded-lg transition-colors shadow-sm cursor-pointer"
+                        >
+                          <CheckCircle className="w-3.5 h-3.5" />
+                          Describir y Dar por Resuelta
+                        </button>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setAlertToResolve(alert)}
+                          className="flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium bg-slate-800 hover:bg-slate-700 text-slate-300 border border-slate-700 rounded-lg transition-colors cursor-pointer"
+                        >
+                          <Edit3 className="w-3.5 h-3.5 text-cyan-400" />
+                          Editar Bitácora
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 </div>
                 );
               })
+            )}
+
+            {filteredAlerts.length > visibleAlertsLimit && (
+              <div className="flex items-center justify-center pt-2">
+                <button
+                  type="button"
+                  onClick={() => setVisibleAlertsLimit((prev) => prev + 15)}
+                  className="px-4 py-2 rounded-xl bg-slate-900 hover:bg-slate-800 border border-slate-700 text-xs font-semibold text-cyan-300 transition-colors"
+                >
+                  Mostrar más alertas ({visibleAlerts.length} de {filteredAlerts.length})
+                </button>
+              </div>
             )}
           </div>
         </div>
@@ -633,14 +697,14 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               <div className="flex flex-wrap items-center gap-2">
                 <Radio className="w-5 h-5 text-cyan-400 animate-pulse" />
                 <h2 className="text-base font-bold text-white tracking-wide">
-                  Bitácora Consolidada y Auditoría de Alarmas (RTDB / ESP32)
+                  Bitácora Consolidada y Auditoría de Alarmas
                 </h2>
-                <span className="px-2 py-0.5 rounded text-[10px] font-mono font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
-                  /registro_alarmas · /alertas · /bitacora_contingencias
+                <span className="px-2 py-0.5 rounded text-[10px] font-bold bg-cyan-950 text-cyan-300 border border-cyan-800">
+                  Registro Normativo DS 132
                 </span>
               </div>
               <p className="text-xs text-slate-400 mt-1">
-                Historial unificado con los disparos del ESP32 Gateway y todas las alertas descritas y resueltas desde la consola web.
+                Historial unificado de alarmas detectadas en terreno y bitácoras de cierre documentadas. Filtra por rango de fechas para exportar Excel o PDF.
               </p>
             </div>
 
@@ -650,7 +714,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 type="button"
                 onClick={handleExportAuditExcel}
                 className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white font-bold text-xs transition-colors shadow-md shadow-emerald-950 cursor-pointer"
-                title="Descargar tabla en Excel / CSV con formato UTF-8"
+                title="Descargar tabla filtrada en Excel / CSV con formato UTF-8"
               >
                 <FileSpreadsheet className="w-4 h-4 text-emerald-100" />
                 <span>Exportar a Excel (.csv)</span>
@@ -660,7 +724,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
                 type="button"
                 onClick={handleExportAuditPDF}
                 className="inline-flex items-center gap-2 px-3.5 py-2 rounded-lg bg-cyan-600 hover:bg-cyan-500 text-white font-bold text-xs transition-colors shadow-md shadow-cyan-950 cursor-pointer"
-                title="Generar e imprimir informe oficial en PDF para Prevención de Riesgos"
+                title="Generar e imprimir informe oficial en PDF respetando las fechas seleccionadas"
               >
                 <Printer className="w-4 h-4 text-cyan-100" />
                 <span>Exportar a PDF / Imprimir</span>
@@ -668,48 +732,94 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
             </div>
           </div>
 
-          {/* Audit Filters Bar */}
-          <div className="p-4 bg-slate-900/70 border border-slate-800 rounded-xl flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
-            <div className="relative flex-1">
-              <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
-              <input
-                type="text"
-                placeholder="Buscar por ID, dispositivo, descripción, responsable o fecha..."
-                value={searchAudit}
-                onChange={(e) => setSearchAudit(e.target.value)}
-                className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
-              />
+          {/* Audit Filters Bar (with Fecha Desde / Fecha Hasta) */}
+          <div className="p-4 bg-slate-900/70 border border-slate-800 rounded-xl space-y-3">
+            <div className="flex flex-col md:flex-row gap-3 items-stretch md:items-center justify-between">
+              <div className="relative flex-1">
+                <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
+                <input
+                  type="text"
+                  placeholder="Buscar por ID, equipo, descripción, responsable o fecha..."
+                  value={searchAudit}
+                  onChange={(e) => setSearchAudit(e.target.value)}
+                  className="w-full pl-9 pr-3 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500"
+                />
+              </div>
+
+              <div className="flex flex-wrap items-center gap-2">
+                <select
+                  value={filterAuditDevice}
+                  onChange={(e) => setFilterAuditDevice(e.target.value)}
+                  className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="all">Todos los equipos ({allAuditRecords.length})</option>
+                  {Array.from(new Set(allAuditRecords.map(r => r.deviceId))).map((devId) => {
+                    const label = allAuditRecords.find((r) => r.deviceId === devId)?.deviceName || devId;
+                    return (
+                      <option key={devId} value={devId}>
+                        {label}
+                      </option>
+                    );
+                  })}
+                </select>
+
+                <select
+                  value={filterAuditOrigin}
+                  onChange={(e) => setFilterAuditOrigin(e.target.value)}
+                  className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
+                >
+                  <option value="all">Todos los orígenes ({allAuditRecords.length})</option>
+                  <option value="BITACORA_EMERGENCIA_REAL">Bitácora: Emergencia Real</option>
+                  <option value="BITACORA_SIMULACRO">Bitácora: Simulacro</option>
+                  <option value="BITACORA_FALSA_ALARMA">Bitácora: Falsa Alarma / Sensor</option>
+                  <option value="BITACORA_PRUEBA_OPERATIVA">Bitácora: Prueba Operativa</option>
+                  <option value="CAUSA_NATURAL_SENSORES">Terreno: Causa Natural (Sensores)</option>
+                  <option value="ACTIVACION_MANUAL_USUARIO">Terreno: Activación Manual</option>
+                </select>
+              </div>
             </div>
 
-            <div className="flex flex-wrap items-center gap-2">
-              {/* Filter Device */}
-              <select
-                value={filterAuditDevice}
-                onChange={(e) => setFilterAuditDevice(e.target.value)}
-                className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
-              >
-                <option value="all">Todos los dispositivos ({allAuditRecords.length})</option>
-                {Array.from(new Set(allAuditRecords.map(r => r.deviceId))).map((devId) => (
-                  <option key={devId} value={devId}>
-                    {devId}
-                  </option>
-                ))}
-              </select>
-
-              {/* Filter Origin */}
-              <select
-                value={filterAuditOrigin}
-                onChange={(e) => setFilterAuditOrigin(e.target.value)}
-                className="px-2.5 py-1.5 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-300 focus:outline-none focus:border-cyan-500"
-              >
-                <option value="all">Todos los orígenes ({allAuditRecords.length})</option>
-                <option value="BITACORA_EMERGENCIA_REAL">Bitácora: Emergencia Real</option>
-                <option value="BITACORA_SIMULACRO">Bitácora: Simulacro</option>
-                <option value="BITACORA_FALSA_ALARMA">Bitácora: Falsa Alarma / Sensor</option>
-                <option value="BITACORA_PRUEBA_OPERATIVA">Bitácora: Prueba Operativa</option>
-                <option value="CAUSA_NATURAL_SENSORES">ESP32: Causa Natural (Sensores)</option>
-                <option value="ACTIVACION_MANUAL_USUARIO">ESP32: Activación Manual (Pánico)</option>
-              </select>
+            {/* Date Range Filter Row (Fecha Desde / Fecha Hasta) */}
+            <div className="flex flex-wrap items-center gap-3 pt-2 border-t border-slate-800/80 text-xs">
+              <span className="inline-flex items-center gap-1.5 font-semibold text-slate-300">
+                <Calendar className="w-3.5 h-3.5 text-cyan-400" />
+                Rango de Fechas:
+              </span>
+              <label className="flex items-center gap-1.5 text-slate-400">
+                <span>Desde:</span>
+                <input
+                  type="date"
+                  value={auditDateFrom}
+                  onChange={(e) => setAuditDateFrom(e.target.value)}
+                  aria-label="Fecha desde"
+                  className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                />
+              </label>
+              <label className="flex items-center gap-1.5 text-slate-400">
+                <span>Hasta:</span>
+                <input
+                  type="date"
+                  value={auditDateTo}
+                  onChange={(e) => setAuditDateTo(e.target.value)}
+                  aria-label="Fecha hasta"
+                  className="px-2.5 py-1 bg-slate-950 border border-slate-800 rounded-lg text-xs text-slate-200 focus:outline-none focus:border-cyan-500"
+                />
+              </label>
+              {(auditDateFrom || auditDateTo) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    setAuditDateFrom('');
+                    setAuditDateTo('');
+                  }}
+                  className="px-2.5 py-1 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-300 text-[11px] font-semibold transition-colors"
+                >
+                  Limpiar fechas
+                </button>
+              )}
+              <span className="ml-auto text-[11px] text-slate-400">
+                Mostrando <strong className="text-cyan-300">{filteredAuditRecords.length}</strong> de {allAuditRecords.length} registros
+              </span>
             </div>
           </div>
 
@@ -863,15 +973,173 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
         />
       )}
 
-      {/* Modal Imprimible In-App PDF (sin window.open) */}
+      {/* Modal In-Place de Detalle de Alerta (sin redirección, destacando variable disparadora) */}
+      {alertToInspect && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-md">
+          <div className="bg-slate-900 border border-slate-700 rounded-2xl max-w-xl w-full p-6 shadow-2xl space-y-5">
+            <div className="flex items-start justify-between gap-3 pb-3 border-b border-slate-800">
+              <div className="space-y-1">
+                <div className="flex flex-wrap items-center gap-2">
+                  {getSeverityBadge(alertToInspect.severity)}
+                  <span className="text-[11px] font-mono px-2 py-0.5 rounded bg-slate-950 text-slate-300 border border-slate-800">
+                    {alertToInspect.code}
+                  </span>
+                  {alertToInspect.resolved ? (
+                    <span className="text-[10px] font-bold text-emerald-300 bg-emerald-950 px-2 py-0.5 rounded border border-emerald-800">
+                      RESUELTA
+                    </span>
+                  ) : alertToInspect.acknowledged ? (
+                    <span className="text-[10px] font-bold text-cyan-300 bg-cyan-950 px-2 py-0.5 rounded border border-cyan-800">
+                      RECONOCIDA
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-bold text-amber-300 bg-amber-950 px-2 py-0.5 rounded border border-amber-800">
+                      ACTIVA
+                    </span>
+                  )}
+                </div>
+                <h3 className="text-base font-bold text-white">{alertToInspect.title}</h3>
+              </div>
+              <button
+                type="button"
+                onClick={() => setAlertToInspect(null)}
+                className="p-1 text-slate-400 hover:text-white rounded-lg hover:bg-slate-800"
+                aria-label="Cerrar detalle de alerta"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            {/* Highlighted Triggering Variable Card */}
+            <div className={`p-4 rounded-xl border ${
+              alertToInspect.severity === 'critico'
+                ? 'bg-rose-950/50 border-rose-500/70'
+                : 'bg-amber-950/40 border-amber-500/60'
+            }`}>
+              <span className="text-[10px] uppercase tracking-wider font-bold text-slate-300 block mb-1">
+                Variable que disparó la alarma
+              </span>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <span className="text-lg font-extrabold text-white">
+                  {alertToInspect.variableName}
+                </span>
+                <span className={`text-xl font-mono font-black ${
+                  alertToInspect.severity === 'critico' ? 'text-rose-300' : 'text-amber-300'
+                }`}>
+                  {alertToInspect.recordedValue}
+                </span>
+              </div>
+              <div className="mt-2 pt-2 border-t border-white/10 flex items-center justify-between text-xs">
+                <span className="text-slate-300">Umbral seguro configurado:</span>
+                <span className="font-mono font-bold text-emerald-300">{alertToInspect.safeLimit}</span>
+              </div>
+            </div>
+
+            {/* Full Alert Metadata Grid */}
+            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase block">Sector afectado</span>
+                <span className="font-bold text-cyan-300">{alertToInspect.sectorName}</span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase block">Fecha y hora de registro</span>
+                <span className="font-mono font-semibold text-white">{alertToInspect.timestamp}</span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase block">Equipo / Nodo origen</span>
+                <span className="font-semibold text-slate-200">{alertToInspect.sensorCode}</span>
+              </div>
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800">
+                <span className="text-[10px] text-slate-400 uppercase block">Estado de atención</span>
+                <span className="font-semibold text-slate-200">
+                  {alertToInspect.resolved
+                    ? `Resuelta por ${alertToInspect.resolutionDetails?.resolvedBy || 'Operación'}`
+                    : alertToInspect.acknowledged
+                    ? `Reconocida por ${alertToInspect.acknowledgedBy || 'Operación'}`
+                    : 'Pendiente de reconocimiento'}
+                </span>
+              </div>
+            </div>
+
+            {alertToInspect.suggestedAction && (
+              <div className="p-3 rounded-xl bg-slate-950/70 border border-slate-800 text-xs">
+                <span className="text-[10px] uppercase font-bold text-slate-400 block mb-1">
+                  Protocolo y acción recomendada
+                </span>
+                <p className="text-slate-200 leading-relaxed">{alertToInspect.suggestedAction}</p>
+              </div>
+            )}
+
+            {alertToInspect.resolutionDetails && (
+              <div className="p-3 rounded-xl bg-emerald-950/30 border border-emerald-800/70 text-xs space-y-1">
+                <span className="text-[10px] uppercase font-bold text-emerald-300 block">
+                  Bitácora de cierre registrada
+                </span>
+                {alertToInspect.resolutionDetails.closingTitle && (
+                  <p className="font-bold text-white">{alertToInspect.resolutionDetails.closingTitle}</p>
+                )}
+                <p className="text-slate-200">{alertToInspect.resolutionDetails.comment}</p>
+                {alertToInspect.resolutionDetails.correctiveActions && (
+                  <p className="text-slate-300 text-[11px]">
+                    <strong>Medidas:</strong> {alertToInspect.resolutionDetails.correctiveActions}
+                  </p>
+                )}
+              </div>
+            )}
+
+            <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+              {!isOperadorReadOnly && !alertToInspect.acknowledged && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onAcknowledgeAlert(alertToInspect.id);
+                    setAlertToInspect((prev) =>
+                      prev ? { ...prev, acknowledged: true, acknowledgedBy: currentUser?.name || 'Operación' } : null
+                    );
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold border border-slate-700"
+                >
+                  Reconocer
+                </button>
+              )}
+              {!isOperadorReadOnly && !alertToInspect.resolved && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    const target = alertToInspect;
+                    setAlertToInspect(null);
+                    setAlertToResolve(target);
+                  }}
+                  className="px-3.5 py-2 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold"
+                >
+                  Describir y Dar por Resuelta
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={() => setAlertToInspect(null)}
+                className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-200 text-xs font-semibold"
+              >
+                Cerrar
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Modal Imprimible In-App PDF (sin window.open, respetando rango de fechas) */}
       {showPrintPreview && !isOperadorReadOnly && (() => {
-        const rowsToExport = filteredAuditRecords.length > 0 ? filteredAuditRecords : allAuditRecords;
+        const rowsToExport = filteredAuditRecords;
+        const rangeLabel =
+          auditDateFrom || auditDateTo
+            ? `Rango: ${auditDateFrom || 'Inicio'} a ${auditDateTo || 'Hoy'}`
+            : 'Rango: Todo el historial';
         return (
           <div className="fixed inset-0 z-50 overflow-y-auto bg-slate-950/90 backdrop-blur-md p-3 sm:p-6 flex items-start justify-center">
             <div className="printable-audit-report bg-white text-slate-900 rounded-2xl max-w-4xl w-full p-6 sm:p-8 shadow-2xl space-y-5 my-4">
               <div className="no-print flex items-center justify-between gap-2 pb-4 border-b border-slate-200">
                 <span className="text-xs font-semibold text-slate-600">
-                  Vista Previa de Auditoría Oficial DS 132 ({rowsToExport.length} registros)
+                  Vista Previa de Auditoría Oficial DS 132 ({rowsToExport.length} registros · {rangeLabel})
                 </span>
                 <div className="flex items-center gap-2">
                   <button

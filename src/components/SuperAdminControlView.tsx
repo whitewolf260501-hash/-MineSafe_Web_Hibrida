@@ -51,6 +51,7 @@ import {
   PlatformConfig,
   RegisteredDeviceConfig,
   SensorDevice,
+  TypographySettings,
   UserProfile,
   UserRole,
   WindowOverrideValue
@@ -59,6 +60,9 @@ import {
   DEFAULT_PLATFORM_CONFIG,
   DEFAULT_ORGANIZATION,
   clampTextScalePct,
+  clampTitleScalePct,
+  clampSubtitleScalePct,
+  clampSmallTextScalePct,
   normalizeHeroTitleScale,
   savePlatformConfig,
   resetPlatformConfigToDefault,
@@ -86,6 +90,7 @@ interface SuperAdminControlViewProps {
   onUpdateUserRole?: (userId: string, newRole: UserRole) => Promise<void> | void;
   onToggleUserStatus?: (userId: string) => void;
   onPreviewTextScale?: (pct: number | null) => void;
+  onPreviewTypography?: (settings: TypographySettings | null) => void;
   onCatalogDeviceUpdated?: (device: RegisteredDeviceConfig) => void;
   onCatalogDeviceDeleted?: (deviceId: string) => void;
 }
@@ -202,6 +207,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   onUpdateUserRole,
   onToggleUserStatus,
   onPreviewTextScale,
+  onPreviewTypography,
   onCatalogDeviceUpdated,
   onCatalogDeviceDeleted,
 }) => {
@@ -254,8 +260,9 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
   useEffect(() => {
     return () => {
       onPreviewTextScale?.(null);
+      onPreviewTypography?.(null);
     };
-  }, [onPreviewTextScale]);
+  }, [onPreviewTextScale, onPreviewTypography]);
 
   // Seguridad estricta: solo el único SuperAdmin puede ver/usar este panel
   if (currentUser.role !== 'superadmin') {
@@ -771,23 +778,47 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
 
   const commitTextTypographyChange = (updates: {
     textScalePct?: number;
+    titleScalePct?: number;
+    subtitleScalePct?: number;
+    smallTextScalePct?: number;
     heroTitleScale?: HeroTitleScale;
   }) => {
     const nextPct =
       updates.textScalePct !== undefined
         ? clampTextScalePct(updates.textScalePct)
         : clampTextScalePct(draftConfigRef.current.appearance.textScalePct);
+    const nextTitlePct =
+      updates.titleScalePct !== undefined
+        ? clampTitleScalePct(updates.titleScalePct)
+        : clampTitleScalePct(draftConfigRef.current.appearance.titleScalePct);
+    const nextSubtitlePct =
+      updates.subtitleScalePct !== undefined
+        ? clampSubtitleScalePct(updates.subtitleScalePct)
+        : clampSubtitleScalePct(draftConfigRef.current.appearance.subtitleScalePct);
+    const nextSmallPct =
+      updates.smallTextScalePct !== undefined
+        ? clampSmallTextScalePct(updates.smallTextScalePct)
+        : clampSmallTextScalePct(draftConfigRef.current.appearance.smallTextScalePct);
     const nextHeroScale =
       updates.heroTitleScale !== undefined
         ? normalizeHeroTitleScale(updates.heroTitleScale)
         : normalizeHeroTitleScale(draftConfigRef.current.appearance.heroTitleScale);
 
     onPreviewTextScale?.(nextPct);
+    onPreviewTypography?.({
+      textScalePct: nextPct,
+      titleScalePct: nextTitlePct,
+      subtitleScalePct: nextSubtitlePct,
+      smallTextScalePct: nextSmallPct,
+    });
     commitVisibilityChange((prev) => ({
       ...prev,
       appearance: {
         ...prev.appearance,
         textScalePct: nextPct,
+        titleScalePct: nextTitlePct,
+        subtitleScalePct: nextSubtitlePct,
+        smallTextScalePct: nextSmallPct,
         heroTitleScale: nextHeroScale,
       },
     }));
@@ -1027,6 +1058,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
       draftConfigRef.current = restored;
       setDraftConfig(restored);
       onPreviewTextScale?.(null);
+      onPreviewTypography?.(null);
       soundAlert.playFeedbackBeep();
       showNotice('success', 'Se restauraron todas las métricas, tipografía, bloqueos y ajustes de página a los valores predeterminados.');
     } catch (err: any) {
@@ -2681,17 +2713,103 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
               </div>
             </div>
 
-            {/* Tamaño de Textos y Tipografía Global */}
+            {/* Tamaño de Textos y Tipografía Global Granular */}
             {(() => {
               const currentPct = clampTextScalePct(draftConfig.appearance.textScalePct);
+              const currentTitlePct = clampTitleScalePct(draftConfig.appearance.titleScalePct);
+              const currentSubtitlePct = clampSubtitleScalePct(draftConfig.appearance.subtitleScalePct);
+              const currentSmallPct = clampSmallTextScalePct(draftConfig.appearance.smallTextScalePct);
               const currentHeroScale = normalizeHeroTitleScale(draftConfig.appearance.heroTitleScale);
-              const basePxLabel = (16 * (currentPct / 100)).toFixed(1);
-              const presets: Array<{ label: string; pct: number }> = [
-                { label: 'Compacto', pct: 90 },
-                { label: 'Normal', pct: 100 },
-                { label: 'Grande', pct: 112 },
-                { label: 'Muy Grande', pct: 125 },
+              const isAllNeutral =
+                currentPct === 100 &&
+                currentTitlePct === 100 &&
+                currentSubtitlePct === 100 &&
+                currentSmallPct === 100;
+
+              const presets: Array<{
+                label: string;
+                values: TypographySettings;
+              }> = [
+                {
+                  label: 'Compacto',
+                  values: { titleScalePct: 90, subtitleScalePct: 90, textScalePct: 90, smallTextScalePct: 90 },
+                },
+                {
+                  label: 'Normal',
+                  values: { titleScalePct: 100, subtitleScalePct: 100, textScalePct: 100, smallTextScalePct: 100 },
+                },
+                {
+                  label: 'Grande',
+                  values: { titleScalePct: 118, subtitleScalePct: 114, textScalePct: 112, smallTextScalePct: 114 },
+                },
+                {
+                  label: 'Muy Grande',
+                  values: { titleScalePct: 138, subtitleScalePct: 128, textScalePct: 124, smallTextScalePct: 128 },
+                },
               ];
+
+              const channels: Array<{
+                key: keyof TypographySettings;
+                label: string;
+                hint: string;
+                value: number;
+                min: number;
+                max: number;
+                step: number;
+                basePx: number;
+                badgeClass: string;
+                clampFn: (v: number) => number;
+              }> = [
+                {
+                  key: 'titleScalePct',
+                  label: 'Títulos Principales',
+                  hint: 'Encabezados H1, H2 y títulos de vistas/paneles',
+                  value: currentTitlePct,
+                  min: 75,
+                  max: 160,
+                  step: 2,
+                  basePx: 24,
+                  badgeClass: 'bg-cyan-950/80 border-cyan-700/70 text-cyan-300',
+                  clampFn: clampTitleScalePct,
+                },
+                {
+                  key: 'subtitleScalePct',
+                  label: 'Subtítulos y Secciones',
+                  hint: 'Subtítulos descriptivos bajo encabezados y H3/H4',
+                  value: currentSubtitlePct,
+                  min: 75,
+                  max: 150,
+                  step: 2,
+                  basePx: 16,
+                  badgeClass: 'bg-purple-950/80 border-purple-700/70 text-purple-300',
+                  clampFn: clampSubtitleScalePct,
+                },
+                {
+                  key: 'textScalePct',
+                  label: 'Textos en General',
+                  hint: 'Párrafos, menús, tablas, formularios, alertas y botones',
+                  value: currentPct,
+                  min: 85,
+                  max: 130,
+                  step: 1,
+                  basePx: 14,
+                  badgeClass: 'bg-emerald-950/80 border-emerald-700/70 text-emerald-300',
+                  clampFn: clampTextScalePct,
+                },
+                {
+                  key: 'smallTextScalePct',
+                  label: 'Etiquetas y Textos Pequeños',
+                  hint: 'Badges, chips de estado, fechas y metadatos',
+                  value: currentSmallPct,
+                  min: 80,
+                  max: 140,
+                  step: 2,
+                  basePx: 11,
+                  badgeClass: 'bg-amber-950/80 border-amber-700/70 text-amber-300',
+                  clampFn: clampSmallTextScalePct,
+                },
+              ];
+
               const heroOptions: Array<{ id: HeroTitleScale; label: string }> = [
                 { id: 'compact', label: 'Compacto' },
                 { id: 'normal', label: 'Normal' },
@@ -2699,17 +2817,42 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 { id: 'xlarge', label: 'Extra Grande' },
               ];
 
+              const previewLiveFromDraft = (patch: Partial<TypographySettings>) => {
+                const nextSettings: TypographySettings = {
+                  textScalePct: clampTextScalePct(patch.textScalePct ?? draftConfigRef.current.appearance.textScalePct),
+                  titleScalePct: clampTitleScalePct(patch.titleScalePct ?? draftConfigRef.current.appearance.titleScalePct),
+                  subtitleScalePct: clampSubtitleScalePct(patch.subtitleScalePct ?? draftConfigRef.current.appearance.subtitleScalePct),
+                  smallTextScalePct: clampSmallTextScalePct(patch.smallTextScalePct ?? draftConfigRef.current.appearance.smallTextScalePct),
+                };
+                onPreviewTextScale?.(nextSettings.textScalePct);
+                onPreviewTypography?.(nextSettings);
+              };
+
               return (
-                <div className="p-4 rounded-xl bg-slate-950/70 border border-emerald-800/50 space-y-3.5">
+                <div className="p-4 rounded-xl bg-slate-950/70 border border-emerald-800/50 space-y-4">
                   <div className="flex flex-wrap items-center justify-between gap-2">
                     <span className="font-bold text-white flex items-center gap-2">
                       <Type className="w-4 h-4 text-emerald-400" />
                       Tamaño de Textos de la Plataforma
                     </span>
                     <div className="flex items-center gap-2">
-                      <span className="px-2 py-0.5 rounded bg-emerald-950/80 border border-emerald-700/70 text-emerald-300 font-mono text-[11px] font-bold">
-                        {currentPct}% ({basePxLabel}px)
-                      </span>
+                      {!isAllNeutral && (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            soundAlert.playFeedbackBeep();
+                            commitTextTypographyChange({
+                              titleScalePct: 100,
+                              subtitleScalePct: 100,
+                              textScalePct: 100,
+                              smallTextScalePct: 100,
+                            });
+                          }}
+                          className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-cyan-300 hover:bg-slate-800 text-[10px] font-semibold cursor-pointer"
+                        >
+                          Restablecer 100%
+                        </button>
+                      )}
                       {visibilitySyncState === 'saving' ? (
                         <span className="text-[10px] text-amber-300 font-semibold">Guardando...</span>
                       ) : visibilitySyncState === 'saved' ? (
@@ -2719,101 +2862,159 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                   </div>
 
                   <p className="text-[11px] text-slate-400">
-                    Ajusta en tiempo real el tamaño general de todos los textos (menús, tarjetas, tablas, alertas y lecturas) para toda la plataforma. Se guarda automáticamente en Firebase.
+                    Ajusta de forma independiente o en conjunto el tamaño de todos los títulos, subtítulos, textos generales y etiquetas pequeñas de toda la plataforma. Se guarda automáticamente en Firebase.
                   </p>
 
                   {/* Presets rápidos */}
                   <div className="grid grid-cols-2 sm:grid-cols-4 gap-2">
                     {presets.map((preset) => {
-                      const active = currentPct === preset.pct;
+                      const active =
+                        currentTitlePct === preset.values.titleScalePct &&
+                        currentSubtitlePct === preset.values.subtitleScalePct &&
+                        currentPct === preset.values.textScalePct &&
+                        currentSmallPct === preset.values.smallTextScalePct;
                       return (
                         <button
-                          key={preset.pct}
+                          key={preset.label}
                           type="button"
                           onClick={() => {
                             soundAlert.playFeedbackBeep();
-                            commitTextTypographyChange({ textScalePct: preset.pct });
+                            commitTextTypographyChange(preset.values);
                           }}
-                          className={`px-2.5 py-2 rounded-lg border text-[11px] font-bold transition-colors flex flex-col items-center ${
+                          className={`px-2.5 py-2 rounded-lg border text-[11px] font-bold transition-colors flex flex-col items-center cursor-pointer ${
                             active
                               ? 'bg-emerald-600 text-white border-emerald-400 shadow-sm'
                               : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-emerald-700 hover:text-white'
                           }`}
                         >
                           <span>{preset.label}</span>
-                          <span className="text-[10px] font-mono opacity-80">{preset.pct}%</span>
+                          <span className="text-[10px] font-mono opacity-80">
+                            {preset.values.textScalePct}%
+                          </span>
                         </button>
                       );
                     })}
                   </div>
 
-                  {/* Control fino con slider + botones A- / A+ */}
-                  <div className="flex items-center gap-2.5 pt-1">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundAlert.playFeedbackBeep();
-                        commitTextTypographyChange({ textScalePct: currentPct - 2 });
-                      }}
-                      disabled={currentPct <= 85}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0"
-                      title="Reducir tamaño de texto (-2%)"
-                    >
-                      A-
-                    </button>
-                    <input
-                      type="range"
-                      min={85}
-                      max={130}
-                      step={1}
-                      aria-label="Escala global de textos de la plataforma"
-                      value={currentPct}
-                      onChange={(e) => {
-                        const val = clampTextScalePct(Number(e.target.value));
-                        handleAppearanceChange('textScalePct', val);
-                        onPreviewTextScale?.(val);
-                      }}
-                      onMouseUp={() =>
-                        commitTextTypographyChange({
-                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
-                        })
-                      }
-                      onTouchEnd={() =>
-                        commitTextTypographyChange({
-                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
-                        })
-                      }
-                      onKeyUp={() =>
-                        commitTextTypographyChange({
-                          textScalePct: clampTextScalePct(draftConfigRef.current.appearance.textScalePct),
-                        })
-                      }
-                      className="w-full accent-emerald-500 cursor-pointer"
-                    />
-                    <button
-                      type="button"
-                      onClick={() => {
-                        soundAlert.playFeedbackBeep();
-                        commitTextTypographyChange({ textScalePct: currentPct + 2 });
-                      }}
-                      disabled={currentPct >= 130}
-                      className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0"
-                      title="Aumentar tamaño de texto (+2%)"
-                    >
-                      A+
-                    </button>
-                    {currentPct !== 100 && (
-                      <button
-                        type="button"
-                        onClick={() => {
-                          soundAlert.playFeedbackBeep();
-                          commitTextTypographyChange({ textScalePct: 100 });
-                        }}
-                        className="px-2.5 py-1.5 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 hover:bg-slate-800 text-[11px] font-semibold shrink-0"
-                      >
-                        100%
-                      </button>
-                    )}
+                  {/* Controles granulares independientes */}
+                  <div className="space-y-2.5">
+                    {channels.map((ch) => {
+                      const pxLabel = (ch.basePx * (ch.value / 100)).toFixed(1);
+                      return (
+                        <div
+                          key={ch.key}
+                          className="p-3 rounded-lg bg-slate-900/70 border border-slate-800/90 space-y-2"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2">
+                            <div>
+                              <span className="text-xs font-bold text-white block leading-tight">
+                                {ch.label}
+                              </span>
+                              <span className="text-[10px] text-slate-400 block">
+                                {ch.hint}
+                              </span>
+                            </div>
+                            <span
+                              className={`px-2 py-0.5 rounded border font-mono text-[11px] font-bold ${ch.badgeClass}`}
+                            >
+                              {ch.value}% ({pxLabel}px)
+                            </span>
+                          </div>
+
+                          <div className="flex items-center gap-2">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                soundAlert.playFeedbackBeep();
+                                commitTextTypographyChange({ [ch.key]: ch.value - ch.step });
+                              }}
+                              disabled={ch.value <= ch.min}
+                              className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0 cursor-pointer"
+                              title={`Reducir ${ch.label}`}
+                            >
+                              A-
+                            </button>
+                            <input
+                              type="range"
+                              min={ch.min}
+                              max={ch.max}
+                              step={ch.step}
+                              aria-label={`Escala de ${ch.label}`}
+                              value={ch.value}
+                              onChange={(e) => {
+                                const val = ch.clampFn(Number(e.target.value));
+                                handleAppearanceChange(ch.key, val);
+                                previewLiveFromDraft({ [ch.key]: val });
+                              }}
+                              onMouseUp={() =>
+                                commitTextTypographyChange({
+                                  [ch.key]: ch.clampFn(Number(draftConfigRef.current.appearance[ch.key] ?? 100)),
+                                })
+                              }
+                              onTouchEnd={() =>
+                                commitTextTypographyChange({
+                                  [ch.key]: ch.clampFn(Number(draftConfigRef.current.appearance[ch.key] ?? 100)),
+                                })
+                              }
+                              onKeyUp={() =>
+                                commitTextTypographyChange({
+                                  [ch.key]: ch.clampFn(Number(draftConfigRef.current.appearance[ch.key] ?? 100)),
+                                })
+                              }
+                              className="w-full accent-emerald-500 cursor-pointer"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => {
+                                soundAlert.playFeedbackBeep();
+                                commitTextTypographyChange({ [ch.key]: ch.value + ch.step });
+                              }}
+                              disabled={ch.value >= ch.max}
+                              className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-slate-200 hover:bg-slate-800 font-bold text-xs disabled:opacity-40 shrink-0 cursor-pointer"
+                              title={`Aumentar ${ch.label}`}
+                            >
+                              A+
+                            </button>
+                            {ch.value !== 100 && (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  soundAlert.playFeedbackBeep();
+                                  commitTextTypographyChange({ [ch.key]: 100 });
+                                }}
+                                className="px-2 py-1 rounded-lg bg-slate-950 border border-slate-700 text-cyan-300 hover:bg-slate-800 text-[10px] font-semibold shrink-0 cursor-pointer"
+                              >
+                                100%
+                              </button>
+                            )}
+                          </div>
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Vista previa tipográfica en vivo */}
+                  <div className="p-3.5 rounded-lg bg-slate-900/90 border border-slate-800 space-y-1.5">
+                    <span className="text-[10px] uppercase tracking-wider font-bold text-slate-400 block">
+                      Vista Previa Tipográfica en Vivo
+                    </span>
+                    <h2 className="text-lg font-extrabold text-white leading-tight">
+                      MineSafe: Monitoreo IoT
+                    </h2>
+                    <p className="text-xs text-cyan-300 font-medium">
+                      Subtítulo de supervisión ambiental y control de galerías subterráneas.
+                    </p>
+                    <p className="text-xs text-slate-300">
+                      Texto general utilizado en tablas, formularios, alertas y reportes históricos.
+                    </p>
+                    <div className="flex items-center gap-2 pt-0.5">
+                      <span className="px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-700/60 text-emerald-300 text-[10px] font-bold">
+                        EN LÍNEA
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-400">
+                        Actualizado hace 2s
+                      </span>
+                    </div>
                   </div>
 
                   {/* Tamaño específico del Título y Subtítulo del Dashboard */}
@@ -2832,7 +3033,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                               soundAlert.playFeedbackBeep();
                               commitTextTypographyChange({ heroTitleScale: opt.id });
                             }}
-                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors ${
+                            className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-semibold transition-colors cursor-pointer ${
                               active
                                 ? 'bg-cyan-600 text-white border-cyan-400'
                                 : 'bg-slate-900 text-slate-300 border-slate-800 hover:border-cyan-700'

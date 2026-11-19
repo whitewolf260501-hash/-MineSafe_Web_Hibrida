@@ -483,12 +483,22 @@ export interface PlatformMetricsConfig {
 
 export type HeroTitleScale = 'compact' | 'normal' | 'large' | 'xlarge';
 
+export interface TypographySettings {
+  textScalePct: number;
+  titleScalePct: number;
+  subtitleScalePct: number;
+  smallTextScalePct: number;
+}
+
 export interface PlatformAppearanceConfig {
   platformTitle: string;
   platformSubtitle: string;
   siteBadgeText: string;
   footerText: string;
   textScalePct?: number;
+  titleScalePct?: number;
+  subtitleScalePct?: number;
+  smallTextScalePct?: number;
   heroTitleScale?: HeroTitleScale;
   announcementEnabled: boolean;
   announcementText: string;

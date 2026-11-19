@@ -3930,6 +3930,9 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
     siteBadgeText: 'Faena El Teniente · Nivel -510m',
     footerText: 'Cumplimiento Normativo DS 132 / Sernageomin · Plataforma Industrial',
     textScalePct: 100,
+    titleScalePct: 100,
+    subtitleScalePct: 100,
+    smallTextScalePct: 100,
     heroTitleScale: 'normal',
     announcementEnabled: false,
     announcementText: '',
@@ -4229,6 +4232,9 @@ function mergePlatformConfig(raw: any): PlatformConfig {
       ...DEFAULT_PLATFORM_CONFIG.appearance,
       ...(raw?.appearance || {}),
       textScalePct: clampTextScalePct(raw?.appearance?.textScalePct),
+      titleScalePct: clampTitleScalePct(raw?.appearance?.titleScalePct),
+      subtitleScalePct: clampSubtitleScalePct(raw?.appearance?.subtitleScalePct),
+      smallTextScalePct: clampSmallTextScalePct(raw?.appearance?.smallTextScalePct),
       heroTitleScale: normalizeHeroTitleScale(raw?.appearance?.heroTitleScale),
     },
     registeredDevices: Array.isArray(raw?.registeredDevices)
@@ -4247,6 +4253,24 @@ export function clampTextScalePct(val?: number | null): number {
   const n = typeof val === 'number' ? val : Number(val);
   if (!Number.isFinite(n) || n <= 0) return 100;
   return Math.min(130, Math.max(85, Math.round(n)));
+}
+
+export function clampTitleScalePct(val?: number | null): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 100;
+  return Math.min(160, Math.max(75, Math.round(n)));
+}
+
+export function clampSubtitleScalePct(val?: number | null): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 100;
+  return Math.min(150, Math.max(75, Math.round(n)));
+}
+
+export function clampSmallTextScalePct(val?: number | null): number {
+  const n = typeof val === 'number' ? val : Number(val);
+  if (!Number.isFinite(n) || n <= 0) return 100;
+  return Math.min(140, Math.max(80, Math.round(n)));
 }
 
 export function normalizeHeroTitleScale(
@@ -4365,6 +4389,9 @@ export async function savePlatformConfig(
         ...DEFAULT_PLATFORM_CONFIG.appearance,
         ...(config.appearance || {}),
         textScalePct: clampTextScalePct(config.appearance?.textScalePct),
+        titleScalePct: clampTitleScalePct(config.appearance?.titleScalePct),
+        subtitleScalePct: clampSubtitleScalePct(config.appearance?.subtitleScalePct),
+        smallTextScalePct: clampSmallTextScalePct(config.appearance?.smallTextScalePct),
         heroTitleScale: normalizeHeroTitleScale(config.appearance?.heroTitleScale),
       },
       actualizado_en: Date.now(),

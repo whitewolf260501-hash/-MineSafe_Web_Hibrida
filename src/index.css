@@ -33,20 +33,98 @@
   }
 }
 
+/* ============================================================================
+   MOTOR TIPOGRÁFICO GRANULAR (TÍTULOS, SUBTÍTULOS, TEXTO GENERAL Y ETIQUETAS)
+   ============================================================================ */
+html[data-text-scaled="true"] {
+  --text-xs: calc(0.75rem * var(--ms-text-scale, 1));
+  --text-sm: calc(0.875rem * var(--ms-text-scale, 1));
+  --text-base: calc(1rem * var(--ms-text-scale, 1));
+  --text-lg: calc(1.125rem * var(--ms-text-scale, 1));
+  --text-xl: calc(1.25rem * var(--ms-text-scale, 1));
+  --text-2xl: calc(1.5rem * var(--ms-text-scale, 1));
+  --text-3xl: calc(1.875rem * var(--ms-text-scale, 1));
+  --text-4xl: calc(2.25rem * var(--ms-text-scale, 1));
+  --text-5xl: calc(3rem * var(--ms-text-scale, 1));
+  --text-6xl: calc(3.75rem * var(--ms-text-scale, 1));
+}
+
+html[data-text-scaled="true"] body {
+  font-size: calc(1rem * var(--ms-text-scale, 1));
+}
+
+/* Etiquetas y textos pequeños en píxeles fijos */
+html[data-text-scaled="true"] .text-\[8px\] {
+  font-size: calc(8px * var(--ms-small-scale, var(--ms-text-scale, 1)));
+}
+
 html[data-text-scaled="true"] .text-\[9px\] {
-  font-size: calc(9px * var(--ms-text-scale, 1));
+  font-size: calc(9px * var(--ms-small-scale, var(--ms-text-scale, 1)));
 }
 
 html[data-text-scaled="true"] .text-\[10px\] {
-  font-size: calc(10px * var(--ms-text-scale, 1));
+  font-size: calc(10px * var(--ms-small-scale, var(--ms-text-scale, 1)));
 }
 
 html[data-text-scaled="true"] .text-\[11px\] {
-  font-size: calc(11px * var(--ms-text-scale, 1));
+  font-size: calc(11px * var(--ms-small-scale, var(--ms-text-scale, 1)));
 }
 
 html[data-text-scaled="true"] .text-\[12px\] {
-  font-size: calc(12px * var(--ms-text-scale, 1));
+  font-size: calc(12px * var(--ms-small-scale, var(--ms-text-scale, 1)));
+}
+
+/* Títulos principales (h1, h2 y .ms-title) en todas las vistas */
+html[data-text-scaled="true"] :is(h1, h2, .ms-title) {
+  --text-xs: calc(0.75rem * var(--ms-title-scale, 1));
+  --text-sm: calc(0.875rem * var(--ms-title-scale, 1));
+  --text-base: calc(1rem * var(--ms-title-scale, 1));
+  --text-lg: calc(1.125rem * var(--ms-title-scale, 1));
+  --text-xl: calc(1.25rem * var(--ms-title-scale, 1));
+  --text-2xl: calc(1.5rem * var(--ms-title-scale, 1));
+  --text-3xl: calc(1.875rem * var(--ms-title-scale, 1));
+  --text-4xl: calc(2.25rem * var(--ms-title-scale, 1));
+  --text-5xl: calc(3rem * var(--ms-title-scale, 1));
+  --text-6xl: calc(3.75rem * var(--ms-title-scale, 1));
+}
+
+/* Chips / badges pequeños dentro de títulos mantienen escala general */
+html[data-text-scaled="true"] :is(h1, h2, .ms-title) :is(.text-xs, .text-sm) {
+  --text-xs: calc(0.75rem * var(--ms-text-scale, 1));
+  --text-sm: calc(0.875rem * var(--ms-text-scale, 1));
+}
+
+/* Subtítulos y encabezados secundarios (h3-h6, .ms-subtitle y párrafo descriptivo bajo h1/h2) */
+html[data-text-scaled="true"] :is(h3, h4, h5, h6, .ms-subtitle),
+html[data-text-scaled="true"] :is(h1, h2) + p {
+  --text-xs: calc(0.75rem * var(--ms-subtitle-scale, 1));
+  --text-sm: calc(0.875rem * var(--ms-subtitle-scale, 1));
+  --text-base: calc(1rem * var(--ms-subtitle-scale, 1));
+  --text-lg: calc(1.125rem * var(--ms-subtitle-scale, 1));
+  --text-xl: calc(1.25rem * var(--ms-subtitle-scale, 1));
+  --text-2xl: calc(1.5rem * var(--ms-subtitle-scale, 1));
+  --text-3xl: calc(1.875rem * var(--ms-subtitle-scale, 1));
+  --text-4xl: calc(2.25rem * var(--ms-subtitle-scale, 1));
+}
+
+/* Párrafos subtítulo sin clase text-* explícita (heredan tamaño del contenedor) */
+html[data-text-scaled="true"] :is(h1, h2) + p:not([class*="text-xs"]):not([class*="text-sm"]):not([class*="text-base"]):not([class*="text-lg"]):not([class*="text-xl"]):not([class*="text-["]) {
+  font-size: calc(1em * var(--ms-subtitle-scale, 1) / var(--ms-text-scale, 1));
+}
+
+html[data-text-scaled="true"] :is(h3, h4, h5, h6, .ms-subtitle).text-\[10px\],
+html[data-text-scaled="true"] :is(h1, h2) + p.text-\[10px\] {
+  font-size: calc(10px * var(--ms-subtitle-scale, 1));
+}
+
+html[data-text-scaled="true"] :is(h3, h4, h5, h6, .ms-subtitle).text-\[11px\],
+html[data-text-scaled="true"] :is(h1, h2) + p.text-\[11px\] {
+  font-size: calc(11px * var(--ms-subtitle-scale, 1));
+}
+
+html[data-text-scaled="true"] :is(h3, h4, h5, h6, .ms-subtitle).text-\[12px\],
+html[data-text-scaled="true"] :is(h1, h2) + p.text-\[12px\] {
+  font-size: calc(12px * var(--ms-subtitle-scale, 1));
 }
 
 .ms-boot-loader {

@@ -7,6 +7,9 @@ import {
   buildAtomicPaymentUpdates,
   buildOrgScopedAttachmentPath,
   clampTextScalePct,
+  clampTitleScalePct,
+  clampSubtitleScalePct,
+  clampSmallTextScalePct,
   DEFAULT_PLATFORM_CONFIG,
   evaluateWatchedUserStatusSnapshots,
   fetchPaginatedTelemetryHistory,
@@ -1722,12 +1725,21 @@ async function runTests() {
   // 23. Control de tamaño de textos desde Control Maestro
   // ---------------------------------------------------------------------------
   assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.textScalePct, 100);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.titleScalePct, 100);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.subtitleScalePct, 100);
+  assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.smallTextScalePct, 100);
   assert.equal(DEFAULT_PLATFORM_CONFIG.appearance.heroTitleScale, 'normal');
   assert.equal(clampTextScalePct(undefined), 100);
   assert.equal(clampTextScalePct(0), 100);
   assert.equal(clampTextScalePct(50), 85);
   assert.equal(clampTextScalePct(112.4), 112);
   assert.equal(clampTextScalePct(180), 130);
+  assert.equal(clampTitleScalePct(50), 75);
+  assert.equal(clampTitleScalePct(200), 160);
+  assert.equal(clampSubtitleScalePct(50), 75);
+  assert.equal(clampSubtitleScalePct(200), 150);
+  assert.equal(clampSmallTextScalePct(50), 80);
+  assert.equal(clampSmallTextScalePct(200), 140);
   assert.equal(normalizeHeroTitleScale('large'), 'large');
   assert.equal(normalizeHeroTitleScale('xlarge'), 'xlarge');
   assert.equal(normalizeHeroTitleScale('invalid-scale'), 'normal');
@@ -1735,21 +1747,37 @@ async function runTests() {
   const appSrcForTypography = readRepoFile('src/App.tsx');
   const dashboardSrcForTypography = readRepoFile('src/components/DashboardView.tsx');
   const cssSrcForTypography = readRepoFile('src/index.css');
+  const typoModalSrc = readRepoFile('src/components/TypographyControlModal.tsx');
+  const navbarSrcForTypo = readRepoFile('src/components/Navbar.tsx');
   assert.ok(
     controlViewSrc.includes('commitTextTypographyChange') &&
       controlViewSrc.includes('Tamaño de Textos de la Plataforma') &&
+      controlViewSrc.includes('titleScalePct') &&
+      controlViewSrc.includes('subtitleScalePct') &&
+      controlViewSrc.includes('smallTextScalePct') &&
       controlViewSrc.includes('heroTitleScale'),
-    'Control Maestro exposes global text scale and dashboard title size controls'
+    'Control Maestro exposes granular title, subtitle, general text, small label, and hero title controls'
   );
   assert.ok(
     appSrcForTypography.includes('effectiveTextScalePct') &&
+      appSrcForTypography.includes('--ms-title-scale') &&
+      appSrcForTypography.includes('--ms-subtitle-scale') &&
+      appSrcForTypography.includes('--ms-small-scale') &&
       appSrcForTypography.includes('data-text-scaled') &&
+      appSrcForTypography.includes('TypographyControlModal') &&
+      navbarSrcForTypo.includes('onOpenTypography') &&
+      typoModalSrc.includes('Títulos Principales') &&
+      typoModalSrc.includes('Subtítulos y Secciones') &&
+      typoModalSrc.includes('Textos en General') &&
       dashboardSrcForTypography.includes('heroTitleScale') &&
-      cssSrcForTypography.includes('html[data-text-scaled="true"]'),
-    'Global text scale and hero title scale are wired across App, DashboardView, and index.css'
+      cssSrcForTypography.includes('html[data-text-scaled="true"]') &&
+      cssSrcForTypography.includes('--ms-title-scale') &&
+      cssSrcForTypography.includes('--ms-subtitle-scale') &&
+      cssSrcForTypography.includes('--ms-small-scale'),
+    '4-channel granular typography scale is wired across App, Navbar, TypographyControlModal, DashboardView, and index.css'
   );
 
-  console.log('✅ 23. Control Maestro global text scale & hero title scale passed');
+  console.log('✅ 23. Granular typography controls (titles, subtitles, general text, small labels & modal) passed');
 
   // ---------------------------------------------------------------------------
   // 24. Auditoría Integral 6 Módulos (Jerarquía, Landing/Auth, Dashboard, Gateway, Monitoreo, Alertas)

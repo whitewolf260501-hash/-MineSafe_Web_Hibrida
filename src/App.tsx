@@ -12,6 +12,7 @@ import { SuperAdminControlView } from './components/SuperAdminControlView';
 import { SuperAdminViewsCustomizerView } from './components/SuperAdminViewsCustomizerView';
 import { LoginModal } from './components/LoginModal';
 import { ChangePasswordModal } from './components/ChangePasswordModal';
+import { TypographyControlModal } from './components/TypographyControlModal';
 import { EmergencyModal, DrillType } from './components/EmergencyModal';
 import { alertEngine } from './services/alertEngine';
 
@@ -39,7 +40,8 @@ import {
   Organization,
   TelemetryHistoryPoint,
   AlertEventRecord,
-  MiningCrew
+  MiningCrew,
+  TypographySettings
 } from './types';
 import {
   TelemetryRangeWindow,
@@ -111,6 +113,10 @@ import {
   saveDrillDebriefInRTDB,
   DEFAULT_PLATFORM_CONFIG,
   clampTextScalePct,
+  clampTitleScalePct,
+  clampSubtitleScalePct,
+  clampSmallTextScalePct,
+  savePlatformConfig,
   subscribeToPlatformConfig,
   isTabVisibleForUser,
   isSectionVisibleForUser,
@@ -241,6 +247,7 @@ export default function App({
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
   const [showChangePasswordModal, setShowChangePasswordModal] = useState<boolean>(false);
+  const [showTypographyModal, setShowTypographyModal] = useState<boolean>(false);
   const [showEmergencyModal, setShowEmergencyModal] = useState<boolean>(false);
   const [evacuationActive, setEvacuationActive] = useState<boolean>(false);
   const [isFirebaseConnected, setIsFirebaseConnected] = useState<boolean>(false);
@@ -252,6 +259,22 @@ export default function App({
   const [platformConfig, setPlatformConfig] = useState<PlatformConfig>(DEFAULT_PLATFORM_CONFIG);
   const [catalogDevices, setCatalogDevices] = useState<RegisteredDeviceConfig[]>([]);
   const [previewTextScalePct, setPreviewTextScalePct] = useState<number | null>(null);
+  const [previewTypography, setPreviewTypography] = useState<TypographySettings | null>(null);
+  const [localTypographyOverride, setLocalTypographyOverride] = useState<TypographySettings | null>(() => {
+    try {
+      const raw = localStorage.getItem('minesafe_user_typography_v1');
+      if (!raw) return null;
+      const parsed = JSON.parse(raw);
+      return {
+        textScalePct: clampTextScalePct(parsed?.textScalePct),
+        titleScalePct: clampTitleScalePct(parsed?.titleScalePct),
+        subtitleScalePct: clampSubtitleScalePct(parsed?.subtitleScalePct),
+        smallTextScalePct: clampSmallTextScalePct(parsed?.smallTextScalePct),
+      };
+    } catch {
+      return null;
+    }
+  });
   const [alarmFeedback, setAlarmFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
 
   useEffect(() => {
@@ -270,29 +293,131 @@ export default function App({
   // Keep timeout ref synchronized with SuperAdmin platform metrics
   timeoutSecondsRef.current = platformConfig.metrics.gatewayTimeoutSeconds || 20;
 
-  // Escala tipográfica global controlada desde Control Maestro (aplica a todo el panel autenticado)
-  const effectiveTextScalePct =
-    previewTextScalePct !== null
-      ? clampTextScalePct(previewTextScalePct)
-      : clampTextScalePct(platformConfig.appearance?.textScalePct);
+  // Escala tipográfica granular (Títulos, Subtítulos, Textos en general y Etiquetas)
+  const globalTypography = useMemo<TypographySettings>(
+    () => ({
+      textScalePct: clampTextScalePct(platformConfig.appearance?.textScalePct),
+      titleScalePct: clampTitleScalePct(platformConfig.appearance?.titleScalePct),
+      subtitleScalePct: clampSubtitleScalePct(platformConfig.appearance?.subtitleScalePct),
+      smallTextScalePct: clampSmallTextScalePct(platformConfig.appearance?.smallTextScalePct),
+    }),
+    [platformConfig.appearance]
+  );
+
+  const effectiveTypography = useMemo<TypographySettings>(() => {
+    if (previewTypography) {
+      return {
+        textScalePct: clampTextScalePct(previewTypography.textScalePct),
+        titleScalePct: clampTitleScalePct(previewTypography.titleScalePct),
+        subtitleScalePct: clampSubtitleScalePct(previewTypography.subtitleScalePct),
+        smallTextScalePct: clampSmallTextScalePct(previewTypography.smallTextScalePct),
+      };
+    }
+    if (previewTextScalePct !== null) {
+      return {
+        ...globalTypography,
+        textScalePct: clampTextScalePct(previewTextScalePct),
+      };
+    }
+    if (localTypographyOverride) {
+      return localTypographyOverride;
+    }
+    return globalTypography;
+  }, [previewTypography, previewTextScalePct, localTypographyOverride, globalTypography]);
+
+  const effectiveTextScalePct = effectiveTypography.textScalePct;
+  const isCustomTypographyActive =
+    effectiveTypography.textScalePct !== 100 ||
+    effectiveTypography.titleScalePct !== 100 ||
+    effectiveTypography.subtitleScalePct !== 100 ||
+    effectiveTypography.smallTextScalePct !== 100;
+
+  const handleLocalTypographyChange = useCallback((next: TypographySettings) => {
+    const normalized: TypographySettings = {
+      textScalePct: clampTextScalePct(next.textScalePct),
+      titleScalePct: clampTitleScalePct(next.titleScalePct),
+      subtitleScalePct: clampSubtitleScalePct(next.subtitleScalePct),
+      smallTextScalePct: clampSmallTextScalePct(next.smallTextScalePct),
+    };
+    setLocalTypographyOverride(normalized);
+    try {
+      localStorage.setItem('minesafe_user_typography_v1', JSON.stringify(normalized));
+    } catch {
+      // ignore storage quota errors
+    }
+  }, []);
+
+  const handleResetTypographyToGlobal = useCallback(() => {
+    setLocalTypographyOverride(null);
+    setPreviewTypography(null);
+    setPreviewTextScalePct(null);
+    try {
+      localStorage.removeItem('minesafe_user_typography_v1');
+    } catch {
+      // ignore storage errors
+    }
+  }, []);
+
+  const handleSaveGlobalTypography = useCallback(
+    async (next: TypographySettings) => {
+      if (currentUser.role !== 'superadmin') return;
+      const updatedConfig: PlatformConfig = {
+        ...platformConfig,
+        appearance: {
+          ...platformConfig.appearance,
+          textScalePct: clampTextScalePct(next.textScalePct),
+          titleScalePct: clampTitleScalePct(next.titleScalePct),
+          subtitleScalePct: clampSubtitleScalePct(next.subtitleScalePct),
+          smallTextScalePct: clampSmallTextScalePct(next.smallTextScalePct),
+        },
+      };
+      await savePlatformConfig(updatedConfig, currentUser);
+      setPlatformConfig(updatedConfig);
+      // Clear local override so global config stays the single source of truth
+      setLocalTypographyOverride(null);
+      setPreviewTypography(null);
+      setPreviewTextScalePct(null);
+      try {
+        localStorage.removeItem('minesafe_user_typography_v1');
+      } catch {
+        // ignore
+      }
+    },
+    [currentUser, platformConfig]
+  );
 
   useEffect(() => {
     const root = document.documentElement;
-    if (effectiveTextScalePct === 100) {
+    const anyScaled =
+      effectiveTypography.textScalePct !== 100 ||
+      effectiveTypography.titleScalePct !== 100 ||
+      effectiveTypography.subtitleScalePct !== 100 ||
+      effectiveTypography.smallTextScalePct !== 100;
+
+    if (!anyScaled) {
       root.style.fontSize = '';
       root.style.removeProperty('--ms-text-scale');
+      root.style.removeProperty('--ms-title-scale');
+      root.style.removeProperty('--ms-subtitle-scale');
+      root.style.removeProperty('--ms-small-scale');
       root.removeAttribute('data-text-scaled');
     } else {
-      root.style.fontSize = `${effectiveTextScalePct}%`;
-      root.style.setProperty('--ms-text-scale', (effectiveTextScalePct / 100).toFixed(3));
+      root.style.fontSize = '';
+      root.style.setProperty('--ms-text-scale', (effectiveTypography.textScalePct / 100).toFixed(3));
+      root.style.setProperty('--ms-title-scale', (effectiveTypography.titleScalePct / 100).toFixed(3));
+      root.style.setProperty('--ms-subtitle-scale', (effectiveTypography.subtitleScalePct / 100).toFixed(3));
+      root.style.setProperty('--ms-small-scale', (effectiveTypography.smallTextScalePct / 100).toFixed(3));
       root.setAttribute('data-text-scaled', 'true');
     }
     return () => {
       root.style.fontSize = '';
       root.style.removeProperty('--ms-text-scale');
+      root.style.removeProperty('--ms-title-scale');
+      root.style.removeProperty('--ms-subtitle-scale');
+      root.style.removeProperty('--ms-small-scale');
       root.removeAttribute('data-text-scaled');
     };
-  }, [effectiveTextScalePct]);
+  }, [effectiveTypography, effectiveTextScalePct]);
 
   // Multi-organization scoping: SuperAdmin can switch any org or inspect all ('all');
   // Admins can switch between their primary org and organizations they created/own.
@@ -2215,6 +2340,8 @@ export default function App({
         platformConfig={platformConfig}
         theme={theme}
         onToggleTheme={handleToggleTheme}
+        onOpenTypography={() => setShowTypographyModal(true)}
+        isCustomTypographyActive={isCustomTypographyActive}
         organizations={scopedOrganizations}
         activeOrganizationId={effectiveOrgId}
         onSelectOrganization={setActiveOrganizationId}
@@ -2724,6 +2851,7 @@ export default function App({
                 onUpdateUserRole={handleUpdateUserRole}
                 onToggleUserStatus={handleToggleUserStatus}
                 onPreviewTextScale={setPreviewTextScalePct}
+                onPreviewTypography={setPreviewTypography}
                 onCatalogDeviceUpdated={(savedReg) => {
                   setCatalogDevices((prev) => {
                     const exists = prev.some((d) => d.id === savedReg.id);
@@ -2789,6 +2917,24 @@ export default function App({
           user={currentUser}
           onClose={() => setShowChangePasswordModal(false)}
           onPasswordChanged={(updated) => setCurrentUser(updated)}
+        />
+      )}
+
+      {/* Granular Typography Control Drawer (Titles, Subtitles, General Text & Small Labels) */}
+      {showTypographyModal && (
+        <TypographyControlModal
+          currentUser={currentUser}
+          effectiveTypography={effectiveTypography}
+          globalTypography={globalTypography}
+          hasLocalOverride={localTypographyOverride !== null}
+          onPreviewLive={setPreviewTypography}
+          onChangeLocal={handleLocalTypographyChange}
+          onResetToGlobal={handleResetTypographyToGlobal}
+          onSaveGlobal={currentUser.role === 'superadmin' ? handleSaveGlobalTypography : undefined}
+          onClose={() => {
+            setPreviewTypography(null);
+            setShowTypographyModal(false);
+          }}
         />
       )}
 

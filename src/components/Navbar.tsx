@@ -31,7 +31,8 @@ import {
   Eye,
   ShieldCheck,
   LayoutGrid,
-  KeyRound
+  KeyRound,
+  Type
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
@@ -65,6 +66,8 @@ interface NavbarProps {
   platformConfig?: PlatformConfig;
   theme?: 'dark' | 'light';
   onToggleTheme?: () => void;
+  onOpenTypography?: () => void;
+  isCustomTypographyActive?: boolean;
   organizations?: Organization[];
   activeOrganizationId?: string;
   onSelectOrganization?: (orgId: string) => void;
@@ -88,6 +91,8 @@ export const Navbar: React.FC<NavbarProps> = ({
   platformConfig,
   theme = 'dark',
   onToggleTheme,
+  onOpenTypography,
+  isCustomTypographyActive = false,
   organizations = [],
   activeOrganizationId = 'all',
   onSelectOrganization,
@@ -344,6 +349,29 @@ export const Navbar: React.FC<NavbarProps> = ({
               </button>
             )}
 
+            {/* Quick Typography / Font Size Controls */}
+            {onOpenTypography && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundAlert.playFeedbackBeep();
+                  onOpenTypography();
+                }}
+                title="Ajustar tamaños de letra (títulos, subtítulos y textos generales)"
+                className={`relative flex items-center gap-1 px-2.5 py-1.5 rounded-lg border text-xs font-semibold transition-colors shrink-0 cursor-pointer ${
+                  isCustomTypographyActive
+                    ? 'border-emerald-600/70 bg-emerald-950/60 text-emerald-200 hover:bg-emerald-900/60'
+                    : 'border-slate-800 bg-slate-900/90 hover:bg-slate-800 text-slate-200'
+                }`}
+              >
+                <Type className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="text-[11px]">Aa</span>
+                {isCustomTypographyActive && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 shrink-0" />
+                )}
+              </button>
+            )}
+
             {/* Organization Switcher strictly for SuperAdmin & Admin MineSafe */}
             {isGlobalAdmin &&
               organizations.length > 0 &&
@@ -436,6 +464,24 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Mobile menu trigger button */}
           <div className="flex md:hidden items-center gap-1.5">
+            {onOpenTypography && (
+              <button
+                type="button"
+                onClick={() => {
+                  soundAlert.playFeedbackBeep();
+                  onOpenTypography();
+                }}
+                title="Ajustar tamaños de letra"
+                className={`p-2 relative ${
+                  isCustomTypographyActive ? 'text-emerald-400' : 'text-slate-400 hover:text-white'
+                }`}
+              >
+                <Type className="w-5 h-5" />
+                {isCustomTypographyActive && (
+                  <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 absolute top-1.5 right-1.5" />
+                )}
+              </button>
+            )}
             {onToggleTheme && (
               <button
                 type="button"
@@ -600,6 +646,20 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               )}
             </div>
+
+            {onOpenTypography && (
+              <button
+                type="button"
+                onClick={() => {
+                  setMobileMenuOpen(false);
+                  onOpenTypography();
+                }}
+                className="w-full flex items-center justify-center gap-2 py-2 px-3 text-xs font-bold rounded-lg border border-emerald-800 bg-emerald-950/60 text-emerald-200 hover:bg-emerald-900"
+              >
+                <Type className="w-4 h-4" />
+                <span>Ajustar Tamaños de Letra</span>
+              </button>
+            )}
 
             {onOpenChangePassword && (
               <button

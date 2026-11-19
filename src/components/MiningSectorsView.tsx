@@ -26,6 +26,7 @@ import {
   WorkerAssignment,
   MiningCrew,
   Organization,
+  PlatformConfig,
 } from '../types';
 import { EXTERNAL_WEATHER } from '../data/mockData';
 import {
@@ -34,7 +35,7 @@ import {
   PRELOADED_FAENA_PRESETS,
 } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
-import { DEFAULT_ORGANIZATION } from '../services/firebase';
+import { DEFAULT_ORGANIZATION, isSectionVisibleForUser } from '../services/firebase';
 import { isAnyAdminRole } from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
 
@@ -46,6 +47,7 @@ interface MiningSectorsViewProps {
   usersList?: UserProfile[];
   organizations?: Organization[];
   currentUser?: UserProfile | null;
+  platformConfig?: PlatformConfig;
   activeOrganizationId?: string;
   onSelectSite: (siteId: string) => void;
   onAddSite: (newSite: MiningSite) => void;
@@ -99,6 +101,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
   usersList = [],
   organizations = [],
   currentUser,
+  platformConfig,
   activeOrganizationId,
   onSelectSite,
   onAddSite,
@@ -108,6 +111,16 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
   onNavigateTab,
 }) => {
   const canManageSites = isAnyAdminRole(currentUser?.role);
+  const showSectorCards = isSectionVisibleForUser(
+    'faenas_sector_cards',
+    currentUser,
+    platformConfig
+  );
+  const showCrewsSection = isSectionVisibleForUser(
+    'faenas_crews_section',
+    currentUser,
+    platformConfig
+  );
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
@@ -775,6 +788,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
       </div>
 
       {/* Subterranean Mine Shaft Interactive Schematic */}
+      {showSectorCards && (
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
         {/* Left 2 Cols: Schematic Levels List */}
         <div className="lg:col-span-2 bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-4">
@@ -1022,11 +1036,12 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
           )}
         </div>
       </div>
+      )}
 
       {/* ===================================================================== */}
       {/* DIRECTORIO DE CUADRILLAS Y ASIGNACIÓN DE TRABAJADORES */}
       {/* ===================================================================== */}
-      {onSaveCrew && onDeleteCrew && (
+      {showCrewsSection && onSaveCrew && onDeleteCrew && (
         <CrewManagementSection
           crews={crews}
           usersList={usersList}

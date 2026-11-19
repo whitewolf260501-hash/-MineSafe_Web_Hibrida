@@ -28,7 +28,8 @@ import {
   DeviceThresholdsConfig, 
   ThresholdVariableConfig, 
   AlertEventRecord,
-  AlertThresholdLevel
+  AlertThresholdLevel,
+  PlatformConfig
 } from '../types';
 import { 
   saveThresholdConfig, 
@@ -37,7 +38,8 @@ import {
   subscribeToAlertEvents,
   DEFAULT_GLOBAL_THRESHOLDS,
   DEFAULT_ORGANIZATION,
-  RTDBSubscriptionScope
+  RTDBSubscriptionScope,
+  isSectionVisibleForUser
 } from '../services/firebase';
 import { alertEngine } from '../services/alertEngine';
 import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
@@ -45,15 +47,27 @@ import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 interface AlertConfigurationViewProps {
   devices: SensorDevice[];
   currentUser: UserProfile;
+  platformConfig?: PlatformConfig;
   activeOrganizationId?: string;
 }
 
 export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
   devices,
   currentUser,
+  platformConfig,
   activeOrganizationId
 }) => {
   const isSuperAdmin = currentUser.role === 'superadmin';
+  const showScopeActions = isSectionVisibleForUser(
+    'cfg_scope_actions',
+    currentUser,
+    platformConfig
+  );
+  const showEventsTable = isSectionVisibleForUser(
+    'cfg_events_table',
+    currentUser,
+    platformConfig
+  );
   const effectiveOrgId =
     activeOrganizationId && activeOrganizationId !== 'all'
       ? activeOrganizationId
@@ -398,6 +412,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
       </div>
 
       {/* SELECTOR DE ÁMBITO (GLOBAL VS DISPOSITIVO ESPECÍFICO) */}
+      {showScopeActions && (
       <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-4 flex flex-col md:flex-row items-center justify-between gap-4">
         <div className="flex items-center gap-3 w-full md:w-auto">
           <label htmlFor="device-target-select" className="text-sm font-semibold text-slate-200 whitespace-nowrap">
@@ -460,6 +475,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
           </button>
         </div>
       </div>
+      )}
 
       {/* FEEDBACK BANNERS */}
       {saveSuccessMessage && (
@@ -666,6 +682,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
       </div>
 
       {/* TABLA DE EVENTOS DE UMBRAL HISTÓRICOS Y EN VIVO */}
+      {showEventsTable && (
       <div className="bg-slate-900/90 border border-slate-800 rounded-xl overflow-hidden shadow-lg">
         <div className="p-4 border-b border-slate-800 flex flex-col sm:flex-row sm:items-center justify-between gap-3 bg-slate-950/40">
           <div className="flex items-center gap-2">
@@ -820,6 +837,7 @@ export const AlertConfigurationView: React.FC<AlertConfigurationViewProps> = ({
           </table>
         </div>
       </div>
+      )}
 
       {/* MODAL DE CONFIRMACIÓN PARA RESTAURAR VALORES */}
       {showResetConfirmModal && (

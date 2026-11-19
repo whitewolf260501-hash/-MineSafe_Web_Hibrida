@@ -68,6 +68,7 @@ import {
   NavigationTab,
   PlatformConfig,
   WindowOverrideValue,
+  SectionVisibilityKey,
   RegisteredDeviceConfig,
   DeviceCategory,
   DeviceAssignmentStatus,
@@ -3547,6 +3548,150 @@ export const DEFAULT_PLATFORM_CONFIG: PlatformConfig = {
       adminMineSafe3DPolicy: true,
       roleWindowPolicyLocks: {},
     },
+    sectionRolePermissions: {
+      admin_minesafe: {
+        dash_hero_metrics: true,
+        dash_hero_diagnostics: false,
+        dash_welcome_banner: true,
+        dash_welcome_stats: true,
+        dash_welcome_diagnostics: false,
+        dash_dual_diagnostic_row: true,
+        dash_dual_quick_core: true,
+        dash_dual_battery_airflow: false,
+        dash_dual_o2_noise: false,
+        dash_sector_chart: true,
+        dash_sector_chart_extended: false,
+        dash_users_panel: false,
+        dash_gateway_section: true,
+        dash_gateway_hw_controls: false,
+        dash_capabilities_grid: true,
+        dash_footer_alerts: false,
+        mon_filters_bar: true,
+        mon_tech_diagnostics: false,
+        mon_simulation_controls: true,
+        alerts_summary_cards: true,
+        alerts_filters_bar: true,
+        alerts_audit_subtab: true,
+        alerts_siren_test: false,
+        cfg_scope_actions: true,
+        cfg_events_table: true,
+        rep_export_csv: true,
+        rep_chart_card: true,
+        rep_audit_table: true,
+        eq_header_kpis: true,
+        eq_subtab_bar: true,
+        faenas_sector_cards: true,
+        faenas_crews_section: true,
+        v3d_telemetry_panel: true,
+      },
+      admin: {
+        dash_hero_metrics: true,
+        dash_hero_diagnostics: false,
+        dash_welcome_banner: true,
+        dash_welcome_stats: true,
+        dash_welcome_diagnostics: false,
+        dash_dual_diagnostic_row: true,
+        dash_dual_quick_core: true,
+        dash_dual_battery_airflow: false,
+        dash_dual_o2_noise: false,
+        dash_sector_chart: true,
+        dash_sector_chart_extended: false,
+        dash_users_panel: false,
+        dash_gateway_section: true,
+        dash_gateway_hw_controls: false,
+        dash_capabilities_grid: true,
+        dash_footer_alerts: false,
+        mon_filters_bar: true,
+        mon_tech_diagnostics: false,
+        mon_simulation_controls: true,
+        alerts_summary_cards: true,
+        alerts_filters_bar: true,
+        alerts_audit_subtab: true,
+        alerts_siren_test: false,
+        cfg_scope_actions: true,
+        cfg_events_table: true,
+        rep_export_csv: true,
+        rep_chart_card: true,
+        rep_audit_table: true,
+        eq_header_kpis: true,
+        eq_subtab_bar: true,
+        faenas_sector_cards: true,
+        faenas_crews_section: true,
+        v3d_telemetry_panel: true,
+      },
+      supervisor: {
+        dash_hero_metrics: true,
+        dash_hero_diagnostics: false,
+        dash_welcome_banner: true,
+        dash_welcome_stats: true,
+        dash_welcome_diagnostics: false,
+        dash_dual_diagnostic_row: true,
+        dash_dual_quick_core: true,
+        dash_dual_battery_airflow: false,
+        dash_dual_o2_noise: false,
+        dash_sector_chart: true,
+        dash_sector_chart_extended: false,
+        dash_users_panel: false,
+        dash_gateway_section: true,
+        dash_gateway_hw_controls: false,
+        dash_capabilities_grid: true,
+        dash_footer_alerts: false,
+        mon_filters_bar: true,
+        mon_tech_diagnostics: false,
+        mon_simulation_controls: false,
+        alerts_summary_cards: true,
+        alerts_filters_bar: true,
+        alerts_audit_subtab: true,
+        alerts_siren_test: false,
+        cfg_scope_actions: false,
+        cfg_events_table: true,
+        rep_export_csv: true,
+        rep_chart_card: true,
+        rep_audit_table: true,
+        eq_header_kpis: true,
+        eq_subtab_bar: true,
+        faenas_sector_cards: true,
+        faenas_crews_section: true,
+        v3d_telemetry_panel: true,
+      },
+      operador: {
+        dash_hero_metrics: false,
+        dash_hero_diagnostics: false,
+        dash_welcome_banner: true,
+        dash_welcome_stats: false,
+        dash_welcome_diagnostics: false,
+        dash_dual_diagnostic_row: true,
+        dash_dual_quick_core: true,
+        dash_dual_battery_airflow: false,
+        dash_dual_o2_noise: false,
+        dash_sector_chart: true,
+        dash_sector_chart_extended: false,
+        dash_users_panel: false,
+        dash_gateway_section: false,
+        dash_gateway_hw_controls: false,
+        dash_capabilities_grid: false,
+        dash_footer_alerts: false,
+        mon_filters_bar: true,
+        mon_tech_diagnostics: false,
+        mon_simulation_controls: false,
+        alerts_summary_cards: true,
+        alerts_filters_bar: true,
+        alerts_audit_subtab: false,
+        alerts_siren_test: false,
+        cfg_scope_actions: false,
+        cfg_events_table: true,
+        rep_export_csv: false,
+        rep_chart_card: true,
+        rep_audit_table: true,
+        eq_header_kpis: true,
+        eq_subtab_bar: true,
+        faenas_sector_cards: true,
+        faenas_crews_section: false,
+        v3d_telemetry_panel: true,
+      },
+    },
+    sectionUserOverrides: {},
+    sectionUserOverridesByEmail: {},
   },
   metrics: {
     coPreventivo: 300,
@@ -3648,7 +3793,7 @@ export function isTabVisibleForUser(
   config?: PlatformConfig | null
 ): boolean {
   if (!user) return false;
-  if (tab === 'superadmin_panel' || tab === 'superadmin_docs') {
+  if (tab === 'superadmin_panel' || tab === 'superadmin_vistas' || tab === 'superadmin_docs') {
     return user.role === 'superadmin';
   }
   if (user.role === 'superadmin') {
@@ -3756,8 +3901,50 @@ export function isEquiposSubTabVisibleForUser(
   return DEFAULT_PLATFORM_CONFIG.visibility.equiposSubTabRolePermissions![roleKey]![subTab];
 }
 
+export function isSectionVisibleForUser(
+  section: SectionVisibilityKey,
+  user: UserProfile | null | undefined,
+  config?: PlatformConfig | null
+): boolean {
+  if (!user) return false;
+  if (user.role === 'superadmin') {
+    return true;
+  }
+
+  const roleKey: ControllableRoleKey =
+    user.role === 'admin_minesafe'
+      ? 'admin_minesafe'
+      : user.role === 'admin'
+      ? 'admin'
+      : user.role === 'supervisor'
+      ? 'supervisor'
+      : 'operador';
+
+  const emailKey = normalizeEmailOverrideKey(user.email);
+  const byIdOverride: WindowOverrideValue | undefined =
+    config?.visibility?.sectionUserOverrides?.[user.id]?.[section];
+  const byEmailOverride: WindowOverrideValue | undefined =
+    emailKey ? config?.visibility?.sectionUserOverridesByEmail?.[emailKey]?.[section] : undefined;
+
+  const userOverride: WindowOverrideValue | undefined =
+    byIdOverride && byIdOverride !== 'inherit'
+      ? byIdOverride
+      : byEmailOverride;
+
+  if (userOverride === 'allow') return true;
+  if (userOverride === 'block') return false;
+
+  const configuredRoleVal = config?.visibility?.sectionRolePermissions?.[roleKey]?.[section];
+  if (typeof configuredRoleVal === 'boolean') {
+    return configuredRoleVal;
+  }
+
+  return Boolean(DEFAULT_PLATFORM_CONFIG.visibility.sectionRolePermissions?.[roleKey]?.[section]);
+}
+
 function mergePlatformConfig(raw: any): PlatformConfig {
   const rawPolicyLocks = raw?.visibility?.policyLocks;
+  const defaultSections = DEFAULT_PLATFORM_CONFIG.visibility.sectionRolePermissions!;
   return {
     visibility: {
       rolePermissions: {
@@ -3813,6 +4000,26 @@ function mergePlatformConfig(raw: any): PlatformConfig {
             : true,
         roleWindowPolicyLocks: rawPolicyLocks?.roleWindowPolicyLocks || {},
       },
+      sectionRolePermissions: {
+        admin_minesafe: {
+          ...(defaultSections.admin_minesafe || {}),
+          ...(raw?.visibility?.sectionRolePermissions?.admin_minesafe || {}),
+        },
+        admin: {
+          ...(defaultSections.admin || {}),
+          ...(raw?.visibility?.sectionRolePermissions?.admin || {}),
+        },
+        operador: {
+          ...(defaultSections.operador || {}),
+          ...(raw?.visibility?.sectionRolePermissions?.operador || {}),
+        },
+        supervisor: {
+          ...(defaultSections.supervisor || {}),
+          ...(raw?.visibility?.sectionRolePermissions?.supervisor || {}),
+        },
+      },
+      sectionUserOverrides: raw?.visibility?.sectionUserOverrides || {},
+      sectionUserOverridesByEmail: raw?.visibility?.sectionUserOverridesByEmail || {},
     },
     metrics: {
       ...DEFAULT_PLATFORM_CONFIG.metrics,

@@ -27,9 +27,10 @@ import {
   Organization,
   AlertSeverity,
   UserProfile,
+  PlatformConfig,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { FIREBASE_PROJECT_ID } from '../services/firebase';
+import { FIREBASE_PROJECT_ID, isSectionVisibleForUser } from '../services/firebase';
 import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 
 interface MonitoringViewProps {
@@ -41,6 +42,7 @@ interface MonitoringViewProps {
   activeOrganizationId?: string;
   onSelectOrganization?: (orgId: string) => void;
   currentUser?: UserProfile | null;
+  platformConfig?: PlatformConfig;
   selectedSensorId: string | null;
   onSelectSensor: (sensorId: string | null) => void;
   onSimulateGasSpike: (sensorId: string) => void;
@@ -56,6 +58,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   activeOrganizationId = 'all',
   onSelectOrganization,
   currentUser,
+  platformConfig,
   selectedSensorId,
   onSelectSensor,
   onSimulateGasSpike,
@@ -65,6 +68,17 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser?.role);
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isCompanyAdmin = currentUser?.role === 'admin';
+  const showFiltersBar = isSectionVisibleForUser('mon_filters_bar', currentUser, platformConfig);
+  const showTechDiagnostics = isSectionVisibleForUser(
+    'mon_tech_diagnostics',
+    currentUser,
+    platformConfig
+  );
+  const showSimulationControls = isSectionVisibleForUser(
+    'mon_simulation_controls',
+    currentUser,
+    platformConfig
+  );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [selectedSiteFilter, setSelectedSiteFilter] = useState<string>('all');
@@ -78,87 +92,207 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   const isNodeDevice = (d: SensorDevice) =>
     d.deviceCategory === 'sensor' || d.deviceCategory === 'nodo';
 
-  // Build available hierarchy options from props + live devices
+  const normalizeLabel = (val?: string | null) => (val || '').trim().toLowerCase();
+
+  // Resolve canonical site (id + name) from device fields + known sites list (never falls back to currentSite)
+  const resolveDeviceSite = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string }>();
+    const byNormName = new Map<string, { id: string; name: string }>();
+    sites.forEach((s) => {
+      if (s.id && s.name) {
+        const entry = { id: s.id, name: s.name };
+        byId.set(s.id, entry);
+        byNormName.set(normalizeLabel(s.name), entry);
+      }
+    });
+
+    return (d: SensorDevice): { id: string; name: string } | null => {
+      const rawId = d.siteId?.trim();
+      const rawName = d.siteName?.trim();
+      if (rawId) {
+        const found = byId.get(rawId);
+        return {
+          id: found?.id || rawId,
+          name: found?.name || rawName || rawId,
+        };
+      }
+      if (rawName) {
+        const found = byNormName.get(normalizeLabel(rawName));
+        if (found) return found;
+        return { id: rawName, name: rawName };
+      }
+      return null;
+    };
+  }, [sites]);
+
+  // Resolve canonical crew (id + name) from device fields + known crews list
+  const resolveDeviceCrew = useMemo(() => {
+    const byId = new Map<string, { id: string; name: string }>();
+    const byNormName = new Map<string, { id: string; name: string }>();
+    crews.forEach((c) => {
+      if (c.id && c.name) {
+        const entry = { id: c.id, name: c.name };
+        byId.set(c.id, entry);
+        byNormName.set(normalizeLabel(c.name), entry);
+      }
+    });
+
+    return (d: SensorDevice): { id: string; name: string } | null => {
+      const rawId = d.crewId?.trim();
+      const rawName = d.crewName?.trim();
+      if (rawId) {
+        const found = byId.get(rawId);
+        return {
+          id: found?.id || rawId,
+          name: found?.name || rawName || rawId,
+        };
+      }
+      if (rawName) {
+        const found = byNormName.get(normalizeLabel(rawName));
+        if (found) return found;
+        return { id: rawName, name: rawName };
+      }
+      return null;
+    };
+  }, [crews]);
+
+  // Build available hierarchy options from props + live devices (deduplicated by ID and normalized name)
   const availableSites = useMemo(() => {
     const map = new Map<string, string>();
+    const seenNormNames = new Set<string>();
     sites.forEach((s) => {
-      if (s.id && s.name) map.set(s.id, s.name);
+      if (s.id && s.name) {
+        map.set(s.id, s.name);
+        seenNormNames.add(normalizeLabel(s.name));
+      }
     });
     devices.forEach((d) => {
-      const id = d.siteId || d.siteName;
-      const name = d.siteName || d.siteId;
-      if (id && name && !map.has(id)) map.set(id, name);
+      const resolved = resolveDeviceSite(d);
+      if (!resolved) return;
+      const normName = normalizeLabel(resolved.name);
+      if (!map.has(resolved.id) && !seenNormNames.has(normName)) {
+        map.set(resolved.id, resolved.name);
+        seenNormNames.add(normName);
+      }
     });
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [sites, devices]);
+  }, [sites, devices, resolveDeviceSite]);
+
+  const hasUnassignedSiteDevices = useMemo(
+    () => devices.some((d) => resolveDeviceSite(d) === null),
+    [devices, resolveDeviceSite]
+  );
+
+  const selectedSiteOption = useMemo(
+    () => availableSites.find((s) => s.id === selectedSiteFilter) || null,
+    [availableSites, selectedSiteFilter]
+  );
+
+  const deviceMatchesSiteFilter = useMemo(() => {
+    const selectedNormName = selectedSiteOption ? normalizeLabel(selectedSiteOption.name) : '';
+    return (device: SensorDevice): boolean => {
+      if (selectedSiteFilter === 'all') return true;
+      const resolved = resolveDeviceSite(device);
+      if (selectedSiteFilter === '__unassigned__') {
+        return resolved === null;
+      }
+      if (!resolved) return false;
+      if (resolved.id === selectedSiteFilter || device.siteId === selectedSiteFilter) {
+        return true;
+      }
+      if (selectedNormName) {
+        if (
+          normalizeLabel(resolved.name) === selectedNormName ||
+          normalizeLabel(device.siteName) === selectedNormName
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }, [selectedSiteFilter, selectedSiteOption, resolveDeviceSite]);
 
   const availableCrews = useMemo(() => {
     const map = new Map<string, string>();
+    const seenNormNames = new Set<string>();
     crews.forEach((c) => {
-      if (selectedSiteFilter !== 'all' && c.siteId && c.siteId !== selectedSiteFilter) return;
-      if (c.id && c.name) map.set(c.id, c.name);
+      if (selectedSiteFilter !== 'all') {
+        if (selectedSiteFilter === '__unassigned__') return;
+        if (c.siteId && c.siteId !== selectedSiteFilter) return;
+      }
+      if (c.id && c.name) {
+        map.set(c.id, c.name);
+        seenNormNames.add(normalizeLabel(c.name));
+      }
     });
     devices.forEach((d) => {
-      if (
-        selectedSiteFilter !== 'all' &&
-        d.siteId !== selectedSiteFilter &&
-        d.siteName !== selectedSiteFilter
-      ) {
-        return;
+      if (!deviceMatchesSiteFilter(d)) return;
+      const resolved = resolveDeviceCrew(d);
+      if (!resolved) return;
+      const normName = normalizeLabel(resolved.name);
+      if (!map.has(resolved.id) && !seenNormNames.has(normName)) {
+        map.set(resolved.id, resolved.name);
+        seenNormNames.add(normName);
       }
-      const id = d.crewId || d.crewName;
-      const name = d.crewName || d.crewId;
-      if (id && name && !map.has(id)) map.set(id, name);
     });
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
-  }, [crews, devices, selectedSiteFilter]);
+  }, [crews, devices, selectedSiteFilter, deviceMatchesSiteFilter, resolveDeviceCrew]);
+
+  const selectedCrewOption = useMemo(
+    () => availableCrews.find((c) => c.id === selectedCrewFilter) || null,
+    [availableCrews, selectedCrewFilter]
+  );
+
+  const deviceMatchesCrewFilter = useMemo(() => {
+    const selectedNormName = selectedCrewOption ? normalizeLabel(selectedCrewOption.name) : '';
+    return (device: SensorDevice): boolean => {
+      if (selectedCrewFilter === 'all') return true;
+      const resolved = resolveDeviceCrew(device);
+      if (!resolved) return false;
+      if (resolved.id === selectedCrewFilter || device.crewId === selectedCrewFilter) {
+        return true;
+      }
+      if (selectedNormName) {
+        if (
+          normalizeLabel(resolved.name) === selectedNormName ||
+          normalizeLabel(device.crewName) === selectedNormName
+        ) {
+          return true;
+        }
+      }
+      return false;
+    };
+  }, [selectedCrewFilter, selectedCrewOption, resolveDeviceCrew]);
 
   const availableSectors = useMemo(() => {
     const set = new Set<string>();
     devices.forEach((d) => {
-      if (
-        selectedSiteFilter !== 'all' &&
-        d.siteId !== selectedSiteFilter &&
-        d.siteName !== selectedSiteFilter
-      ) {
-        return;
-      }
-      if (
-        selectedCrewFilter !== 'all' &&
-        d.crewId !== selectedCrewFilter &&
-        d.crewName !== selectedCrewFilter
-      ) {
-        return;
-      }
+      if (!deviceMatchesSiteFilter(d)) return;
+      if (!deviceMatchesCrewFilter(d)) return;
       if (d.sectorName?.trim()) set.add(d.sectorName.trim());
     });
     return Array.from(set).sort((a, b) => a.localeCompare(b));
-  }, [devices, selectedSiteFilter, selectedCrewFilter]);
+  }, [devices, deviceMatchesSiteFilter, deviceMatchesCrewFilter]);
 
   // Filter devices (by hierarchy & status — never by worker name)
   const filteredDevices = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return devices.filter((device) => {
+      const resolvedSite = resolveDeviceSite(device);
+      const resolvedCrew = resolveDeviceCrew(device);
       const matchesSearch =
         !q ||
         device.name.toLowerCase().includes(q) ||
         (device.sectorName || '').toLowerCase().includes(q) ||
-        (device.siteName || '').toLowerCase().includes(q) ||
-        (device.crewName || '').toLowerCase().includes(q) ||
+        (resolvedSite?.name || 'sin faena asignada').toLowerCase().includes(q) ||
+        (resolvedCrew?.name || '').toLowerCase().includes(q) ||
         (isSuperAdmin &&
           (device.id.toLowerCase().includes(q) ||
             (device.localIp || '').toLowerCase().includes(q) ||
             (device.via || '').toLowerCase().includes(q)));
 
-      const matchesSite =
-        selectedSiteFilter === 'all' ||
-        device.siteId === selectedSiteFilter ||
-        device.siteName === selectedSiteFilter;
-
-      const matchesCrew =
-        selectedCrewFilter === 'all' ||
-        device.crewId === selectedCrewFilter ||
-        device.crewName === selectedCrewFilter;
+      const matchesSite = deviceMatchesSiteFilter(device);
+      const matchesCrew = deviceMatchesCrewFilter(device);
 
       const matchesSector =
         selectedSector === 'all' ||
@@ -185,8 +319,11 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
   }, [
     devices,
     searchQuery,
-    selectedSiteFilter,
-    selectedCrewFilter,
+    isSuperAdmin,
+    resolveDeviceSite,
+    resolveDeviceCrew,
+    deviceMatchesSiteFilter,
+    deviceMatchesCrewFilter,
     selectedSector,
     selectedStatus,
     selectedCategory,
@@ -249,7 +386,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                 <span className="w-2 h-2 rounded-full bg-emerald-400 animate-pulse" />
                 <span>Telemetría en tiempo real activa</span>
               </span>
-              {isSuperAdmin && (
+              {showTechDiagnostics && (
                 <>
                   <span className="inline-flex items-center gap-1.5 px-2.5 py-0.5 rounded text-[11px] font-mono font-semibold bg-purple-950/70 border border-purple-700/60 text-purple-200">
                     <Database className="w-3 h-3 text-purple-400" />
@@ -283,6 +420,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
         </div>
 
         {/* Role-based hierarchy filter bar */}
+        {showFiltersBar && (
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-6 gap-3">
           {/* Search */}
           <div className="relative xl:col-span-2">
@@ -339,6 +477,9 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                     Faena: {s.name}
                   </option>
                 ))}
+                {hasUnassignedSiteDevices && (
+                  <option value="__unassigned__">Sin faena asignada</option>
+                )}
               </select>
             </div>
           )}
@@ -412,6 +553,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
             </select>
           </div>
         </div>
+        )}
       </div>
 
       {/* Grid of Gateways & Nodes */}
@@ -465,29 +607,39 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                 <h3 className="text-sm font-semibold text-white mb-2 truncate">{device.name}</h3>
 
                 {/* Operational Hierarchy Assignment (Mina / Cuadrilla / Sector — NO worker assignment) */}
-                <div className="space-y-1 text-xs text-slate-400 mb-3 bg-slate-950/50 rounded-lg p-2.5 border border-slate-800/70">
-                  <div className="flex items-center gap-1.5 truncate">
-                    <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                    <span className="text-slate-400">Faena:</span>
-                    <span className="text-slate-200 font-medium truncate">
-                      {device.siteName || currentSite.name}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 truncate">
-                    <Users className="w-3.5 h-3.5 text-slate-500 shrink-0" />
-                    <span className="text-slate-400">Cuadrilla:</span>
-                    <span className="text-slate-200 font-medium truncate">
-                      {device.crewName || 'Sin cuadrilla asignada'}
-                    </span>
-                  </div>
-                  <div className="flex items-center gap-1.5 truncate">
-                    <MapPin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
-                    <span className="text-slate-400">Sector:</span>
-                    <span className="text-cyan-300 font-semibold truncate">
-                      {device.sectorName || 'Sector General'}
-                    </span>
-                  </div>
-                </div>
+                {(() => {
+                  const resolvedSite = resolveDeviceSite(device);
+                  const resolvedCrew = resolveDeviceCrew(device);
+                  return (
+                    <div className="space-y-1 text-xs text-slate-400 mb-3 bg-slate-950/50 rounded-lg p-2.5 border border-slate-800/70">
+                      <div className="flex items-center gap-1.5 truncate">
+                        <Building2 className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                        <span className="text-slate-400">Faena:</span>
+                        <span
+                          className={`font-medium truncate ${
+                            resolvedSite ? 'text-slate-200' : 'text-amber-300/90 italic'
+                          }`}
+                        >
+                          {resolvedSite ? resolvedSite.name : 'Sin faena asignada'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <Users className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                        <span className="text-slate-400">Cuadrilla:</span>
+                        <span className="text-slate-200 font-medium truncate">
+                          {resolvedCrew ? resolvedCrew.name : 'Sin cuadrilla asignada'}
+                        </span>
+                      </div>
+                      <div className="flex items-center gap-1.5 truncate">
+                        <MapPin className="w-3.5 h-3.5 text-cyan-400 shrink-0" />
+                        <span className="text-slate-400">Sector:</span>
+                        <span className="text-cyan-300 font-semibold truncate">
+                          {device.sectorName || 'Sector General'}
+                        </span>
+                      </div>
+                    </div>
+                  );
+                })()}
 
                 {/* Live Key Metrics Mini-Grid */}
                 <div className="grid grid-cols-3 gap-2 p-2.5 rounded-lg bg-slate-950/60 border border-slate-800/80 text-xs mb-3">
@@ -515,8 +667,8 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                   </div>
                 </div>
 
-                {/* SuperAdmin Extended Technical Diagnostic Block */}
-                {isSuperAdmin && showSuperAdminTechView && (
+                {/* SuperAdmin / Authorized Extended Technical Diagnostic Block */}
+                {showTechDiagnostics && showSuperAdminTechView && (
                   <div className="mb-3 p-2.5 rounded-lg bg-purple-950/20 border border-purple-800/40 space-y-2 text-[11px]">
                     <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] font-mono">
                       <span className="text-purple-300 font-bold truncate">ID: {device.id}</span>
@@ -616,9 +768,15 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                 </div>
                 <h2 className="text-lg font-bold text-white">{selectedDevice.name}</h2>
                 <p className="text-xs text-slate-400 mt-1">
-                  Faena: <strong className="text-slate-200">{selectedDevice.siteName || currentSite.name}</strong> ·
-                  Cuadrilla: <strong className="text-slate-200">{selectedDevice.crewName || 'Sin cuadrilla'}</strong> ·
-                  Sector: <strong className="text-cyan-400">{selectedDevice.sectorName}</strong>
+                  Faena:{' '}
+                  <strong className={resolveDeviceSite(selectedDevice) ? 'text-slate-200' : 'text-amber-300'}>
+                    {resolveDeviceSite(selectedDevice)?.name || 'Sin faena asignada'}
+                  </strong>{' '}
+                  · Cuadrilla:{' '}
+                  <strong className="text-slate-200">
+                    {resolveDeviceCrew(selectedDevice)?.name || 'Sin cuadrilla'}
+                  </strong>{' '}
+                  · Sector: <strong className="text-cyan-400">{selectedDevice.sectorName}</strong>
                 </p>
               </div>
 
@@ -691,7 +849,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                   {selectedDevice.rawPM25 !== undefined ? 'Prev: < 350 ADC' : 'Límite: 50 µg/m³'}
                 </span>
               </div>
-              {isSuperAdmin && (
+              {showTechDiagnostics && (
                 <>
                   <div className="p-3 bg-purple-950/20 rounded-lg border border-purple-800/50">
                     <span className="text-[11px] text-purple-300 flex items-center gap-1">
@@ -724,8 +882,8 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               )}
             </div>
 
-            {/* SuperAdmin Technical Hardware & RTDB Diagnostics */}
-            {isSuperAdmin && (
+            {/* Technical Hardware & RTDB Diagnostics */}
+            {showTechDiagnostics && (
               <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50 text-xs space-y-2">
                 <div className="flex items-center justify-between">
                   <span className="font-bold uppercase tracking-wider text-[11px] text-purple-300 flex items-center gap-1.5">
@@ -763,8 +921,8 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               </div>
             )}
 
-            {/* Test Simulation Controls (Solo SuperAdmin / Admin) */}
-            {canSimulateEvents && (
+            {/* Test Simulation Controls (Solo SuperAdmin / Admin habilitado) */}
+            {canSimulateEvents && showSimulationControls && (
               <div className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
                 <h4 className="text-xs font-bold uppercase tracking-wider text-slate-300 flex items-center gap-2">
                   <Sliders className="w-4 h-4 text-cyan-400" />

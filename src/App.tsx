@@ -9,6 +9,7 @@ import { MiningSectorsView } from './components/MiningSectorsView';
 import { UsersManagementView } from './components/UsersManagementView';
 import { AlertConfigurationView } from './components/AlertConfigurationView';
 import { SuperAdminControlView } from './components/SuperAdminControlView';
+import { SuperAdminViewsCustomizerView } from './components/SuperAdminViewsCustomizerView';
 import { LoginModal } from './components/LoginModal';
 import { EmergencyModal, DrillType } from './components/EmergencyModal';
 import { alertEngine } from './services/alertEngine';
@@ -111,6 +112,7 @@ import {
   clampTextScalePct,
   subscribeToPlatformConfig,
   isTabVisibleForUser,
+  isSectionVisibleForUser,
   verifySuperAdminPrivileges,
   loadCachedSites,
   mergeMiningSites,
@@ -560,12 +562,42 @@ export default function App({
   const visibleDevices = useMemo<SensorDevice[]>(() => {
     const rtdbMap = new Map<string, SensorDevice>(devices.map((d) => [d.id, d]));
     const regList = mergedRegisteredDevices;
+    const siteById = new Map(sites.map((s) => [s.id, s]));
+    const siteByNameNorm = new Map(sites.map((s) => [s.name.trim().toLowerCase(), s]));
+
+    const resolveCanonicalSite = (rawSiteId?: string, rawSiteName?: string) => {
+      const cleanId = rawSiteId?.trim();
+      const cleanName = rawSiteName?.trim();
+      if (cleanId) {
+        const found = siteById.get(cleanId);
+        return {
+          siteId: found?.id || cleanId,
+          siteName: cleanName || found?.name,
+        };
+      }
+      if (cleanName) {
+        const found = siteByNameNorm.get(cleanName.toLowerCase());
+        return {
+          siteId: found?.id,
+          siteName: found?.name || cleanName,
+        };
+      }
+      return { siteId: undefined, siteName: undefined };
+    };
 
     const buildFromRegistry = (reg: typeof regList[number]): SensorDevice => {
       const existing = rtdbMap.get(reg.id);
       const resolvedOrg = isUnassignedDeviceOrg(reg.organizationId)
         ? UNASSIGNED_DEVICE_ORG_ID
         : reg.organizationId || existing?.organizationId || DEFAULT_ORGANIZATION.id;
+      const explicitlyWithoutSite =
+        !reg.siteId &&
+        !reg.siteName &&
+        (reg.assignmentStatus === 'en_inventario' || reg.assignmentStatus === 'asignado_empresa');
+      const resolvedSite = explicitlyWithoutSite
+        ? { siteId: undefined, siteName: undefined }
+        : resolveCanonicalSite(reg.siteId || existing?.siteId, reg.siteName || existing?.siteName);
+
       if (existing) {
         return {
           ...existing,
@@ -573,8 +605,8 @@ export default function App({
           organizationName: reg.organizationName || existing.organizationName,
           assignmentStatus: reg.assignmentStatus || existing.assignmentStatus,
           name: reg.name || existing.name,
-          siteId: reg.siteId || existing.siteId,
-          siteName: reg.siteName || existing.siteName,
+          siteId: resolvedSite.siteId,
+          siteName: resolvedSite.siteName,
           crewId: reg.crewId || existing.crewId,
           crewName: reg.crewName || existing.crewName,
           sectorId: reg.sectorId || existing.sectorId,
@@ -593,8 +625,8 @@ export default function App({
         assignmentStatus: reg.assignmentStatus,
         name: reg.name,
         type: reg.category === 'sensor' || reg.category === 'nodo' ? 'multigas_portatil' : 'estacion_fija',
-        siteId: reg.siteId,
-        siteName: reg.siteName,
+        siteId: resolvedSite.siteId,
+        siteName: resolvedSite.siteName,
         crewId: reg.crewId,
         crewName: reg.crewName,
         sectorId: reg.sectorId || `sec-${reg.id}`,
@@ -645,18 +677,32 @@ export default function App({
     const regMap = new Map(regList.map((r) => [r.id, r]));
     const enrichedRTDB = devices.map((d) => {
       const reg = regMap.get(d.id);
-      if (!reg) return d;
+      if (!reg) {
+        const resolvedSite = resolveCanonicalSite(d.siteId, d.siteName);
+        return {
+          ...d,
+          siteId: resolvedSite.siteId,
+          siteName: resolvedSite.siteName,
+        };
+      }
       const resolvedOrg = isUnassignedDeviceOrg(reg.organizationId)
         ? UNASSIGNED_DEVICE_ORG_ID
         : reg.organizationId || d.organizationId || DEFAULT_ORGANIZATION.id;
+      const explicitlyWithoutSite =
+        !reg.siteId &&
+        !reg.siteName &&
+        (reg.assignmentStatus === 'en_inventario' || reg.assignmentStatus === 'asignado_empresa');
+      const resolvedSite = explicitlyWithoutSite
+        ? { siteId: undefined, siteName: undefined }
+        : resolveCanonicalSite(reg.siteId || d.siteId, reg.siteName || d.siteName);
       return {
         ...d,
         organizationId: resolvedOrg,
         organizationName: reg.organizationName || d.organizationName,
         assignmentStatus: reg.assignmentStatus || d.assignmentStatus,
         name: reg.name || d.name,
-        siteId: reg.siteId || d.siteId,
-        siteName: reg.siteName || d.siteName,
+        siteId: resolvedSite.siteId,
+        siteName: resolvedSite.siteName,
         crewId: reg.crewId || d.crewId,
         crewName: reg.crewName || d.crewName,
         sectorId: reg.sectorId || d.sectorId,
@@ -676,7 +722,7 @@ export default function App({
     return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
       ? [INITIAL_SINGLE_DEVICE]
       : [];
-  }, [devices, mergedRegisteredDevices, platformConfig.onlyShowRegisteredDevices, matchesOrg, effectiveOrgId]);
+  }, [devices, mergedRegisteredDevices, sites, platformConfig.onlyShowRegisteredDevices, matchesOrg, effectiveOrgId]);
 
   // Mantener siempre un dispositivo activo válido dentro de los dispositivos visibles
   useEffect(() => {
@@ -2109,7 +2155,10 @@ export default function App({
 
   const handleSelectTab = useCallback((tab: NavigationTab) => {
     if (!currentUser) return;
-    if ((tab === 'superadmin_panel' || tab === 'superadmin_docs') && currentUser.role !== 'superadmin') {
+    if (
+      (tab === 'superadmin_panel' || tab === 'superadmin_vistas' || tab === 'superadmin_docs') &&
+      currentUser.role !== 'superadmin'
+    ) {
       return;
     }
     if (!isTabVisibleForUser(tab, currentUser, platformConfig)) {
@@ -2361,6 +2410,7 @@ export default function App({
                 activeOrganizationId={effectiveOrgId}
                 onSelectOrganization={setActiveOrganizationId}
                 currentUser={currentUser}
+                platformConfig={platformConfig}
                 selectedSensorId={selectedSensorId}
                 onSelectSensor={setSelectedSensorId}
                 onSimulateGasSpike={handleSimulateGasSpike}
@@ -2373,6 +2423,7 @@ export default function App({
                 alerts={scopedAlerts}
                 devices={visibleDevices}
                 currentUser={currentUser}
+                platformConfig={platformConfig}
                 isReadOnly={currentUser.role === 'operador'}
                 onAcknowledgeAlert={handleAcknowledgeAlert}
                 onResolveAlert={handleResolveAlert}
@@ -2390,6 +2441,7 @@ export default function App({
               <AlertConfigurationView
                 devices={visibleDevices}
                 currentUser={currentUser}
+                platformConfig={platformConfig}
                 activeOrganizationId={effectiveOrgId}
               />
             )}
@@ -2458,6 +2510,8 @@ export default function App({
               <HistoricalReportsView
                 variables={variables}
                 currentSite={scopedCurrentSite}
+                currentUser={currentUser}
+                platformConfig={platformConfig}
                 activeDeviceId={activeDevice?.id || ''}
                 activeDeviceName={activeDevice?.name || 'Sin dispositivo asignado'}
                 telemetryHistory={telemetryHistory}
@@ -2479,6 +2533,7 @@ export default function App({
                 usersList={scopedUsers}
                 organizations={scopedOrganizations}
                 currentUser={currentUser}
+                platformConfig={platformConfig}
                 activeOrganizationId={effectiveOrgId}
                 onSelectSite={(siteId) => {
                   const found = scopedSites.find(s => s.id === siteId);
@@ -2610,7 +2665,14 @@ export default function App({
                   </div>
                 }
               >
-                <Node3DInspectorView activeDevice={activeDevice} />
+                <Node3DInspectorView
+                  activeDevice={activeDevice}
+                  showTelemetryPanel={isSectionVisibleForUser(
+                    'v3d_telemetry_panel',
+                    currentUser,
+                    platformConfig
+                  )}
+                />
               </Suspense>
             )}
 
@@ -2626,6 +2688,11 @@ export default function App({
                 <Gateway3DInspectorView
                   activeDevice={activeDevice}
                   isFirebaseConnected={isFirebaseConnected}
+                  showTelemetryPanel={isSectionVisibleForUser(
+                    'v3d_telemetry_panel',
+                    currentUser,
+                    platformConfig
+                  )}
                 />
               </Suspense>
             )}
@@ -2655,6 +2722,19 @@ export default function App({
                 onCatalogDeviceDeleted={(devId) => {
                   setCatalogDevices((prev) => prev.filter((d) => d.id !== devId));
                 }}
+              />
+            )}
+
+            {currentTab === 'superadmin_vistas' && currentUser.role === 'superadmin' && (
+              <SuperAdminViewsCustomizerView
+                currentUser={currentUser}
+                platformConfig={platformConfig}
+                usersList={scopedUsers}
+                onConfigSaved={setPlatformConfig}
+                currentSiteName={currentSite?.name}
+                activeDeviceName={activeDevice?.name || activeDevice?.id}
+                devicesCount={visibleDevices.length}
+                activeAlertsCount={alerts.filter((a) => !a.resolved).length}
               />
             )}
 

@@ -36,7 +36,7 @@ import {
 import { ESP32GatewaySection } from './ESP32GatewaySection';
 import { DualReadingSensorCards } from './DualReadingSensorCards';
 import { InteractiveDeviceChartAndUsers } from './InteractiveDeviceChartAndUsers';
-import { isTabVisibleForUser } from '../services/firebase';
+import { isTabVisibleForUser, isSectionVisibleForUser } from '../services/firebase';
 
 interface DashboardViewProps {
   variables?: TelemetryVariable[];
@@ -174,7 +174,26 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       ? 'text-lg sm:text-xl'
       : 'text-sm sm:text-base';
 
-  const showDual = (appCfg?.showDualSensorCards ?? true) && Boolean(activeDevice);
+  const showHeroMetrics = isSectionVisibleForUser('dash_hero_metrics', currentUser, platformConfig);
+  const showHeroDiagnostics = isSectionVisibleForUser('dash_hero_diagnostics', currentUser, platformConfig);
+  const showWelcomeBanner = isSectionVisibleForUser('dash_welcome_banner', currentUser, platformConfig);
+  const showWelcomeStats = isSectionVisibleForUser('dash_welcome_stats', currentUser, platformConfig);
+  const showWelcomeDiagnostics = isSectionVisibleForUser('dash_welcome_diagnostics', currentUser, platformConfig);
+  const showDualDiagnosticRow = isSectionVisibleForUser('dash_dual_diagnostic_row', currentUser, platformConfig);
+  const showDualQuickCore = isSectionVisibleForUser('dash_dual_quick_core', currentUser, platformConfig);
+  const showDualBatteryAirflow = isSectionVisibleForUser('dash_dual_battery_airflow', currentUser, platformConfig);
+  const showDualO2Noise = isSectionVisibleForUser('dash_dual_o2_noise', currentUser, platformConfig);
+  const showSectorChart = isSectionVisibleForUser('dash_sector_chart', currentUser, platformConfig);
+  const showSectorChartExtended = isSectionVisibleForUser('dash_sector_chart_extended', currentUser, platformConfig);
+  const showDashUsersPanel = isSectionVisibleForUser('dash_users_panel', currentUser, platformConfig);
+  const showGatewaySection = isSectionVisibleForUser('dash_gateway_section', currentUser, platformConfig);
+  const showGatewayHwControls = isSectionVisibleForUser('dash_gateway_hw_controls', currentUser, platformConfig);
+  const showCapabilitiesGrid = isSectionVisibleForUser('dash_capabilities_grid', currentUser, platformConfig);
+  const showFooterAlerts = isSectionVisibleForUser('dash_footer_alerts', currentUser, platformConfig);
+
+  const hasAnyDualBlock =
+    showDualDiagnosticRow || showDualQuickCore || showDualBatteryAirflow || showDualO2Noise;
+  const showDual = (appCfg?.showDualSensorCards ?? true) && Boolean(activeDevice) && hasAnyDualBlock;
   const consolidatedAtmosphericSection =
     showDual && activeDevice ? (
       <div className="relative z-10">
@@ -182,6 +201,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           device={activeDevice}
           isSuperAdmin={isSuperAdmin}
           quickVariables={variables}
+          showDiagnosticRow={showDualDiagnosticRow}
+          showQuickCore={showDualQuickCore}
+          showBatteryAndAirflow={showDualBatteryAirflow}
+          showO2AndNoise={showDualO2Noise}
         />
       </div>
     ) : null;
@@ -209,41 +232,49 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
           </p>
         </div>
 
-        {/* Operational Summary (Hidden for Operador; 3 cards standard; + Personal en Turno & Profundidad Máxima for SuperAdmin) */}
-        {!isOperador && (
+        {/* Operational Summary (Configured via Vistas y Bloques per role/user) */}
+        {(showHeroMetrics || showHeroDiagnostics) && (
           <div
             className={`relative z-10 grid grid-cols-1 ${
-              isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-5' : 'sm:grid-cols-3'
+              showHeroMetrics && showHeroDiagnostics
+                ? 'sm:grid-cols-2 lg:grid-cols-5'
+                : showHeroMetrics
+                ? 'sm:grid-cols-3'
+                : 'sm:grid-cols-2'
             } gap-4 mb-8 pt-4 border-t border-slate-800/80 text-xs text-slate-400`}
           >
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-            <span className="block text-slate-400">Nodos Activos del Total</span>
-            <span className="text-base font-bold text-emerald-400 tabular-nums mt-0.5 block">
-              {onlineNodesCount} / {devices.length} Nodos Online
-            </span>
-          </div>
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-            <span className="block text-slate-400">Sectores Monitoreados</span>
-            <span className="text-base font-bold text-white tabular-nums mt-0.5 block">
-              {monitoredSectorsCount} {monitoredSectorsCount === 1 ? 'Sector Activo' : 'Sectores Activos'}
-            </span>
-          </div>
-          <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
-            <span className="block text-slate-400">Alertas Activas (Últimas 24h)</span>
-            <span
-              className={`text-base font-bold tabular-nums mt-0.5 block ${
-                recent24hAlerts.length > 0 ? 'text-amber-400' : 'text-emerald-400'
-              }`}
-            >
-              {recent24hAlerts.length} {recent24hAlerts.length === 1 ? 'Alerta Activa' : 'Alertas Activas'}
-            </span>
-            <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
-              {latestActiveAlertTimestamp
-                ? `Última registrada: ${latestActiveAlertTimestamp}`
-                : 'Sin alertas vigentes en las últimas 24h'}
-            </span>
-          </div>
-          {isSuperAdmin && (
+          {showHeroMetrics && (
+            <>
+              <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="block text-slate-400">Nodos Activos del Total</span>
+                <span className="text-base font-bold text-emerald-400 tabular-nums mt-0.5 block">
+                  {onlineNodesCount} / {devices.length} Nodos Online
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="block text-slate-400">Sectores Monitoreados</span>
+                <span className="text-base font-bold text-white tabular-nums mt-0.5 block">
+                  {monitoredSectorsCount} {monitoredSectorsCount === 1 ? 'Sector Activo' : 'Sectores Activos'}
+                </span>
+              </div>
+              <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
+                <span className="block text-slate-400">Alertas Activas (Últimas 24h)</span>
+                <span
+                  className={`text-base font-bold tabular-nums mt-0.5 block ${
+                    recent24hAlerts.length > 0 ? 'text-amber-400' : 'text-emerald-400'
+                  }`}
+                >
+                  {recent24hAlerts.length} {recent24hAlerts.length === 1 ? 'Alerta Activa' : 'Alertas Activas'}
+                </span>
+                <span className="text-[11px] text-slate-400 block mt-0.5 truncate">
+                  {latestActiveAlertTimestamp
+                    ? `Última registrada: ${latestActiveAlertTimestamp}`
+                    : 'Sin alertas vigentes en las últimas 24h'}
+                </span>
+              </div>
+            </>
+          )}
+          {showHeroDiagnostics && (
             <>
               <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50">
                 <span className="flex items-center justify-between text-purple-200">
@@ -254,7 +285,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                   {totalWorkersOnShift} Trabajadores
                 </span>
                 <span className="text-[10px] text-purple-300/80 block mt-0.5">
-                  Vista Diagnóstico SuperAdmin
+                  Vista Diagnóstico Avanzado
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-purple-950/25 border border-purple-800/50">
@@ -278,7 +309,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             BIENVENIDA, MONITOREO ATMOSFÉRICO CONSOLIDADO Y GRÁFICO SECTORIAL
            ============================================================== */}
         {(isOperador || (appCfg?.showChartsAndUsers ?? true)) ? (
-          <div className={`relative z-10 ${isOperador ? '' : 'mb-8'}`}>
+          <div className={`relative z-10 ${showGatewaySection ? 'mb-8' : ''}`}>
             <InteractiveDeviceChartAndUsers
               currentUser={currentUser}
               usersList={usersList}
@@ -291,7 +322,12 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               telemetryHistory={telemetryHistory}
               siteName={currentSite.name}
               betweenWelcomeAndChart={consolidatedAtmosphericSection}
-              canViewSystemUsers={isSuperAdmin}
+              canViewSystemUsers={showDashUsersPanel}
+              showWelcomeBanner={showWelcomeBanner}
+              showWelcomeStats={showWelcomeStats}
+              showWelcomeDiagnostics={showWelcomeDiagnostics}
+              showSectorChart={showSectorChart}
+              showExtendedChartVars={showSectorChartExtended}
               sites={sites}
               crews={crews}
               organizations={organizations}
@@ -306,9 +342,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
 
         {/* ==============================================================
-            GATEWAYS POR SECTOR Y CONTROL DE ALARMA (Oculto para Operador)
+            GATEWAYS POR SECTOR Y CONTROL DE ALARMA
            ============================================================== */}
-        {!isOperador && (appCfg?.showESP32Section ?? true) && (
+        {showGatewaySection && (appCfg?.showESP32Section ?? true) && (
           <ESP32GatewaySection
             devices={devices}
             activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
@@ -321,6 +357,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             isLightActive={isLightActive}
             onToggleLight={onToggleLight}
             isSuperAdmin={isSuperAdmin}
+            showHardwareControls={showGatewayHwControls}
             currentUser={currentUser}
             timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
           />
@@ -328,9 +365,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       </section>
 
       {/* ==============================================================
-          CAPABILITIES GRID (Oculto para Operador; opcional en Control Maestro)
+          CAPABILITIES GRID (Configurable por rol/usuario en Vistas y Bloques)
          ============================================================== */}
-      {!isOperador && (appCfg?.showCapabilitiesGrid ?? true) && (
+      {showCapabilitiesGrid && (appCfg?.showCapabilitiesGrid ?? true) && (
         <section className="space-y-4">
           <div className="text-center max-w-2xl mx-auto mb-8">
             <span className="text-xs uppercase font-bold tracking-widest text-cyan-400">
@@ -483,9 +520,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       )}
 
       {/* ==============================================================
-          SUPERADMIN ONLY: INCIDENCIAS Y ALERTAS ACTIVAS AL PIE DEL DASHBOARD
+          INCIDENCIAS Y ALERTAS ACTIVAS AL PIE DEL DASHBOARD
          ============================================================== */}
-      {isSuperAdmin && (
+      {showFooterAlerts && (
         <section className="rounded-2xl bg-slate-900/80 border border-purple-800/50 p-5 sm:p-6 shadow-xl space-y-4">
           <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 pb-3 border-b border-slate-800">
             <div className="flex items-center gap-2.5">

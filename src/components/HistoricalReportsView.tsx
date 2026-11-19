@@ -14,8 +14,11 @@ import {
   AlertEventRecord,
   SafetyAlert,
   TelemetryRangeKey,
+  UserProfile,
+  PlatformConfig,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
+import { isSectionVisibleForUser } from '../services/firebase';
 
 export interface TelemetryRangeWindow {
   key: TelemetryRangeKey;
@@ -26,6 +29,8 @@ export interface TelemetryRangeWindow {
 interface HistoricalReportsViewProps {
   variables: TelemetryVariable[];
   currentSite: MiningSite;
+  currentUser?: UserProfile | null;
+  platformConfig?: PlatformConfig;
   activeDeviceId?: string;
   activeDeviceName?: string;
   telemetryHistory?: TelemetryHistoryPoint[];
@@ -209,6 +214,8 @@ export function downsampleChartPoints<T>(items: T[], maxPoints: number = 48): T[
 export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   variables,
   currentSite,
+  currentUser,
+  platformConfig,
   activeDeviceId = '',
   activeDeviceName = 'Sin dispositivo asignado',
   telemetryHistory = [],
@@ -219,6 +226,9 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   historyTruncated = false,
   historyError = null,
 }) => {
+  const showExportCsv = isSectionVisibleForUser('rep_export_csv', currentUser, platformConfig);
+  const showChartCard = isSectionVisibleForUser('rep_chart_card', currentUser, platformConfig);
+  const showAuditTable = isSectionVisibleForUser('rep_audit_table', currentUser, platformConfig);
   const [selectedVarId, setSelectedVarId] = useState<string>('temp');
   const [timeRange, setTimeRange] = useState<TelemetryRangeKey>('24h');
   const [customStartDate, setCustomStartDate] = useState<string>(() => {
@@ -423,18 +433,20 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
             </p>
           </div>
 
-          <div className="flex flex-wrap items-center gap-2">
-            <button
-              onClick={handleExportCSV}
-              disabled={isExportingCsv}
-              className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-lg transition-colors cursor-pointer"
-            >
-              <Download className="w-4 h-4" />
-              {isExportingCsv
-                ? `Generando CSV (${fullSeries.length} muestras)...`
-                : `Exportar Datos CSV (${fullSeries.length} muestras)`}
-            </button>
-          </div>
+          {showExportCsv && (
+            <div className="flex flex-wrap items-center gap-2">
+              <button
+                onClick={handleExportCSV}
+                disabled={isExportingCsv}
+                className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-cyan-600 hover:bg-cyan-500 disabled:opacity-60 text-white rounded-lg transition-colors cursor-pointer"
+              >
+                <Download className="w-4 h-4" />
+                {isExportingCsv
+                  ? `Generando CSV (${fullSeries.length} muestras)...`
+                  : `Exportar Datos CSV (${fullSeries.length} muestras)`}
+              </button>
+            </div>
+          )}
         </div>
 
         {historyError && (
@@ -526,6 +538,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
         </div>
       </div>
 
+      {showChartCard && (
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-6">
         <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 pb-4 border-b border-slate-800/80">
           <div>
@@ -662,7 +675,9 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           )}
         </div>
       </div>
+      )}
 
+      {showAuditTable && (
       <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-6 space-y-4">
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-2">
@@ -709,6 +724,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           </div>
         )}
       </div>
+      )}
     </div>
   );
 };

@@ -155,6 +155,7 @@ const DEFAULT_SYSTEM_SPEC = {
 interface Gateway3DInspectorViewProps {
   activeDevice?: SensorDevice;
   isFirebaseConnected?: boolean;
+  showTelemetryPanel?: boolean;
 }
 
 export type Gateway3DTelemetryMode = 'vivo' | 'falla_canal' | 'sin_telemetria';
@@ -272,6 +273,7 @@ function detectSoftwareWebGL(): boolean {
 export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
   activeDevice,
   isFirebaseConnected = false,
+  showTelemetryPanel = true,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const labelElsRef = useRef<Partial<Record<GatewayPartId, HTMLButtonElement | null>>>({});
@@ -1799,6 +1801,7 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
           </div>
 
           {/* Barra Inferior de Telemetría del Gateway */}
+          {showTelemetryPanel && (
           <div className="absolute bottom-4 left-4 right-4 xl:right-auto bg-slate-900/92 px-4 py-2.5 rounded-xl border border-slate-700/80 shadow-2xl flex flex-wrap items-center gap-4 md:gap-6 text-xs z-20">
             <div>
               <span className="text-slate-400 block text-[10px] uppercase tracking-wider">Estado Telemetría</span>
@@ -1847,6 +1850,7 @@ export const Gateway3DInspectorView: React.FC<Gateway3DInspectorViewProps> = ({
               </span>
             </div>
           </div>
+          )}
         </div>
 
         {/* Panel Lateral Derecho de Inspección */}

@@ -270,7 +270,13 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
         if (dev.organizationId !== filterOrgId) return false;
       }
       if (filterSiteId !== 'todos') {
-        if (dev.siteId !== filterSiteId) return false;
+        const selectedSiteObj = sites.find((s) => s.id === filterSiteId);
+        const matchesSiteById = dev.siteId === filterSiteId;
+        const matchesSiteByName =
+          Boolean(selectedSiteObj?.name) &&
+          Boolean(dev.siteName) &&
+          dev.siteName!.trim().toLowerCase() === selectedSiteObj!.name.trim().toLowerCase();
+        if (!matchesSiteById && !matchesSiteByName) return false;
       }
       if (q) {
         const hay = `${dev.id} ${dev.name} ${dev.organizationName || ''} ${dev.siteName || ''} ${dev.sectorName || ''}`.toLowerCase();
@@ -278,7 +284,7 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
       }
       return true;
     });
-  }, [normalizedCatalog, searchTerm, filterStatus, filterCategory, filterOrgId, filterSiteId]);
+  }, [normalizedCatalog, sites, searchTerm, filterStatus, filterCategory, filterOrgId, filterSiteId]);
 
   const resetForm = () => {
     setEditingId(null);

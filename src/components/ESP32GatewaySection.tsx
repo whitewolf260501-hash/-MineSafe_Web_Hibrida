@@ -43,6 +43,7 @@ interface ESP32GatewaySectionProps {
   isLightActive?: boolean;
   onToggleLight?: () => void;
   isSuperAdmin?: boolean;
+  showHardwareControls?: boolean;
   currentUser?: UserProfile | null;
   timeoutSeconds?: number;
 }
@@ -69,6 +70,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
   isLightActive = false,
   onToggleLight,
   isSuperAdmin: isSuperAdminProp,
+  showHardwareControls,
   currentUser = null,
   timeoutSeconds = 20,
 }) => {
@@ -78,6 +80,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
   const [busyMaintenance, setBusyMaintenance] = useState<string | null>(null);
 
   const isSuperAdmin = Boolean(isSuperAdminProp || currentUser?.role === 'superadmin');
+  const canShowHwControls = showHardwareControls ?? isSuperAdmin;
 
   useEffect(() => {
     const timer = setInterval(() => {
@@ -359,8 +362,8 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
         )}
       </div>
 
-      {/* SuperAdmin-Only Hardware Diagnostic & Maintenance Bar */}
-      {isSuperAdmin && (
+      {/* Hardware Diagnostic & Maintenance Bar */}
+      {canShowHwControls && (
         <div className="mt-4 p-3.5 rounded-xl bg-purple-950/25 border border-purple-700/50 flex flex-col lg:flex-row lg:items-center justify-between gap-3 relative z-10">
           <div className="flex items-center gap-2 text-xs">
             <Terminal className="w-4 h-4 text-purple-400 shrink-0" />
@@ -474,8 +477,8 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                       )}
                     </div>
 
-                    {/* SuperAdmin Technical Hardware Identifiers (ESP32 ID, IP & Via) */}
-                    {isSuperAdmin && (
+                    {/* Technical Hardware Identifiers (ESP32 ID, IP & Via) */}
+                    {canShowHwControls && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800/60 text-purple-200">
                           <Cpu className="w-2.5 h-2.5 text-purple-400" />
@@ -547,7 +550,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                     </span>
 
                     <div className="flex flex-wrap items-center gap-2 shrink-0">
-                      {isSuperAdmin && (
+                      {canShowHwControls && (
                         <button
                           type="button"
                           disabled={busyMaintenance !== null}

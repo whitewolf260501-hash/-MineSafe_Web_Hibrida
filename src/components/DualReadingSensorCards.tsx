@@ -23,13 +23,23 @@ interface DualReadingSensorCardsProps {
   device: SensorDevice;
   isSuperAdmin?: boolean;
   quickVariables?: TelemetryVariable[];
+  showDiagnosticRow?: boolean;
+  showQuickCore?: boolean;
+  showBatteryAndAirflow?: boolean;
+  showO2AndNoise?: boolean;
 }
 
 export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   device,
   isSuperAdmin = false,
   quickVariables = [],
+  showDiagnosticRow = true,
+  showQuickCore = true,
+  showBatteryAndAirflow,
+  showO2AndNoise,
 }) => {
+  const effectiveShowBatteryAirflow = showBatteryAndAirflow ?? isSuperAdmin;
+  const effectiveShowO2Noise = showO2AndNoise ?? isSuperAdmin;
   const faultSet = new Set(device?.faultFields || []);
   const coFault = faultSet.has('CO');
   const pmFault = faultSet.has('PM2_5');
@@ -146,7 +156,7 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
               ? `Dispositivo: ${device.name} (${device.id})`
               : `${device.sectorName || 'Sector Principal'} · ${device.name}`}
           </span>
-          {isSuperAdmin && (
+          {effectiveShowBatteryAirflow && (
             <span className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-700">
               {batteryDisplay}
             </span>
@@ -154,6 +164,7 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
         </div>
       </div>
 
+      {showDiagnosticRow && (
       <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
         
         {/* ==============================================================
@@ -329,13 +340,12 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
         </div>
 
       </div>
+      )}
 
       {/* ==============================================================
-          FILA INFERIOR DE TARJETAS DE LECTURA RÁPIDA:
-          - Todos los roles ven: Temperatura, Humedad, Gases/CO y PM2.5
-          - Exclusivo SuperAdmin: Batería Dispositivo IoT, Flujo de Ventilación, Oxígeno y Ruido
+          FILA INFERIOR DE TARJETAS DE LECTURA RÁPIDA (Configurable por rol/usuario)
          ============================================================== */}
-      {(() => {
+      {(showQuickCore || effectiveShowBatteryAirflow || effectiveShowO2Noise) && (() => {
         const findVar = (id: string) => quickVariables.find((v) => v.id === id);
         const tempVar = findVar('temp');
         const humVar = findVar('hum');
@@ -345,17 +355,19 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
         const airVar = findVar('air_flow');
 
         const quickCards = [
-          {
-            id: 'temp',
-            title: 'TEMPERATURA AMBIENTE',
-            value: tempFault ? '--' : (tempVar?.value ?? tempVal ?? 0),
-            unit: '°C',
-            trendLabel: tempVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
-            isAlertTrend: tempVar?.trend === 'alza critica',
-            statusLabel: tempVar?.statusLabel || 'Estable',
-            statusTone: tempVar?.status || 'normal',
-            icon: <Thermometer className="w-4 h-4 text-cyan-400" />,
-          },
+          ...(showQuickCore
+            ? [
+                {
+                  id: 'temp',
+                  title: 'TEMPERATURA AMBIENTE',
+                  value: tempFault ? '--' : (tempVar?.value ?? tempVal ?? 0),
+                  unit: '°C',
+                  trendLabel: tempVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable',
+                  isAlertTrend: tempVar?.trend === 'alza critica',
+                  statusLabel: tempVar?.statusLabel || 'Estable',
+                  statusTone: tempVar?.status || 'normal',
+                  icon: <Thermometer className="w-4 h-4 text-cyan-400" />,
+                },
           {
             id: 'hum',
             title: 'HUMEDAD RELATIVA',
@@ -387,9 +399,11 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
             isAlertTrend: (pmVal ?? 0) >= 350 || pmVar?.trend === 'alza critica',
             statusLabel: pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico'),
             statusTone: pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
-            icon: <Sun className="w-4 h-4 text-cyan-400" />,
-          },
-          ...(isSuperAdmin
+                  icon: <Sun className="w-4 h-4 text-cyan-400" />,
+                },
+              ]
+            : []),
+          ...(effectiveShowBatteryAirflow
             ? [
                 {
                   id: 'bat',
@@ -422,9 +436,14 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
 
         return (
           <div className="space-y-3 pt-1">
+            {quickCards.length > 0 && (
             <div
               className={`grid grid-cols-2 gap-3 ${
-                isSuperAdmin ? 'sm:grid-cols-3 xl:grid-cols-6' : 'lg:grid-cols-4'
+                quickCards.length >= 6
+                  ? 'sm:grid-cols-3 xl:grid-cols-6'
+                  : quickCards.length >= 4
+                  ? 'lg:grid-cols-4'
+                  : 'sm:grid-cols-2'
               }`}
             >
               {quickCards.map((card) => (
@@ -479,9 +498,10 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                 </div>
               ))}
             </div>
+            )}
 
-            {/* Extra SuperAdmin Environmental Strip: Oxígeno (O2) & Ruido Acústico (dB) */}
-            {isSuperAdmin && (
+            {/* Extra Environmental Strip: Oxígeno (O2) & Ruido Acústico (dB) */}
+            {effectiveShowO2Noise && (
               <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                 <div className="rounded-xl bg-purple-950/20 border border-purple-800/40 px-4 py-2.5 flex items-center justify-between text-xs">
                   <div className="flex items-center gap-2">

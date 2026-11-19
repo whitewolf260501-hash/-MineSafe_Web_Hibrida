@@ -37,7 +37,11 @@ import {
 } from '../types';
 import { PRELOADED_CREWS } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
-import { DEFAULT_ORGANIZATION, isEquiposSubTabVisibleForUser } from '../services/firebase';
+import {
+  DEFAULT_ORGANIZATION,
+  isEquiposSubTabVisibleForUser,
+  isSectionVisibleForUser,
+} from '../services/firebase';
 import { assignWorkersToCrew, canManageContractsAndPayments } from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
 import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
@@ -131,6 +135,8 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   }, [allowedSubTabs, activeSubTab]);
 
   const canViewSubTab = (subTab: EquiposSubTab) => allowedSubTabs.includes(subTab);
+  const showHeaderKpis = isSectionVisibleForUser('eq_header_kpis', currentUser, platformConfig);
+  const showSubtabBar = isSectionVisibleForUser('eq_subtab_bar', currentUser, platformConfig);
 
   // New assignment form state
   const [newWorkerName, setNewWorkerName] = useState('');
@@ -476,7 +482,9 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
     <div className="space-y-6">
       
       {/* Top Banner */}
+      {(showHeaderKpis || showSubtabBar || actionNotice) && (
       <div className="bg-slate-900/70 border border-slate-800 rounded-xl p-6">
+        {showHeaderKpis && (
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
           <div>
             <h1 className="text-xl font-bold text-white flex items-center gap-2">
@@ -522,6 +530,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             )}
           </div>
         </div>
+        )}
 
         {actionNotice && (
           <div
@@ -541,7 +550,8 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
         )}
 
         {/* Sub Navigation Tabs */}
-        <div className="flex flex-wrap items-center gap-2 pt-6 border-t border-slate-800/80 mt-6">
+        {showSubtabBar && (
+        <div className={`flex flex-wrap items-center gap-2 ${showHeaderKpis ? 'pt-6 border-t border-slate-800/80 mt-6' : ''}`}>
           {canViewSubTab('asignaciones') && (
             <button
               onClick={() => setActiveSubTab('asignaciones')}
@@ -634,7 +644,9 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             </button>
           )}
         </div>
+        )}
       </div>
+      )}
 
       {allowedSubTabs.length === 0 ? (
         <div className="p-8 text-center bg-slate-900/80 border border-red-900/50 rounded-2xl max-w-xl mx-auto my-8 shadow-xl">

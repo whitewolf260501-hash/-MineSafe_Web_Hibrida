@@ -191,6 +191,7 @@ const ALERT_CO_THRESHOLD = 50;
 
 interface Node3DInspectorViewProps {
   activeDevice?: SensorDevice;
+  showTelemetryPanel?: boolean;
 }
 
 export type Node3DTelemetryMode = 'simulacion' | 'vivo' | 'falla_canal' | 'desconectado';
@@ -325,6 +326,7 @@ function detectSoftwareWebGL(): boolean {
 
 export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
   activeDevice,
+  showTelemetryPanel = true,
 }) => {
   const containerRef = useRef<HTMLDivElement | null>(null);
 
@@ -1822,6 +1824,7 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
           </section>
 
           {/* Telemetría simulada / en vivo */}
+          {showTelemetryPanel && (
           <section>
             <div className="flex items-center justify-between pb-2 border-b border-slate-800 gap-2">
               <h2 className="text-xs font-semibold text-orange-400 uppercase tracking-wide">
@@ -1904,6 +1907,7 @@ export const Node3DInspectorView: React.FC<Node3DInspectorViewProps> = ({
               <span>Sonido de alarma al simular alerta</span>
             </label>
           </section>
+          )}
 
           {/* Lista de componentes */}
           <section>

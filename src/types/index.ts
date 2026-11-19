@@ -357,9 +357,56 @@ export type EquiposSubTab =
 
 export type ControllableRoleKey = 'admin_minesafe' | 'admin' | 'operador' | 'supervisor';
 
-export type NavigationTab = ControllableTab | 'superadmin_panel' | 'superadmin_docs';
+export type NavigationTab =
+  | ControllableTab
+  | 'superadmin_panel'
+  | 'superadmin_vistas'
+  | 'superadmin_docs';
 
 export type WindowOverrideValue = 'inherit' | 'allow' | 'block';
+
+export type SectionVisibilityKey =
+  // Dashboard Principal
+  | 'dash_hero_metrics'
+  | 'dash_hero_diagnostics'
+  | 'dash_welcome_banner'
+  | 'dash_welcome_stats'
+  | 'dash_welcome_diagnostics'
+  | 'dash_dual_diagnostic_row'
+  | 'dash_dual_quick_core'
+  | 'dash_dual_battery_airflow'
+  | 'dash_dual_o2_noise'
+  | 'dash_sector_chart'
+  | 'dash_sector_chart_extended'
+  | 'dash_users_panel'
+  | 'dash_gateway_section'
+  | 'dash_gateway_hw_controls'
+  | 'dash_capabilities_grid'
+  | 'dash_footer_alerts'
+  // Monitoreo IoT
+  | 'mon_filters_bar'
+  | 'mon_tech_diagnostics'
+  | 'mon_simulation_controls'
+  // Alertas y Auditoría
+  | 'alerts_summary_cards'
+  | 'alerts_filters_bar'
+  | 'alerts_audit_subtab'
+  | 'alerts_siren_test'
+  // Config. Umbrales
+  | 'cfg_scope_actions'
+  | 'cfg_events_table'
+  // Historial y Reportes
+  | 'rep_export_csv'
+  | 'rep_chart_card'
+  | 'rep_audit_table'
+  // Equipos y Arriendos
+  | 'eq_header_kpis'
+  | 'eq_subtab_bar'
+  // Faenas y Sectores
+  | 'faenas_sector_cards'
+  | 'faenas_crews_section'
+  // Visores 3D
+  | 'v3d_telemetry_panel';
 
 export interface PlatformPolicyLocks {
   /** true (default) = Operador restricted by policy to Alertas read-only; false = unlocked */
@@ -392,6 +439,14 @@ export interface PlatformVisibilityConfig {
   equiposSubTabUserOverrides?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
   equiposSubTabUserOverridesByEmail?: Record<string, Partial<Record<EquiposSubTab, WindowOverrideValue>>>;
   policyLocks?: PlatformPolicyLocks;
+  sectionRolePermissions?: {
+    admin_minesafe?: Partial<Record<SectionVisibilityKey, boolean>>;
+    admin?: Partial<Record<SectionVisibilityKey, boolean>>;
+    operador?: Partial<Record<SectionVisibilityKey, boolean>>;
+    supervisor?: Partial<Record<SectionVisibilityKey, boolean>>;
+  };
+  sectionUserOverrides?: Record<string, Partial<Record<SectionVisibilityKey, WindowOverrideValue>>>;
+  sectionUserOverridesByEmail?: Record<string, Partial<Record<SectionVisibilityKey, WindowOverrideValue>>>;
 }
 
 export interface PlatformMetricsConfig {

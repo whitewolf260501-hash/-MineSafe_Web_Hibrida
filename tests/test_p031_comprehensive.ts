@@ -10,6 +10,7 @@ import {
   evaluateWatchedUserStatusSnapshots,
   fetchPaginatedTelemetryHistory,
   isEquiposSubTabVisibleForUser,
+  isSectionVisibleForUser,
   isTabVisibleForUser,
   isWindowPolicyLockedForRole,
   mapRTDBContractToRental,
@@ -29,6 +30,7 @@ import { planLegacyOrganizationBackfill } from '../scripts/migrateLegacyOrganiza
 import { buildTelemetryCsvContentAsync } from '../src/components/HistoricalReportsView';
 import { resolveNode3DLiveTelemetry } from '../src/components/Node3DInspectorView';
 import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspectorView';
+import { computeSectionPreviewDiff } from '../src/components/SuperAdminWindowPreview';
 import {
   assignWorkersToCrew,
   buildCrewMemberFromUser,
@@ -1576,10 +1578,10 @@ async function runTests() {
       dashboardViewSrc.includes("const isSuperAdmin = currentUser?.role === 'superadmin'") &&
       dashboardViewSrc.includes('betweenWelcomeAndChart={consolidatedAtmosphericSection}') &&
       dashboardViewSrc.includes('Nodos Activos del Total') &&
-      dashboardViewSrc.includes('{isSuperAdmin && (') &&
+      dashboardViewSrc.includes('{showHeroDiagnostics && (') &&
       dashboardViewSrc.includes('Personal en Turno') &&
       dashboardViewSrc.includes('Profundidad Máxima'),
-    'DashboardView and InteractiveDeviceChartAndUsers gate Usuarios del Sistema, Personal en Turno, and Profundidad Máxima exclusively to SuperAdmin while rendering atmospheric cards before sector chart'
+    'DashboardView and InteractiveDeviceChartAndUsers gate Usuarios del Sistema, Personal en Turno, and Profundidad Máxima via SuperAdmin section defaults while rendering atmospheric cards before sector chart'
   );
 
   console.log('✅ 20. Dashboard layout order & SuperAdmin-exclusive panels passed');
@@ -1785,22 +1787,21 @@ async function runTests() {
   const dualCardsSrc = readRepoFile('src/components/DualReadingSensorCards.tsx');
   const monitoringViewSrc = readRepoFile('src/components/MonitoringView.tsx');
   assert.ok(
-    chartAndUsersSrc.includes('...(isSuperAdmin') &&
+    chartAndUsersSrc.includes('...(effectiveShowExtendedChartVars') &&
       chartAndUsersSrc.includes('Flujo de Ventilación') &&
       chartAndUsersSrc.includes('Nivel de Ruido') &&
       chartAndUsersSrc.includes('Oxígeno (O₂)') &&
       !dualCardsSrc.includes('{isSuperAdmin && (() => {') &&
-      dualCardsSrc.includes('...(isSuperAdmin') &&
+      dualCardsSrc.includes('...(effectiveShowBatteryAirflow') &&
       dualCardsSrc.includes('BATERÍA DISPOSITIVO IoT') &&
       dualCardsSrc.includes('FLUJO DE VENTILACIÓN') &&
       dualCardsSrc.includes('TEMPERATURA AMBIENTE') &&
       dualCardsSrc.includes('MATERIAL PARTICULADO (PM2.5)') &&
-      dashboardViewSrc.includes("const isOperador = currentUser?.role === 'operador'") &&
-      dashboardViewSrc.includes('{!isOperador && (appCfg?.showESP32Section ?? true)') &&
-      dashboardViewSrc.includes('{!isOperador && (appCfg?.showCapabilitiesGrid ?? true)') &&
-      chartAndUsersSrc.includes("{currentUser?.role !== 'operador' && (") &&
+      dashboardViewSrc.includes("isSectionVisibleForUser('dash_gateway_section'") &&
+      dashboardViewSrc.includes("isSectionVisibleForUser('dash_capabilities_grid'") &&
+      chartAndUsersSrc.includes('{effectiveShowWelcomeStats && (') &&
       dashboardViewSrc.includes('Incidencias y Alertas Activas en Faena'),
-    'DualReadingSensorCards shows 4 atmospheric quick cards to all roles, Dashboard restricts Operador to header/welcome/atmospheric/chart, and SuperAdmin retains exclusive diagnostic sections'
+    'DualReadingSensorCards shows 4 atmospheric quick cards to all roles, Dashboard gates blocks via isSectionVisibleForUser with Operador defaults limited to welcome/atmospheric/chart, and SuperAdmin retains all diagnostic sections'
   );
 
   // 24.4 Gateway & Alarma: Admin de empresa controla alarma propia; Resetear Página/Gateway, Luz Manual e IDs ESP32 solo SuperAdmin
@@ -2169,6 +2170,213 @@ async function runTests() {
   );
 
   console.log('✅ 26. Dynamic Policy Lock / Unlock & New Equipos Sub-Tabs passed');
+
+  // ---------------------------------------------------------------------------
+  // 27. MONITORING VIEW & APP CANONICAL SITE RESOLUTION & FILTER CONSISTENCY
+  // ---------------------------------------------------------------------------
+  const monitoringUpdatedSrc = readRepoFile('src/components/MonitoringView.tsx');
+  const appUpdatedSrc = readRepoFile('src/App.tsx');
+  const registryPanelUpdatedSrc = readRepoFile('src/components/DeviceRegistryAndAssignmentPanel.tsx');
+
+  assert.ok(
+    !monitoringUpdatedSrc.includes('device.siteName || currentSite.name') &&
+      !monitoringUpdatedSrc.includes('selectedDevice.siteName || currentSite.name'),
+    'MonitoringView does not display misleading currentSite.name fallback on unassigned devices'
+  );
+  assert.ok(
+    monitoringUpdatedSrc.includes('resolveDeviceSite') &&
+      monitoringUpdatedSrc.includes('deviceMatchesSiteFilter') &&
+      monitoringUpdatedSrc.includes('resolveDeviceCrew') &&
+      monitoringUpdatedSrc.includes('deviceMatchesCrewFilter') &&
+      monitoringUpdatedSrc.includes('Sin faena asignada') &&
+      monitoringUpdatedSrc.includes('__unassigned__'),
+    'MonitoringView resolves canonical site/crew IDs & names and supports filtering unassigned devices'
+  );
+  assert.ok(
+    appUpdatedSrc.includes('resolveCanonicalSite') &&
+      appUpdatedSrc.includes('explicitlyWithoutSite') &&
+      registryPanelUpdatedSrc.includes('matchesSiteByName'),
+    'App.tsx hydrates canonical siteId/siteName and DeviceRegistryAndAssignmentPanel matches by siteId or normalized siteName'
+  );
+
+  console.log('✅ 27. MonitoringView & App Canonical Site Filter Consistency passed');
+
+  // ---------------------------------------------------------------------------
+  // 28. SUPERADMIN "VISTAS Y BLOQUES" (PER-ROLE & PER-USER SECTION VISIBILITY)
+  // ---------------------------------------------------------------------------
+  assert.equal(isTabVisibleForUser('superadmin_vistas', sa, DEFAULT_PLATFORM_CONFIG), true, 'SuperAdmin sees Vistas y Bloques tab');
+  assert.equal(isTabVisibleForUser('superadmin_vistas', admMs, DEFAULT_PLATFORM_CONFIG), false, 'admin_minesafe cannot access Vistas y Bloques');
+  assert.equal(isTabVisibleForUser('superadmin_vistas', admA, DEFAULT_PLATFORM_CONFIG), false, 'admin cannot access Vistas y Bloques');
+  assert.equal(isTabVisibleForUser('superadmin_vistas', monA, DEFAULT_PLATFORM_CONFIG), false, 'supervisor cannot access Vistas y Bloques');
+  assert.equal(isTabVisibleForUser('superadmin_vistas', opA, DEFAULT_PLATFORM_CONFIG), false, 'operador cannot access Vistas y Bloques');
+
+  // Default section visibility preserves exact expected UX per role
+  assert.equal(isSectionVisibleForUser('dash_hero_diagnostics', sa, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('dash_hero_diagnostics', admA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_dual_quick_core', opA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('dash_dual_diagnostic_row', opA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('dash_sector_chart', opA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('dash_welcome_banner', opA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('dash_hero_metrics', opA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_gateway_section', opA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_capabilities_grid', opA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_dual_battery_airflow', opA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_dual_battery_airflow', admA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('dash_gateway_section', admA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('alerts_siren_test', admA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('alerts_siren_test', sa, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('mon_tech_diagnostics', admA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isSectionVisibleForUser('mon_filters_bar', admA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('rep_export_csv', monA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isSectionVisibleForUser('v3d_telemetry_panel', admA, DEFAULT_PLATFORM_CONFIG), true);
+
+  // Role-level customization & per-user UID/email overrides (SuperAdmin stays unaffected)
+  const customSectionsConfig: PlatformConfig = {
+    ...DEFAULT_PLATFORM_CONFIG,
+    visibility: {
+      ...DEFAULT_PLATFORM_CONFIG.visibility,
+      sectionRolePermissions: {
+        ...DEFAULT_PLATFORM_CONFIG.visibility.sectionRolePermissions,
+        operador: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.sectionRolePermissions!.operador,
+          dash_hero_metrics: true,
+          dash_gateway_section: true,
+        },
+        admin: {
+          ...DEFAULT_PLATFORM_CONFIG.visibility.sectionRolePermissions!.admin,
+          dash_users_panel: true,
+          alerts_siren_test: true,
+          rep_export_csv: false,
+          v3d_telemetry_panel: false,
+        },
+      },
+      sectionUserOverrides: {
+        [opA.id]: {
+          dash_gateway_section: 'block',
+          dash_dual_battery_airflow: 'allow',
+        },
+      },
+      sectionUserOverridesByEmail: {
+        [admA.email.toLowerCase().replace(/[.#$[\]/]/g, '_')]: {
+          rep_export_csv: 'allow',
+          mon_filters_bar: 'block',
+        },
+      },
+    },
+  };
+
+  // Operador role gets dash_hero_metrics=true, while opA specifically blocks dash_gateway_section and allows dash_dual_battery_airflow
+  assert.equal(isSectionVisibleForUser('dash_hero_metrics', opA, customSectionsConfig), true);
+  assert.equal(isSectionVisibleForUser('dash_gateway_section', opA, customSectionsConfig), false);
+  assert.equal(isSectionVisibleForUser('dash_dual_battery_airflow', opA, customSectionsConfig), true);
+  // Another operador without user override inherits the role change (dash_gateway_section=true)
+  assert.equal(isSectionVisibleForUser('dash_gateway_section', opG, customSectionsConfig), true);
+
+  // Admin role gets dash_users_panel & alerts_siren_test enabled, v3d_telemetry_panel disabled
+  assert.equal(isSectionVisibleForUser('dash_users_panel', admA, customSectionsConfig), true);
+  assert.equal(isSectionVisibleForUser('alerts_siren_test', admA, customSectionsConfig), true);
+  assert.equal(isSectionVisibleForUser('v3d_telemetry_panel', admA, customSectionsConfig), false);
+  // Per-email override for admA re-enables rep_export_csv and hides mon_filters_bar
+  assert.equal(isSectionVisibleForUser('rep_export_csv', admA, customSectionsConfig), true);
+  assert.equal(isSectionVisibleForUser('mon_filters_bar', admA, customSectionsConfig), false);
+  // SuperAdmin is always allowed all sections regardless of role/user overrides
+  assert.equal(isSectionVisibleForUser('v3d_telemetry_panel', sa, customSectionsConfig), true);
+  assert.equal(isSectionVisibleForUser('rep_export_csv', sa, customSectionsConfig), true);
+
+  const customizerSrc = readRepoFile('src/components/SuperAdminViewsCustomizerView.tsx');
+  const previewSrc = readRepoFile('src/components/SuperAdminWindowPreview.tsx');
+  const navbarUpdatedSrc = readRepoFile('src/components/Navbar.tsx');
+  const alertCfgUpdatedSrc = readRepoFile('src/components/AlertConfigurationView.tsx');
+  const reportsUpdatedSrc = readRepoFile('src/components/HistoricalReportsView.tsx');
+  const sectorsUpdatedSrc = readRepoFile('src/components/MiningSectorsView.tsx');
+  const node3dUpdatedSrc = readRepoFile('src/components/Node3DInspectorView.tsx');
+  const gw3dUpdatedSrc = readRepoFile('src/components/Gateway3DInspectorView.tsx');
+
+  // Live Visual Preview diff computation: role-level general preview vs individual user preview
+  const dashKeysForDiff = [
+    'dash_hero_metrics',
+    'dash_welcome_banner',
+    'dash_dual_quick_core',
+    'dash_dual_battery_airflow',
+    'dash_gateway_section',
+    'dash_users_panel',
+  ] as const;
+
+  const roleOperadorSynthetic: UserProfile = {
+    id: '__preview_role__',
+    name: 'Operador',
+    email: '',
+    role: 'operador',
+    roleLabel: 'Operador',
+    rut: '',
+    shift: 'Turno A',
+    status: 'activo',
+    organizationId: 'org-alpha',
+  };
+
+  // Comparing saved DEFAULT_PLATFORM_CONFIG vs draft customSectionsConfig for general Operador role:
+  // dash_hero_metrics & dash_gateway_section were added; nothing removed
+  const roleDiff = computeSectionPreviewDiff(
+    [...dashKeysForDiff],
+    roleOperadorSynthetic,
+    DEFAULT_PLATFORM_CONFIG,
+    customSectionsConfig
+  );
+  assert.deepEqual(roleDiff.addedKeys, ['dash_hero_metrics', 'dash_gateway_section']);
+  assert.deepEqual(roleDiff.removedKeys, []);
+  assert.equal(roleDiff.visibleCount, 4);
+  assert.equal(roleDiff.hiddenCount, 2);
+  assert.equal(roleDiff.byKey['dash_hero_metrics'].status, 'added');
+  assert.equal(roleDiff.byKey['dash_dual_battery_airflow'].status, 'unchanged_hidden');
+
+  // For individual user opA (who also blocks dash_gateway_section and allows dash_dual_battery_airflow):
+  // Relative to customSectionsConfig as saved vs a draft where opA blocks dash_dual_quick_core:
+  const draftOpARemoveQuick: PlatformConfig = {
+    ...customSectionsConfig,
+    visibility: {
+      ...customSectionsConfig.visibility,
+      sectionUserOverrides: {
+        ...customSectionsConfig.visibility.sectionUserOverrides,
+        [opA.id]: {
+          ...customSectionsConfig.visibility.sectionUserOverrides![opA.id],
+          dash_dual_quick_core: 'block',
+        },
+      },
+    },
+  };
+  const userDiff = computeSectionPreviewDiff(
+    [...dashKeysForDiff],
+    opA,
+    customSectionsConfig,
+    draftOpARemoveQuick
+  );
+  assert.deepEqual(userDiff.removedKeys, ['dash_dual_quick_core']);
+  assert.deepEqual(userDiff.addedKeys, []);
+  assert.equal(userDiff.byKey['dash_dual_quick_core'].status, 'removed');
+  assert.equal(userDiff.byKey['dash_dual_battery_airflow'].visible, true);
+  assert.equal(userDiff.byKey['dash_gateway_section'].visible, false);
+
+  assert.ok(
+    customizerSrc.includes('SECTION_CATALOG') &&
+      customizerSrc.includes('sectionRolePermissions') &&
+      customizerSrc.includes('sectionUserOverrides') &&
+      customizerSrc.includes('SuperAdminWindowPreview') &&
+      customizerSrc.includes('showLivePreview') &&
+      previewSrc.includes('computeSectionPreviewDiff') &&
+      previewSrc.includes('Ver quitados') &&
+      previewSrc.includes('Vista final') &&
+      previewSrc.includes('isTabVisibleForUser') &&
+      navbarUpdatedSrc.includes("id: 'superadmin_vistas'") &&
+      appUpdatedSrc.includes("currentTab === 'superadmin_vistas' && currentUser.role === 'superadmin'") &&
+      alertCfgUpdatedSrc.includes('isSectionVisibleForUser') &&
+      reportsUpdatedSrc.includes('isSectionVisibleForUser') &&
+      sectorsUpdatedSrc.includes('isSectionVisibleForUser') &&
+      node3dUpdatedSrc.includes('showTelemetryPanel') &&
+      gw3dUpdatedSrc.includes('showTelemetryPanel'),
+    'SuperAdmin Vistas y Bloques window, Live Preview, and isSectionVisibleForUser are wired across Navbar, App, Dashboard, and all platform views'
+  );
+
+  console.log('✅ 28. SuperAdmin Vistas y Bloques + Live Preview (Per-Role & Per-User) passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

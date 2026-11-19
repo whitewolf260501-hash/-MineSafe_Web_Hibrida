@@ -55,6 +55,11 @@ interface InteractiveDeviceChartAndUsersProps {
   siteName?: string;
   betweenWelcomeAndChart?: React.ReactNode;
   canViewSystemUsers?: boolean;
+  showWelcomeBanner?: boolean;
+  showWelcomeStats?: boolean;
+  showWelcomeDiagnostics?: boolean;
+  showSectorChart?: boolean;
+  showExtendedChartVars?: boolean;
   sites?: MiningSite[];
   crews?: MiningCrew[];
   organizations?: Organization[];
@@ -76,6 +81,11 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   siteName,
   betweenWelcomeAndChart,
   canViewSystemUsers,
+  showWelcomeBanner = true,
+  showWelcomeStats,
+  showWelcomeDiagnostics,
+  showSectorChart = true,
+  showExtendedChartVars,
   sites = [],
   organizations = [],
   activeOrganizationId = 'all',
@@ -96,7 +106,10 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   const isCompanyAdmin = currentUser?.role === 'admin';
   const isSupervisor = currentUser?.role === 'supervisor';
   const isOperador = currentUser?.role === 'operador';
-  const showUsersPanel = isSuperAdmin && (canViewSystemUsers ?? true);
+  const showUsersPanel = isSuperAdmin ? (canViewSystemUsers ?? true) : Boolean(canViewSystemUsers);
+  const effectiveShowWelcomeStats = showWelcomeStats ?? (currentUser?.role !== 'operador');
+  const effectiveShowWelcomeDiagnostics = showWelcomeDiagnostics ?? isSuperAdmin;
+  const effectiveShowExtendedChartVars = showExtendedChartVars ?? isSuperAdmin;
 
   const getRoleDetails = (role?: UserRole) => {
     switch (role) {
@@ -226,7 +239,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   );
 
   const chartDevices = useMemo(() => {
-    if (isSuperAdmin && superAdminSingleNodeMode && activeSelectedDevice) {
+    if (effectiveShowExtendedChartVars && superAdminSingleNodeMode && activeSelectedDevice) {
       return [activeSelectedDevice];
     }
     return roleScopedDevices.filter((d) => {
@@ -248,7 +261,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
     });
   }, [
     roleScopedDevices,
-    isSuperAdmin,
+    effectiveShowExtendedChartVars,
     superAdminSingleNodeMode,
     activeSelectedDevice,
     isGlobalAdmin,
@@ -616,7 +629,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
       status: aggregatedMetrics.ch4 === null ? 'Sin dato' : ch4Value > ch4Safe ? 'Crítico' : 'Seguro',
       norm: `DS 132: Máx ${ch4Safe}% LEL`,
     },
-    ...(isSuperAdmin
+    ...(effectiveShowExtendedChartVars
       ? [
           {
             id: 'o2',
@@ -768,7 +781,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
         ];
 
   const activeScopeLabel =
-    isSuperAdmin && superAdminSingleNodeMode && activeSelectedDevice
+    effectiveShowExtendedChartVars && superAdminSingleNodeMode && activeSelectedDevice
       ? `Nodo: ${activeSelectedDevice.name}`
       : effectiveSectorFilter !== 'all'
       ? `Sector ${effectiveSectorFilter}`
@@ -832,6 +845,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
       {/* ==============================================================
           1. WELCOME BANNER WITH PROMINENT ROLE INDICATOR
          ============================================================== */}
+      {showWelcomeBanner && (
       <div className="relative overflow-hidden rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-cyan-950/40 border border-slate-800 p-5 sm:p-6 shadow-xl">
         <div className="absolute top-0 right-0 -mt-8 -mr-8 w-64 h-64 bg-cyan-500/5 rounded-full blur-3xl pointer-events-none" />
 
@@ -860,7 +874,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
 
               <p className="mt-1 text-xs sm:text-sm text-slate-400 flex flex-wrap items-center gap-x-3 gap-y-1">
                 <span className="text-slate-200 font-semibold">{userRoleInfo.label}</span>
-                {isSuperAdmin && (
+                {effectiveShowWelcomeDiagnostics && (
                   <>
                     <span>•</span>
                     <span className="px-2 py-0.5 rounded bg-purple-950/70 border border-purple-700/60 text-purple-200 text-[11px] font-semibold">
@@ -892,42 +906,48 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
         </div>
 
-        {/* Operational Stat Strip (Hidden for Operador; 2 cards standard; + Dispositivo Activo & Alertas de Faena for SuperAdmin) */}
-        {currentUser?.role !== 'operador' && (
+        {/* Operational Stat Strip (Configured via Vistas y Bloques per role/user) */}
+        {(effectiveShowWelcomeStats || effectiveShowWelcomeDiagnostics) && (
           <div
             className={`grid grid-cols-1 ${
-              isSuperAdmin ? 'sm:grid-cols-2 lg:grid-cols-4' : 'sm:grid-cols-2'
+              effectiveShowWelcomeStats && effectiveShowWelcomeDiagnostics
+                ? 'sm:grid-cols-2 lg:grid-cols-4'
+                : 'sm:grid-cols-2'
             } gap-3 sm:gap-4 mt-5 pt-4 border-t border-slate-800/80 relative z-10`}
           >
-            <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
-              <div>
-                <span className="text-xs text-slate-400 font-medium block">Nodos Activos del Total</span>
-                <div className="mt-1 text-2xl font-black text-emerald-400 tabular-nums">
-                  {onlineNodesCount}{' '}
-                  <span className="text-xs font-normal text-slate-400">/ {totalNodesCount} nodos</span>
+            {effectiveShowWelcomeStats && (
+              <>
+                <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-slate-400 font-medium block">Nodos Activos del Total</span>
+                    <div className="mt-1 text-2xl font-black text-emerald-400 tabular-nums">
+                      {onlineNodesCount}{' '}
+                      <span className="text-xs font-normal text-slate-400">/ {totalNodesCount} nodos</span>
+                    </div>
+                  </div>
+                  <div className="w-9 h-9 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-400">
+                    <Cpu className="w-4 h-4" />
+                  </div>
                 </div>
-              </div>
-              <div className="w-9 h-9 rounded-xl bg-emerald-950/60 border border-emerald-800/60 flex items-center justify-center text-emerald-400">
-                <Cpu className="w-4 h-4" />
-              </div>
-            </div>
 
-            <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
-              <div>
-                <span className="text-xs text-slate-400 font-medium block">Sectores con Cobertura</span>
-                <div className="mt-1 text-2xl font-black text-cyan-300 tabular-nums">
-                  {availableSectors.length}{' '}
-                  <span className="text-xs font-normal text-slate-400">
-                    {availableSectors.length === 1 ? 'sector monitoreado' : 'sectores monitoreados'}
-                  </span>
+                <div className="bg-slate-950/60 rounded-xl p-3.5 border border-slate-800/80 flex items-center justify-between">
+                  <div>
+                    <span className="text-xs text-slate-400 font-medium block">Sectores con Cobertura</span>
+                    <div className="mt-1 text-2xl font-black text-cyan-300 tabular-nums">
+                      {availableSectors.length}{' '}
+                      <span className="text-xs font-normal text-slate-400">
+                        {availableSectors.length === 1 ? 'sector monitoreado' : 'sectores monitoreados'}
+                      </span>
+                    </div>
+                  </div>
+                  <div className="w-9 h-9 rounded-xl bg-cyan-950/60 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
+                    <MapPin className="w-4 h-4" />
+                  </div>
                 </div>
-              </div>
-              <div className="w-9 h-9 rounded-xl bg-cyan-950/60 border border-cyan-800/60 flex items-center justify-center text-cyan-400">
-                <MapPin className="w-4 h-4" />
-              </div>
-            </div>
+              </>
+            )}
 
-            {isSuperAdmin && (
+            {effectiveShowWelcomeDiagnostics && (
               <>
                 <div className="bg-purple-950/25 rounded-xl p-3.5 border border-purple-800/50 flex flex-col justify-between gap-1.5">
                   <div className="flex items-center justify-between gap-2">
@@ -985,14 +1005,17 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
         )}
       </div>
+      )}
 
       {/* Consolidated Atmospheric Cards placed between Welcome Banner and Bar Chart */}
       {betweenWelcomeAndChart}
 
       {/* ==============================================================
-          2. SECTOR/NODE TELEMETRY CHART (+ USUARIOS DEL SISTEMA FOR SUPERADMIN)
+          2. SECTOR/NODE TELEMETRY CHART (+ USUARIOS DEL SISTEMA)
          ============================================================== */}
-      <div className={showUsersPanel ? 'grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : ''}>
+      {(showSectorChart || showUsersPanel) && (
+      <div className={showSectorChart && showUsersPanel ? 'grid grid-cols-1 xl:grid-cols-12 gap-6 items-start' : ''}>
+      {showSectorChart && (
       <div className={`${showUsersPanel ? 'xl:col-span-8 ' : ''}bg-slate-900/90 border border-slate-800 rounded-2xl p-5 sm:p-6 shadow-xl`}>
         {/* Header with Title and Mode Switcher */}
         <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-3 pb-4 border-b border-slate-800">
@@ -1003,7 +1026,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             <div>
               <h3 className="text-base sm:text-lg font-bold text-white flex flex-wrap items-center gap-2">
                 <span>
-                  {isSuperAdmin && superAdminSingleNodeMode
+                  {effectiveShowExtendedChartVars && superAdminSingleNodeMode
                     ? 'Monitoreo Atmosférico por Nodo Individual'
                     : 'Monitoreo Atmosférico por Sector'}
                 </span>
@@ -1012,7 +1035,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                 </span>
               </h3>
               <p className="text-xs text-slate-400">
-                {isSuperAdmin
+                {effectiveShowExtendedChartVars
                   ? `Lecturas reales de ${aggregatedMetrics.reportingNodes} de ${chartDevices.length} ${
                       chartDevices.length === 1 ? 'nodo' : 'nodos'
                     } (Temp, Hum, CO, CO2, PM2.5, CH4, O₂, Ventilación y Ruido)`
@@ -1133,8 +1156,8 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             </select>
           )}
 
-          {/* SuperAdmin Exclusive: Individual Node Mode Toggle + Node Selector */}
-          {isSuperAdmin && (
+          {/* Extended Mode Toggle + Individual Node Selector */}
+          {effectiveShowExtendedChartVars && (
             <div className="flex flex-wrap items-center gap-2 ml-auto">
               <button
                 type="button"
@@ -1171,7 +1194,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             <div className="flex items-center justify-between text-xs text-slate-400 mb-4 pb-2 border-b border-slate-800">
               <span className="font-semibold text-slate-200 flex items-center gap-1.5">
                 <Activity className="w-4 h-4 text-cyan-400" />
-                {isSuperAdmin && superAdminSingleNodeMode
+                {effectiveShowExtendedChartVars && superAdminSingleNodeMode
                   ? `Lectura Individual de Nodo (${allSensorBars.length} Variables)`
                   : `Promedios Atmosféricos Reales (${allSensorBars.length} Variables)`}
               </span>
@@ -1187,7 +1210,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             ) : (
               <div
                 className={`grid ${
-                  isSuperAdmin
+                  effectiveShowExtendedChartVars
                     ? 'grid-cols-3 sm:grid-cols-5 lg:grid-cols-9'
                     : 'grid-cols-3 sm:grid-cols-6'
                 } gap-3 sm:gap-4 items-end pt-6 pb-2 min-h-[260px]`}
@@ -1417,12 +1440,13 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
           </div>
         )}
       </div>
+      )}
 
       {/* ==============================================================
-          SUPERADMIN ONLY: BLOQUE "USUARIOS DEL SISTEMA" EN DASHBOARD
+          BLOQUE "USUARIOS DEL SISTEMA" EN DASHBOARD (Configurable)
          ============================================================== */}
       {showUsersPanel && (
-        <aside className="xl:col-span-4 bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col">
+        <aside className={`${showSectorChart ? 'xl:col-span-4 ' : ''}bg-slate-900/90 border border-slate-800 rounded-2xl p-5 shadow-xl flex flex-col`}>
           {/* Header */}
           <div className="flex items-center gap-3 pb-3.5 border-b border-slate-800">
             <div className="w-10 h-10 rounded-xl bg-purple-950/80 border border-purple-700/70 flex items-center justify-center text-purple-300 shrink-0">
@@ -1571,6 +1595,7 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
         </aside>
       )}
       </div>
+      )}
 
       {/* SuperAdmin User Profile Carnet Modal (opened from "Ver perfil") */}
       {inspectedUser && (

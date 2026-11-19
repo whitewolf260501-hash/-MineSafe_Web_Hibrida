@@ -38,16 +38,22 @@ import {
   AlertResolutionDetails, 
   UserProfile, 
   SensorDevice, 
-  AlarmAuditRecord 
+  AlarmAuditRecord,
+  PlatformConfig
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { extractAlarmAuditRecords, buildAuditRecordsFromAlerts } from '../services/firebase';
+import {
+  extractAlarmAuditRecords,
+  buildAuditRecordsFromAlerts,
+  isSectionVisibleForUser,
+} from '../services/firebase';
 import { AlertResolutionModal } from './AlertResolutionModal';
 
 interface AlertsViewProps {
   alerts: SafetyAlert[];
   devices?: SensorDevice[];
   currentUser?: UserProfile | null;
+  platformConfig?: PlatformConfig;
   isReadOnly?: boolean;
   onAcknowledgeAlert: (alertId: string) => void;
   onResolveAlert: (alertId: string) => void;
@@ -61,6 +67,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
   alerts,
   devices = [],
   currentUser,
+  platformConfig,
   isReadOnly = false,
   onAcknowledgeAlert,
   onResolveAlert,
@@ -71,10 +78,22 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
 }) => {
   const isOperadorReadOnly = Boolean(isReadOnly || currentUser?.role === 'operador');
   const isSuperAdmin = currentUser?.role === 'superadmin';
+  const showSummaryCards = isSectionVisibleForUser(
+    'alerts_summary_cards',
+    currentUser,
+    platformConfig
+  );
+  const showFiltersBar = isSectionVisibleForUser('alerts_filters_bar', currentUser, platformConfig);
+  const showAuditSubtab = isSectionVisibleForUser(
+    'alerts_audit_subtab',
+    currentUser,
+    platformConfig
+  );
+  const showSirenTest = isSectionVisibleForUser('alerts_siren_test', currentUser, platformConfig);
 
   // Main view switcher: Alertas Activas vs Auditoría Registro de Alarmas (RTDB / ESP32)
   const [subTab, setSubTab] = useState<'alertas_activas' | 'auditoria_rtdb'>('alertas_activas');
-  const effectiveSubTab = isOperadorReadOnly ? 'alertas_activas' : subTab;
+  const effectiveSubTab = isOperadorReadOnly || !showAuditSubtab ? 'alertas_activas' : subTab;
 
   // Active alerts filters (recent window + configurable visible cap)
   const [filterSeverity, setFilterSeverity] = useState<string>('all');
@@ -345,8 +364,8 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
             </p>
           </div>
 
-          {/* SuperAdmin Exclusive: Probar Sirena */}
-          {isSuperAdmin && (
+          {/* SuperAdmin / Configured: Probar Sirena */}
+          {showSirenTest && (
             <div className="flex flex-wrap items-center gap-2 shrink-0">
               <button
                 type="button"
@@ -405,21 +424,23 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               </span>
             </button>
 
-            <button
-              type="button"
-              onClick={() => setSubTab('auditoria_rtdb')}
-              className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
-                effectiveSubTab === 'auditoria_rtdb'
-                  ? 'bg-cyan-950 text-cyan-200 border border-cyan-700 shadow-md shadow-cyan-950/50'
-                  : 'text-slate-400 hover:text-white hover:bg-slate-900'
-              }`}
-            >
-              <Radio className="w-4 h-4 text-cyan-400" />
-              <span>Auditoría y Registro de Alarmas (RTDB / ESP32)</span>
-              <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-900/90 text-cyan-200 font-mono font-bold">
-                {allAuditRecords.length}
-              </span>
-            </button>
+            {showAuditSubtab && (
+              <button
+                type="button"
+                onClick={() => setSubTab('auditoria_rtdb')}
+                className={`flex-1 sm:flex-initial px-4 py-2 rounded-lg text-xs font-bold transition-all flex items-center justify-center gap-2 cursor-pointer ${
+                  effectiveSubTab === 'auditoria_rtdb'
+                    ? 'bg-cyan-950 text-cyan-200 border border-cyan-700 shadow-md shadow-cyan-950/50'
+                    : 'text-slate-400 hover:text-white hover:bg-slate-900'
+                }`}
+              >
+                <Radio className="w-4 h-4 text-cyan-400" />
+                <span>Auditoría y Registro de Alarmas (RTDB / ESP32)</span>
+                <span className="px-1.5 py-0.2 rounded-full text-[10px] bg-cyan-900/90 text-cyan-200 font-mono font-bold">
+                  {allAuditRecords.length}
+                </span>
+              </button>
+            )}
           </div>
         )}
 
@@ -441,13 +462,15 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               >
                 Ver Resueltas ({resolvedAlertsCount})
               </button>
-              <button
-                type="button"
-                onClick={() => setSubTab('auditoria_rtdb')}
-                className="px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-[11px] font-bold transition-colors"
-              >
-                Ver Auditoría ({allAuditRecords.length})
-              </button>
+              {!isOperadorReadOnly && showAuditSubtab && (
+                <button
+                  type="button"
+                  onClick={() => setSubTab('auditoria_rtdb')}
+                  className="px-2.5 py-1 rounded bg-cyan-700 hover:bg-cyan-600 text-white text-[11px] font-bold transition-colors"
+                >
+                  Ver Auditoría ({allAuditRecords.length})
+                </button>
+              )}
               <button 
                 onClick={() => setExportNotice(null)} 
                 className="text-cyan-400 hover:text-white text-[10px] font-bold ml-1"
@@ -466,6 +489,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       {effectiveSubTab === 'alertas_activas' && (
         <div className="space-y-6">
           {/* Severity Count Cards */}
+          {showSummaryCards && (
           <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
             <div className="p-3.5 rounded-lg bg-slate-950/60 border border-slate-800 flex items-center justify-between">
               <div>
@@ -497,8 +521,10 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               </div>
             </div>
           </div>
+          )}
 
           {/* Filters Bar */}
+          {showFiltersBar && (
           <div className="p-4 bg-slate-900/70 border border-slate-800 rounded-xl flex flex-col sm:flex-row gap-3 items-stretch sm:items-center justify-between">
             <div className="relative flex-1 max-w-md">
               <Search className="w-4 h-4 text-slate-500 absolute left-3 top-2.5" />
@@ -574,6 +600,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
               )}
             </div>
           </div>
+          )}
 
           {/* Active Alerts List */}
           <div className="space-y-3">

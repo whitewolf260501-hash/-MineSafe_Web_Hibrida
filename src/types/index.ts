@@ -347,7 +347,13 @@ export type ControllableTab =
   | 'visor_3d'
   | 'gateway_3d';
 
-export type EquiposSubTab = 'asignaciones' | 'arriendos' | 'pagos' | 'inventario';
+export type EquiposSubTab =
+  | 'asignaciones'
+  | 'arriendos'
+  | 'pagos'
+  | 'inventario'
+  | 'dispositivos'
+  | 'empresas';
 
 export type ControllableRoleKey = 'admin_minesafe' | 'admin' | 'operador' | 'supervisor';
 

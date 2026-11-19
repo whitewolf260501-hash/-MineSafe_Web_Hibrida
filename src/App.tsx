@@ -2399,6 +2399,8 @@ export default function App({
                 rentals={scopedRentals}
                 assignments={scopedAssignments}
                 devices={visibleDevices}
+                catalogDevices={mergedRegisteredDevices}
+                rtdbDevices={devices}
                 crews={scopedCrews}
                 usersList={scopedUsers}
                 allSites={scopedSites}
@@ -2412,6 +2414,43 @@ export default function App({
                 onRecordPayment={handleRecordPayment}
                 onSaveCrew={handleSaveCrew}
                 onDeleteCrew={handleDeleteCrew}
+                onSelectOrganization={setActiveOrganizationId}
+                onOrganizationsChanged={(changedOrg, deletedId) => {
+                  setOrganizations((prev) => {
+                    if (deletedId) {
+                      return prev.filter((o) => o.id !== deletedId);
+                    }
+                    const exists = prev.some((o) => o.id === changedOrg.id);
+                    return exists
+                      ? prev.map((o) => (o.id === changedOrg.id ? changedOrg : o))
+                      : [...prev, changedOrg];
+                  });
+                }}
+                onCatalogDeviceUpdated={(savedReg) => {
+                  setCatalogDevices((prev) => {
+                    const exists = prev.some((d) => d.id === savedReg.id);
+                    return exists
+                      ? prev.map((d) => (d.id === savedReg.id ? savedReg : d))
+                      : [savedReg, ...prev];
+                  });
+                  setPlatformConfig((prev) => {
+                    const list = prev.registeredDevices || [];
+                    const exists = list.some((d) => d.id === savedReg.id);
+                    return {
+                      ...prev,
+                      registeredDevices: exists
+                        ? list.map((d) => (d.id === savedReg.id ? savedReg : d))
+                        : [...list, savedReg],
+                    };
+                  });
+                }}
+                onCatalogDeviceDeleted={(devId) => {
+                  setCatalogDevices((prev) => prev.filter((d) => d.id !== devId));
+                  setPlatformConfig((prev) => ({
+                    ...prev,
+                    registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== devId),
+                  }));
+                }}
               />
             )}
 

@@ -2071,6 +2071,8 @@ async function runTests() {
           arriendos: false,
           pagos: false,
           inventario: true,
+          dispositivos: false,
+          empresas: false,
         },
       },
       policyLocks: {
@@ -2084,6 +2086,10 @@ async function runTests() {
   assert.equal(isTabVisibleForUser('equipos', opA, globalUnlockOpConfig), true);
   assert.equal(isEquiposSubTabVisibleForUser('asignaciones', opA, globalUnlockOpConfig), true);
   assert.equal(isEquiposSubTabVisibleForUser('arriendos', opA, globalUnlockOpConfig), false);
+  assert.equal(isEquiposSubTabVisibleForUser('dispositivos', opA, globalUnlockOpConfig), false);
+  assert.equal(isEquiposSubTabVisibleForUser('empresas', opA, globalUnlockOpConfig), false);
+  assert.equal(isEquiposSubTabVisibleForUser('dispositivos', admA, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isEquiposSubTabVisibleForUser('empresas', admA, DEFAULT_PLATFORM_CONFIG), true);
   assert.equal(
     isTabVisibleForUser('empresas', opA, globalUnlockOpConfig),
     false,
@@ -2148,16 +2154,21 @@ async function runTests() {
     'SuperAdmin is never locked out by role policy locks'
   );
 
-  // 26e. Static check that SuperAdminControlView exposes interactive policy lock & unlock buttons
+  // 26e. Static check that SuperAdminControlView exposes interactive policy lock & unlock buttons and DevicesAndRentalsView includes Dispositivos & Empresas sub-tabs
+  const devicesAndRentalsSrc = readRepoFile('src/components/DevicesAndRentalsView.tsx');
   assert.ok(
     controlViewSrc.includes('handleToggleRolePolicyLock') &&
       controlViewSrc.includes('handleToggleWindowPolicyLock') &&
       controlViewSrc.includes('Desbloquear Política') &&
-      controlViewSrc.includes('Bloquear por Política'),
-    'SuperAdminControlView exposes both role-level and per-window policy lock/unlock controls'
+      controlViewSrc.includes('Bloquear por Política') &&
+      devicesAndRentalsSrc.includes('Dispositivos (Sensores y Gateways)') &&
+      devicesAndRentalsSrc.includes('Empresas / Organizaciones') &&
+      devicesAndRentalsSrc.includes('DeviceRegistryAndAssignmentPanel') &&
+      devicesAndRentalsSrc.includes('OrganizationsManagerPanel'),
+    'SuperAdminControlView exposes policy lock/unlock controls and DevicesAndRentalsView exposes Dispositivos & Empresas sub-tabs'
   );
 
-  console.log('✅ 26. Dynamic Policy Lock / Unlock (Global & Per-Window across all roles) passed');
+  console.log('✅ 26. Dynamic Policy Lock / Unlock & New Equipos Sub-Tabs passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

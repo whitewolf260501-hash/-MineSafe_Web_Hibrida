@@ -176,6 +176,16 @@ const EQUIPOS_SUB_WINDOWS: Array<{
     label: 'Stock de Sensores IoT',
     description: 'Inventario técnico, baterías, señal y estado en terreno',
   },
+  {
+    id: 'dispositivos',
+    label: 'Dispositivos (Sensores y Gateways)',
+    description: 'Registro por ID único, clasificación Gateway/Nodo y asignación a empresa/faena',
+  },
+  {
+    id: 'empresas',
+    label: 'Empresas / Organizaciones',
+    description: 'Registro, edición y filtro multi-empresa de organizaciones',
+  },
 ];
 
 export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
@@ -581,14 +591,21 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
     if (isWindowPolicyLockedForRole(role, 'equipos', draftConfig)) return;
     soundAlert.playFeedbackBeep();
     commitVisibilityChange((prev) => {
-      const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
-        admin_minesafe: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
-        admin: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
-        operador: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
-        supervisor: { asignaciones: true, arriendos: true, pagos: true, inventario: true },
+      const defaultSubMap: Record<EquiposSubTab, boolean> = {
+        asignaciones: true,
+        arriendos: true,
+        pagos: true,
+        inventario: true,
+        dispositivos: true,
+        empresas: true,
       };
-      const roleSubMap =
-        currentPerms[role] || { asignaciones: true, arriendos: true, pagos: true, inventario: true };
+      const currentPerms = prev.visibility.equiposSubTabRolePermissions || {
+        admin_minesafe: { ...defaultSubMap },
+        admin: { ...defaultSubMap },
+        operador: { ...defaultSubMap },
+        supervisor: { ...defaultSubMap },
+      };
+      const roleSubMap = currentPerms[role] || { ...defaultSubMap };
       return {
         ...prev,
         visibility: {
@@ -673,6 +690,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
           arriendos: value,
           pagos: value,
           inventario: value,
+          dispositivos: value,
+          empresas: value,
         };
         nextOverrides[targetUser.id] = allMap;
         if (emailKey) {
@@ -1900,7 +1919,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                 : 'bg-slate-800 text-cyan-300'
                             }`}
                           >
-                            {subOverrideCount > 0 ? `${subOverrideCount}/4` : '4'}
+                            {subOverrideCount > 0 ? `${subOverrideCount}/${EQUIPOS_SUB_WINDOWS.length}` : `${EQUIPOS_SUB_WINDOWS.length}`}
                           </span>
                         </button>
                       </div>
@@ -2111,7 +2130,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                 }
                                 className="px-2 py-0.5 rounded bg-emerald-950/70 border border-emerald-700 text-emerald-300 hover:bg-emerald-900/60 transition-colors"
                               >
-                                Permitir 4
+                                Permitir {EQUIPOS_SUB_WINDOWS.length}
                               </button>
                               <button
                                 type="button"
@@ -2120,7 +2139,7 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                                 }
                                 className="px-2 py-0.5 rounded bg-rose-950/70 border border-rose-700 text-rose-300 hover:bg-rose-900/60 transition-colors"
                               >
-                                Bloquear 4
+                                Bloquear {EQUIPOS_SUB_WINDOWS.length}
                               </button>
                             </div>
                           </div>

@@ -19,7 +19,8 @@ import {
   Download,
   Lock,
   Edit2,
-  X
+  X,
+  Building2
 } from 'lucide-react';
 import {
   DeviceRental,
@@ -31,19 +32,24 @@ import {
   MiningCrew,
   MiningSite,
   Organization,
-  CrewMember
+  CrewMember,
+  RegisteredDeviceConfig
 } from '../types';
 import { PRELOADED_CREWS } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION, isEquiposSubTabVisibleForUser } from '../services/firebase';
 import { assignWorkersToCrew, canManageContractsAndPayments } from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
+import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
+import { OrganizationsManagerPanel } from './OrganizationsManagerPanel';
 import { validateChileanRut } from '../utils/rut';
 
 interface DevicesAndRentalsViewProps {
   rentals: DeviceRental[];
   assignments: WorkerAssignment[];
   devices: SensorDevice[];
+  catalogDevices?: RegisteredDeviceConfig[];
+  rtdbDevices?: SensorDevice[];
   crews?: MiningCrew[];
   usersList?: UserProfile[];
   allSites?: MiningSite[];
@@ -57,14 +63,27 @@ interface DevicesAndRentalsViewProps {
   onRecordPayment: (contractId: string) => Promise<void> | void;
   onSaveCrew?: (crew: MiningCrew) => Promise<void> | void;
   onDeleteCrew?: (crewId: string, organizationId: string) => Promise<void> | void;
+  onSelectOrganization?: (orgId: string) => void;
+  onOrganizationsChanged?: (org: Organization, deletedId?: string) => void;
+  onCatalogDeviceUpdated?: (saved: RegisteredDeviceConfig) => void;
+  onCatalogDeviceDeleted?: (deviceId: string) => void;
 }
 
-const EQUIPOS_SUBTAB_ORDER: EquiposSubTab[] = ['asignaciones', 'arriendos', 'pagos', 'inventario'];
+const EQUIPOS_SUBTAB_ORDER: EquiposSubTab[] = [
+  'asignaciones',
+  'arriendos',
+  'pagos',
+  'inventario',
+  'dispositivos',
+  'empresas',
+];
 
 export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   rentals,
   assignments,
   devices,
+  catalogDevices,
+  rtdbDevices,
   crews = [],
   usersList = [],
   allSites = [],
@@ -78,7 +97,20 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   onRecordPayment,
   onSaveCrew,
   onDeleteCrew,
+  onSelectOrganization,
+  onOrganizationsChanged,
+  onCatalogDeviceUpdated,
+  onCatalogDeviceDeleted,
 }) => {
+  const effectiveCatalogDevices = useMemo<RegisteredDeviceConfig[]>(
+    () => catalogDevices || platformConfig?.registeredDevices || [],
+    [catalogDevices, platformConfig?.registeredDevices]
+  );
+  const enabledCatalogCount = useMemo(
+    () => effectiveCatalogDevices.filter((d) => d.enabled !== false).length,
+    [effectiveCatalogDevices]
+  );
+
   const [activeSubTab, setActiveSubTab] = useState<EquiposSubTab>('asignaciones');
   const [searchQuery, setSearchQuery] = useState('');
   const [showAssignModal, setShowAssignModal] = useState(false);
@@ -565,6 +597,42 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
               <span>Stock de Sensores IoT ({devices.length})</span>
             </button>
           )}
+
+          {canViewSubTab('dispositivos') && (
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('dispositivos')}
+              className={`flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors border ${
+                activeSubTab === 'dispositivos'
+                  ? 'bg-amber-950/90 text-amber-200 border-amber-500 shadow-sm'
+                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+              }`}
+            >
+              <Cpu className="w-4 h-4 text-amber-400" />
+              <span>Dispositivos (Sensores y Gateways)</span>
+              <span className="px-1.5 py-0.5 rounded bg-black/40 text-[10px] font-mono">
+                {enabledCatalogCount}
+              </span>
+            </button>
+          )}
+
+          {canViewSubTab('empresas') && (
+            <button
+              type="button"
+              onClick={() => setActiveSubTab('empresas')}
+              className={`flex items-center gap-2 px-3 py-1.5 text-xs font-semibold rounded-lg transition-colors border ${
+                activeSubTab === 'empresas'
+                  ? 'bg-cyan-950/90 text-cyan-200 border-cyan-500 shadow-sm'
+                  : 'border-transparent text-slate-400 hover:text-slate-200 hover:bg-slate-900'
+              }`}
+            >
+              <Building2 className="w-4 h-4 text-cyan-400" />
+              <span>Empresas / Organizaciones</span>
+              <span className="px-1.5 py-0.5 rounded bg-black/40 text-[10px] font-mono">
+                {organizations.length}
+              </span>
+            </button>
+          )}
         </div>
       </div>
 
@@ -845,6 +913,34 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
             </table>
           </div>
         </div>
+      )}
+
+      {/* ==============================================================
+          SUBTAB 5: DISPOSITIVOS (SENSORES Y GATEWAYS)
+         ============================================================== */}
+      {activeSubTab === 'dispositivos' && canViewSubTab('dispositivos') && currentUser && (
+        <DeviceRegistryAndAssignmentPanel
+          currentUser={currentUser}
+          organizations={organizations}
+          sites={allSites}
+          catalogDevices={effectiveCatalogDevices}
+          rtdbDevices={rtdbDevices || devices}
+          onDeviceUpdated={onCatalogDeviceUpdated}
+          onDeviceDeleted={onCatalogDeviceDeleted}
+        />
+      )}
+
+      {/* ==============================================================
+          SUBTAB 6: EMPRESAS / ORGANIZACIONES
+         ============================================================== */}
+      {activeSubTab === 'empresas' && canViewSubTab('empresas') && currentUser && (
+        <OrganizationsManagerPanel
+          currentUser={currentUser}
+          organizations={organizations}
+          activeOrganizationId={activeOrganizationId}
+          onSelectOrganization={onSelectOrganization}
+          onOrganizationsChanged={onOrganizationsChanged}
+        />
       )}
         </>
       )}

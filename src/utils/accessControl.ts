@@ -124,6 +124,28 @@ export function canCreateOrEditOrganization(
   };
 }
 
+export function canBlockOrganization(
+  actingUser: UserProfile | null | undefined,
+  org: Organization | null | undefined
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'Sesión no autorizada.' };
+  }
+  if (!org) {
+    return { allowed: false, reason: 'Organización no encontrada.' };
+  }
+  if (org.id === DEFAULT_ORGANIZATION_ID) {
+    return { allowed: false, reason: 'No se puede bloquear la organización principal por defecto.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: 'Solo SuperAdmin o Admin MineSafe pueden bloquear o reactivar empresas.',
+  };
+}
+
 export function canDeleteOrganization(
   actingUser: UserProfile | null | undefined,
   org: Organization | null | undefined
@@ -137,19 +159,46 @@ export function canDeleteOrganization(
   if (org.id === DEFAULT_ORGANIZATION_ID) {
     return { allowed: false, reason: 'No se puede eliminar la organización principal por defecto.' };
   }
-  if (actingUser.role === 'superadmin') {
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
     return { allowed: true };
-  }
-  if (actingUser.role === 'admin_minesafe') {
-    return {
-      allowed: false,
-      reason: 'El rol Admin MineSafe puede suspender o editar empresas cliente, pero solo el SuperAdministrador puede eliminarlas permanentemente.',
-    };
   }
   return {
     allowed: false,
-    reason: 'Solo el SuperAdministrador puede eliminar empresas.',
+    reason: 'Solo SuperAdmin o Admin MineSafe pueden eliminar empresas.',
   };
+}
+
+export function canBlockOrDeleteSite(
+  actingUser: UserProfile | null | undefined,
+  site?: Pick<MiningSite, 'id' | 'organizationId'> | null
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'Sesión no autorizada.' };
+  }
+  if (!site) {
+    return { allowed: false, reason: 'Faena no encontrada.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason: 'Solo SuperAdmin o Admin MineSafe pueden bloquear o eliminar faenas mineras.',
+  };
+}
+
+export function canBlockOrDeleteCrew(
+  actingUser: UserProfile | null | undefined,
+  targetOrgId?: string,
+  organizations?: Organization[]
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'Sesión no autorizada.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  return canManageCrews(actingUser, targetOrgId, organizations);
 }
 
 export function canManageOrganizationHierarchy(
@@ -219,6 +268,74 @@ export function canRegisterAndAssignIoTDevices(
     reason:
       'Solo SuperAdmin y Admin MineSafe pueden registrar nuevos IDs de dispositivos IoT (Gateway/Nodo) o asignarlos/reasignarlos entre empresas y faenas.',
   };
+}
+
+export function canBlockOrDeleteIoTDevice(
+  actingUser: UserProfile | null | undefined
+): { allowed: boolean; reason?: string } {
+  if (!actingUser || actingUser.status !== 'activo') {
+    return { allowed: false, reason: 'La sesión actual no está activa o autorizada.' };
+  }
+  if (isGlobalMineSafeAdmin(actingUser.role)) {
+    return { allowed: true };
+  }
+  return {
+    allowed: false,
+    reason:
+      'Solo SuperAdmin y Admin MineSafe pueden bloquear, desbloquear, editar, cambiar o eliminar dispositivos IoT.',
+  };
+}
+
+export function isDeviceBlocked(
+  device?: Pick<RegisteredDeviceConfig, 'blocked' | 'enabled' | 'active'> | null
+): boolean {
+  if (!device) return false;
+  return device.blocked === true || device.enabled === false || device.active === false;
+}
+
+export function isDeviceVisibleToUser(
+  device: Pick<
+    RegisteredDeviceConfig,
+    | 'id'
+    | 'organizationId'
+    | 'blocked'
+    | 'enabled'
+    | 'active'
+    | 'assignedUserIds'
+    | 'sharedOrganizationIds'
+    | 'sharedWithAllAssignedUsers'
+  >,
+  actingUser: Pick<UserProfile, 'id' | 'role' | 'organizationId' | 'assignedDeviceCode'> | null | undefined,
+  effectiveOrgId: string
+): boolean {
+  if (isDeviceBlocked(device)) {
+    return false;
+  }
+  const hasExplicitOrg = !isUnassignedDeviceOrg(device.organizationId);
+  const sharedOrgs = Array.isArray(device.sharedOrganizationIds) ? device.sharedOrganizationIds : [];
+  const assignedUsers = Array.isArray(device.assignedUserIds) ? device.assignedUserIds : [];
+  const isSharedAll = Boolean(device.sharedWithAllAssignedUsers);
+
+  if (effectiveOrgId === 'all') {
+    return hasExplicitOrg || isSharedAll || sharedOrgs.length > 0 || assignedUsers.length > 0;
+  }
+
+  if (hasExplicitOrg && (device.organizationId || DEFAULT_ORGANIZATION_ID) === effectiveOrgId) {
+    return true;
+  }
+  if (sharedOrgs.includes(effectiveOrgId)) {
+    return true;
+  }
+  if (actingUser?.id && assignedUsers.includes(actingUser.id)) {
+    return true;
+  }
+  if (actingUser?.assignedDeviceCode && actingUser.assignedDeviceCode === device.id) {
+    return true;
+  }
+  if (isSharedAll && effectiveOrgId && !isUnassignedDeviceOrg(effectiveOrgId)) {
+    return true;
+  }
+  return false;
 }
 
 export function canDistributeDeviceInsideOrg(

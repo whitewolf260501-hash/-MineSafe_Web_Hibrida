@@ -18,10 +18,12 @@ import {
   ShieldCheck,
   AlertCircle,
   Eye,
+  EyeOff,
+  Unlock,
   ArrowRight,
   Building2
 } from 'lucide-react';
-import { Organization, UserProfile, UserRole } from '../types';
+import { Organization, RegisteredDeviceConfig, UserProfile, UserRole } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import {
   createUserAccountByAdmin,
@@ -38,6 +40,12 @@ import {
   DEFAULT_ORGANIZATION_ID,
 } from '../utils/accessControl';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import {
+  canUnmaskEmail,
+  canUnmaskRut,
+  formatEmailForViewer,
+  formatRutForViewer,
+} from '../utils/privacyMask';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import { RutInput } from './RutInput';
 
@@ -45,10 +53,12 @@ interface UsersManagementViewProps {
   currentUser: UserProfile;
   usersList: UserProfile[];
   organizations?: Organization[];
+  catalogDevices?: RegisteredDeviceConfig[];
   activeOrganizationId?: string;
   onAddUser: (newUser: UserProfile) => Promise<void> | void;
   onUpdateUserRole: (userId: string, newRole: UserRole) => Promise<void> | void;
   onUpdateUserOrganization?: (userId: string, targetOrgId: string) => Promise<void> | void;
+  onUpdateUserDevice?: (userId: string, nextDeviceId: string | null) => Promise<void> | void;
   onToggleUserStatus: (userId: string, reason?: string) => Promise<void> | void;
 }
 
@@ -56,10 +66,12 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   currentUser,
   usersList,
   organizations = [],
+  catalogDevices = [],
   activeOrganizationId,
   onAddUser,
   onUpdateUserRole,
   onUpdateUserOrganization,
+  onUpdateUserDevice,
   onToggleUserStatus,
 }) => {
   const [searchQuery, setSearchQuery] = useState('');
@@ -81,6 +93,10 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   } | null>(null);
   const [isUpdatingOrg, setIsUpdatingOrg] = useState(false);
   const [feedbackToast, setFeedbackToast] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
+  const [revealAllRuts, setRevealAllRuts] = useState(false);
+  const [revealAllEmails, setRevealAllEmails] = useState(false);
+  const [unlockedRutIds, setUnlockedRutIds] = useState<Record<string, boolean>>({});
+  const [unlockedEmailIds, setUnlockedEmailIds] = useState<Record<string, boolean>>({});
 
   // New user form state
   const [newName, setNewName] = useState('');
@@ -99,10 +115,30 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const isSuperAdmin = currentUser.role === 'superadmin';
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
   const isAdminOrSuper = isAnyAdminRole(currentUser.role);
+  const allowRutUnmask = canUnmaskRut(currentUser.role);
+  const allowEmailUnmask = canUnmaskEmail(currentUser.role);
   const authorizedOrgIds = getAuthorizedOrganizationIds(currentUser, organizations);
   const authorizedOrgs = isGlobalAdmin
     ? organizations
     : organizations.filter((o) => authorizedOrgIds.includes(o.id));
+
+  const isUserRutUnlocked = (userId: string) =>
+    allowRutUnmask && (revealAllRuts || Boolean(unlockedRutIds[userId]));
+
+  const isUserEmailUnlocked = (userId: string) =>
+    allowEmailUnmask && (revealAllEmails || Boolean(unlockedEmailIds[userId]));
+
+  const toggleSingleRut = (userId: string) => {
+    if (!allowRutUnmask) return;
+    setUnlockedRutIds((prev) => ({ ...prev, [userId]: !isUserRutUnlocked(userId) }));
+    if (revealAllRuts) setRevealAllRuts(false);
+  };
+
+  const toggleSingleEmail = (userId: string) => {
+    if (!allowEmailUnmask) return;
+    setUnlockedEmailIds((prev) => ({ ...prev, [userId]: !isUserEmailUnlocked(userId) }));
+    if (revealAllEmails) setRevealAllEmails(false);
+  };
 
   const showToast = (type: 'success' | 'error', text: string) => {
     setFeedbackToast({ type, text });
@@ -115,10 +151,16 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   };
 
   const filteredUsers = usersList.filter((u) => {
-    const matchesSearch = 
-      u.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      u.email.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      u.rut.toLowerCase().includes(searchQuery.toLowerCase());
+    const q = searchQuery.trim().toLowerCase();
+    const visibleEmail = formatEmailForViewer(u.email, currentUser.role, isUserEmailUnlocked(u.id));
+    const visibleRut = formatRutForViewer(u.rut, currentUser.role, isUserRutUnlocked(u.id));
+    const matchesSearch =
+      !q ||
+      u.name.toLowerCase().includes(q) ||
+      visibleEmail.toLowerCase().includes(q) ||
+      visibleRut.toLowerCase().includes(q) ||
+      (allowEmailUnmask && u.email.toLowerCase().includes(q)) ||
+      (allowRutUnmask && u.rut.toLowerCase().includes(q));
     const matchesRole = roleFilter === 'all' || u.role === roleFilter;
     const userOrgId = u.organizationId || DEFAULT_ORGANIZATION_ID;
     const matchesOrg = !isGlobalAdmin || orgFilter === 'all' || userOrgId === orgFilter;
@@ -257,7 +299,12 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
     try {
       await sendPasswordResetWithFirebase(targetUser.email);
       soundAlert.playFeedbackBeep();
-      showToast('success', `Correo de restablecimiento de clave enviado a ${targetUser.email}.`);
+      const displayEmail = formatEmailForViewer(
+        targetUser.email,
+        currentUser.role,
+        isUserEmailUnlocked(targetUser.id)
+      );
+      showToast('success', `Correo de restablecimiento de clave enviado a ${displayEmail}.`);
     } catch (err: any) {
       showToast('error', err?.message || 'No se pudo enviar el correo de restablecimiento.');
     }
@@ -549,6 +596,46 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
         </div>
 
         <div className="flex flex-wrap items-center gap-2 self-end sm:self-auto">
+          {allowEmailUnmask && (
+            <button
+              type="button"
+              onClick={() => {
+                const next = !revealAllEmails;
+                setRevealAllEmails(next);
+                if (!next) setUnlockedEmailIds({});
+              }}
+              aria-label={revealAllEmails ? 'Ocultar todos los correos' : 'Desbloquear todos los correos'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                revealAllEmails
+                  ? 'bg-cyan-950/80 border-cyan-600 text-cyan-200 hover:bg-cyan-900/70'
+                  : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-cyan-500 hover:text-white'
+              }`}
+              title="Permitido para SuperAdmin, Admin MineSafe y Administrador de Empresa"
+            >
+              {revealAllEmails ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-cyan-400" />}
+              <span>{revealAllEmails ? 'Ocultar Correos' : 'Desbloquear Correos'}</span>
+            </button>
+          )}
+          {allowRutUnmask && (
+            <button
+              type="button"
+              onClick={() => {
+                const next = !revealAllRuts;
+                setRevealAllRuts(next);
+                if (!next) setUnlockedRutIds({});
+              }}
+              aria-label={revealAllRuts ? 'Ocultar todos los RUT' : 'Desbloquear todos los RUT'}
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
+                revealAllRuts
+                  ? 'bg-purple-950/80 border-purple-600 text-purple-200 hover:bg-purple-900/70'
+                  : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-purple-500 hover:text-white'
+              }`}
+              title="Exclusivo de SuperAdmin y Admin Corporativo MineSafe"
+            >
+              {revealAllRuts ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-purple-400" />}
+              <span>{revealAllRuts ? 'Ocultar RUTs' : 'Desbloquear RUTs'}</span>
+            </button>
+          )}
           {isGlobalAdmin && organizations.length > 0 && (
             <select
               value={orgFilter}
@@ -618,6 +705,11 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 ).allowed;
                 const userOrgId = user.organizationId || DEFAULT_ORGANIZATION_ID;
                 const userOrgName = getOrganizationName(userOrgId);
+                const emailUnlocked = isUserEmailUnlocked(user.id);
+                const rutUnlocked = isUserRutUnlocked(user.id);
+                const displayedEmail = formatEmailForViewer(user.email, currentUser.role, emailUnlocked);
+                const displayedRut = formatRutForViewer(user.rut, currentUser.role, rutUnlocked);
+                const hasMaskableRut = Boolean(user.rut && !isPlaceholderRut(user.rut));
 
                 return (
                   <tr key={user.id} className="hover:bg-slate-800/40 transition-colors">
@@ -638,8 +730,64 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3.5 font-mono text-slate-300">{user.email}</td>
-                    <td className="px-4 py-3.5 font-mono text-slate-400">{user.rut}</td>
+                    <td className="px-4 py-3.5 font-mono text-slate-300">
+                      <div className="inline-flex items-center gap-1.5">
+                        <span className={emailUnlocked ? 'text-cyan-200' : 'text-slate-300'}>
+                          {displayedEmail}
+                        </span>
+                        {user.email && allowEmailUnmask ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleSingleEmail(user.id)}
+                            aria-label={emailUnlocked ? `Ocultar correo de ${user.name}` : `Desbloquear correo de ${user.name}`}
+                            title={emailUnlocked ? 'Ocultar correo' : 'Desbloquear correo completo'}
+                            className={`p-1 rounded border transition-colors cursor-pointer ${
+                              emailUnlocked
+                                ? 'bg-cyan-950/70 border-cyan-700 text-cyan-300 hover:bg-cyan-900'
+                                : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-cyan-300 hover:border-cyan-700'
+                            }`}
+                          >
+                            {emailUnlocked ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                          </button>
+                        ) : user.email ? (
+                          <span
+                            title="Correo enmascarado — solo Administradores pueden desbloquearlo"
+                            className="text-slate-500"
+                          >
+                            <Lock className="w-3 h-3" />
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3.5 font-mono text-slate-400">
+                      <div className="inline-flex items-center gap-1.5">
+                        <span className={rutUnlocked ? 'text-purple-200 font-semibold' : 'text-slate-400'}>
+                          {displayedRut}
+                        </span>
+                        {hasMaskableRut && allowRutUnmask ? (
+                          <button
+                            type="button"
+                            onClick={() => toggleSingleRut(user.id)}
+                            aria-label={rutUnlocked ? `Ocultar RUT de ${user.name}` : `Desbloquear RUT de ${user.name}`}
+                            title={rutUnlocked ? 'Ocultar RUT (mostrar solo últimos 4 dígitos)' : 'Desbloquear RUT completo (SuperAdmin / Admin MineSafe)'}
+                            className={`p-1 rounded border transition-colors cursor-pointer ${
+                              rutUnlocked
+                                ? 'bg-purple-950/70 border-purple-700 text-purple-300 hover:bg-purple-900'
+                                : 'bg-slate-950 border-slate-700 text-slate-400 hover:text-purple-300 hover:border-purple-700'
+                            }`}
+                          >
+                            {rutUnlocked ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                          </button>
+                        ) : hasMaskableRut ? (
+                          <span
+                            title="RUT enmascarado (últimos 4 dígitos) — solo SuperAdmin o Admin MineSafe puede desbloquearlo"
+                            className="text-slate-500"
+                          >
+                            <Lock className="w-3 h-3" />
+                          </span>
+                        ) : null}
+                      </div>
+                    </td>
                     <td className="px-4 py-3.5">{getRoleBadge(user.role)}</td>
                     <td className="px-4 py-3.5">
                       {isGlobalAdmin && canModifyTarget && onUpdateUserOrganization && organizations.length > 0 ? (
@@ -680,6 +828,45 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                       {user.assignedSector && (
                         <div className="text-[10px] text-cyan-400 font-medium">{user.assignedSector}</div>
                       )}
+                      {isGlobalAdmin && onUpdateUserDevice && catalogDevices.length > 0 ? (
+                        <div className="mt-1.5">
+                          <select
+                            value={user.assignedDeviceCode || ''}
+                            onChange={async (e) => {
+                              const nextDev = e.target.value || null;
+                              try {
+                                await onUpdateUserDevice(user.id, nextDev);
+                                soundAlert.playFeedbackBeep();
+                                setFeedbackToast({
+                                  type: 'success',
+                                  text: nextDev
+                                    ? `Dispositivo "${nextDev}" asignado a ${user.name}.`
+                                    : `Dispositivo desvinculado de ${user.name}.`,
+                                });
+                              } catch (err: any) {
+                                setFeedbackToast({
+                                  type: 'error',
+                                  text: err?.message || 'No se pudo actualizar el dispositivo del usuario.',
+                                });
+                              }
+                            }}
+                            aria-label={`Dispositivo asignado a ${user.name}`}
+                            className="w-full max-w-[185px] px-1.5 py-1 bg-slate-950 border border-purple-800/70 rounded text-[10px] font-mono text-purple-200 focus:border-cyan-500"
+                          >
+                            <option value="">Sin dispositivo asignado</option>
+                            {catalogDevices.map((d) => (
+                              <option key={d.id} value={d.id}>
+                                {d.id}{d.blocked || d.enabled === false ? ' (Bloqueado)' : ''}
+                              </option>
+                            ))}
+                          </select>
+                        </div>
+                      ) : user.assignedDeviceCode ? (
+                        <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-mono text-purple-300 bg-purple-950/60 border border-purple-800/70 px-1.5 py-0.5 rounded">
+                          <Radio className="w-2.5 h-2.5" />
+                          <span>{user.assignedDeviceCode}</span>
+                        </div>
+                      ) : null}
                     </td>
                     <td className="px-4 py-3.5">
                       <div className="space-y-1">
@@ -985,7 +1172,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
             <form onSubmit={handleConfirmBlockUser} className="space-y-3 text-xs">
               <div className="p-3 rounded-xl bg-rose-950/40 border border-rose-900/60 text-rose-200 space-y-1">
                 <p className="font-semibold">
-                  {userToBlock.name} ({userToBlock.email})
+                  {userToBlock.name} ({formatEmailForViewer(userToBlock.email, currentUser.role, isUserEmailUnlocked(userToBlock.id))})
                 </p>
                 <p className="text-[11px] text-rose-200/80">
                   Su sesión será revocada de inmediato y no podrá volver a entrar a esta empresa. Si otra empresa distinta lo contrata, podrá crear una cuenta nueva ocupando este mismo correo.
@@ -1087,7 +1274,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
               <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
                 <div className="text-[11px] text-slate-400 font-mono truncate">
-                  {pendingRoleChange.user.email}
+                  {formatEmailForViewer(pendingRoleChange.user.email, currentUser.role, isUserEmailUnlocked(pendingRoleChange.user.id))}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   {getRoleBadge(pendingRoleChange.user.role)}
@@ -1165,7 +1352,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
               <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">
                 <div className="text-[11px] text-slate-400 font-mono truncate">
-                  {pendingOrgChange.user.email}
+                  {formatEmailForViewer(pendingOrgChange.user.email, currentUser.role, isUserEmailUnlocked(pendingOrgChange.user.id))}
                 </div>
                 <div className="flex flex-wrap items-center gap-2 pt-1">
                   <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-slate-800 border border-slate-700 text-slate-300 text-[11px] font-semibold">

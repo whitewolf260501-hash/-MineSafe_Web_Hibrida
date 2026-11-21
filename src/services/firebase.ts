@@ -87,6 +87,8 @@ import {
 } from '../types';
 import {
   assertActiveSession,
+  canBlockOrDeleteIoTDevice,
+  canBlockOrDeleteSite,
   canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
@@ -425,6 +427,17 @@ export function mapRTDBDeviceToSensorDevice(
     assignedBy: data?.assignedBy || undefined,
     assignedAt: typeof data?.assignedAt === 'number' ? data.assignedAt : undefined,
     assignmentHistory: historyList,
+    blocked: data?.blocked === true || data?.enabled === false,
+    blockedAt: typeof data?.blockedAt === 'number' ? data.blockedAt : undefined,
+    blockedBy: data?.blockedBy || undefined,
+    enabled: data?.enabled !== false && data?.blocked !== true,
+    assignedUserIds: Array.isArray(data?.assignedUserIds)
+      ? data.assignedUserIds.filter((x: any) => typeof x === 'string' && x.trim() !== '')
+      : undefined,
+    sharedOrganizationIds: Array.isArray(data?.sharedOrganizationIds)
+      ? data.sharedOrganizationIds.filter((x: any) => typeof x === 'string' && x.trim() !== '')
+      : undefined,
+    sharedWithAllAssignedUsers: data?.sharedWithAllAssignedUsers === true,
     metrics: {
       temperatura: tempVal === null ? 0 : Number(tempVal.toFixed(1)),
       humedad: humVal === null ? 0 : Number(humVal.toFixed(0)),
@@ -1387,8 +1400,18 @@ export function subscribeToRTDBDevicesRaw(
       const assignIfMatches = (devId: string, val: any, isExplicitAuthorized: boolean) => {
         if (!val || typeof val !== 'object') return;
         const explicitOrg = typeof val.organizationId === 'string' ? val.organizationId.trim() : '';
-        if (explicitOrg && explicitOrg !== targetOrgId) return;
-        if (!explicitOrg && !isExplicitAuthorized && targetOrgId !== DEFAULT_ORGANIZATION_ID) return;
+        const sharedOrgs: string[] = Array.isArray(val.sharedOrganizationIds) ? val.sharedOrganizationIds : [];
+        const assignedUsers: string[] = Array.isArray(val.assignedUserIds) ? val.assignedUserIds : [];
+        const isSharedWithThisScope =
+          val.sharedWithAllAssignedUsers === true ||
+          sharedOrgs.includes(targetOrgId) ||
+          (Boolean(scope.uid) && assignedUsers.includes(scope.uid!));
+        if (explicitOrg && explicitOrg !== targetOrgId && !isSharedWithThisScope) {
+          return;
+        }
+        if (!explicitOrg && !isExplicitAuthorized && !isSharedWithThisScope && targetOrgId !== DEFAULT_ORGANIZATION_ID) {
+          return;
+        }
         merged[devId] = val;
         recordDevicePacketArrival(devId, val);
       };
@@ -4622,6 +4645,7 @@ export function normalizeMiningSite(raw: any, fallbackId?: string): MiningSite {
     type: raw?.type || 'subterranea',
     elevationMsl: typeof raw?.elevationMsl === 'number' ? raw.elevationMsl : Number(raw?.elevationMsl) || 2400,
     isPreloaded: Boolean(raw?.isPreloaded),
+    status: raw?.status === 'bloqueada' ? 'bloqueada' : 'activa',
     activeSectors: sectorsArr.map((s, idx) => normalizeSector(s, idx)),
   };
 }
@@ -4671,6 +4695,35 @@ export async function saveSiteToRTDB(
     return {
       savedToRTDB: false,
       error: err?.message || 'Guardado en respaldo local (sin permisos en /faenas de RTDB).',
+    };
+  }
+}
+
+export async function deleteSiteFromRTDB(
+  siteId: string,
+  actingUser: UserProfile | null | undefined
+): Promise<{ deletedFromRTDB: boolean; error?: string }> {
+  assertActiveSession(actingUser);
+  const check = canBlockOrDeleteSite(actingUser, { id: siteId });
+  if (!check.allowed) {
+    throw new Error(check.reason || 'Permisos insuficientes para eliminar esta faena.');
+  }
+
+  const cleanId = siteId.replace(/[^a-zA-Z0-9_-]/g, '_');
+  const cached = loadCachedSites().filter((s) => s.id !== siteId && s.id !== cleanId);
+  saveCachedSites(cached);
+
+  try {
+    await remove(ref(rtdb, `faenas/${siteId}`));
+    if (cleanId !== siteId) {
+      await remove(ref(rtdb, `faenas/${cleanId}`)).catch(() => {});
+    }
+    return { deletedFromRTDB: true };
+  } catch (err: any) {
+    console.warn('Error removing site from RTDB (/faenas):', err);
+    return {
+      deletedFromRTDB: false,
+      error: err?.message || 'Eliminada localmente (error al eliminar en /faenas de RTDB).',
     };
   }
 }
@@ -5038,7 +5091,7 @@ export function normalizeMiningCrew(raw: any, fallbackId?: string): MiningCrew {
     sectorName: raw?.sectorName || undefined,
     notes: raw?.notes ? String(raw.notes).trim() : undefined,
     status:
-      raw?.status === 'inactiva' || raw?.status === 'en_descanso'
+      raw?.status === 'inactiva' || raw?.status === 'en_descanso' || raw?.status === 'bloqueada'
         ? raw.status
         : 'activa',
     members,
@@ -5234,28 +5287,106 @@ export function resolveTelemetryWindowMs(
   return { startMs, endMs, limit };
 }
 
-function mapTelemetrySnapshotRaw(raw: Record<string, any>, startMs: number, endMs: number): TelemetryHistoryPoint[] {
+export function mapTelemetrySnapshotRaw(
+  raw: Record<string, any>,
+  startMs: number,
+  endMs: number
+): TelemetryHistoryPoint[] {
+  const toFiniteOrNull = (v: unknown): number | null => {
+    if (typeof v === 'number' && Number.isFinite(v)) return v;
+    if (typeof v === 'string' && v.trim() !== '') {
+      const parsed = Number(v);
+      if (Number.isFinite(parsed)) return parsed;
+    }
+    return null;
+  };
+
   return Object.keys(raw || {})
     .map((k) => {
       const item = raw[k];
-      const ts = typeof item?.timestamp === 'number' ? item.timestamp : Number(k);
+      if (!item || typeof item !== 'object') return null;
+      const rawTs =
+        typeof item.timestamp === 'number'
+          ? item.timestamp
+          : typeof item.timestamp_server === 'number'
+          ? item.timestamp_server
+          : typeof item.serverTimestamp === 'number'
+          ? item.serverTimestamp
+          : Number(k);
+      // Normalize seconds-based timestamps to milliseconds if needed
+      const ts =
+        Number.isFinite(rawTs) && rawTs > 1_000_000_000 && rawTs < 10_000_000_000
+          ? rawTs * 1000
+          : rawTs;
+
+      const co = toFiniteOrNull(item.co ?? item.CO ?? item.mq2 ?? item.gas);
+      const pm25 = toFiniteOrNull(item.pm25 ?? item.PM2_5 ?? item.polvo ?? item.dust);
+      const temperatura = toFiniteOrNull(item.temperatura ?? item.temp ?? item.temperature);
+      const humedad = toFiniteOrNull(item.humedad ?? item.hum ?? item.humidity);
+
+      if (co === null && pm25 === null && temperatura === null && humedad === null) {
+        return null;
+      }
+
       return {
         timestamp: ts,
-        co: typeof item?.co === 'number' ? item.co : null,
-        pm25: typeof item?.pm25 === 'number' ? item.pm25 : null,
-        temperatura: typeof item?.temperatura === 'number' ? item.temperatura : null,
-        humedad: typeof item?.humedad === 'number' ? item.humedad : null,
-        ...(typeof item?.originTimestamp === 'number' ? { originTimestamp: item.originTimestamp } : {}),
-        ...(typeof item?.serverTimestamp === 'number' ? { serverTimestamp: item.serverTimestamp } : {}),
-      };
+        co,
+        pm25,
+        temperatura,
+        humedad,
+        ...(typeof item.originTimestamp === 'number' ? { originTimestamp: item.originTimestamp } : {}),
+        ...(typeof item.serverTimestamp === 'number' ? { serverTimestamp: item.serverTimestamp } : {}),
+      } as TelemetryHistoryPoint;
     })
-    .filter((p) => Number.isFinite(p.timestamp) && p.timestamp >= startMs && p.timestamp <= endMs)
+    .filter(
+      (p): p is TelemetryHistoryPoint =>
+        p !== null && Number.isFinite(p.timestamp) && p.timestamp >= startMs && p.timestamp <= endMs
+    )
     .sort((a, b) => a.timestamp - b.timestamp);
+}
+
+function isRTDBIndexMissingError(err: any): boolean {
+  const msg = String(err?.message || err || '');
+  return /index\s+not\s+defined|\.indexOn|add\s+"\.indexOn"/i.test(msg);
+}
+
+async function fetchUnindexedTelemetryFallbackFromRTDB(
+  deviceId: string,
+  startMs: number,
+  endMs: number
+): Promise<TelemetryHistoryPoint[]> {
+  const collected = new Map<number, TelemetryHistoryPoint>();
+
+  try {
+    const primarySnap = await get(ref(rtdb, `historial_telemetria/${deviceId}`));
+    if (primarySnap.exists()) {
+      const pts = mapTelemetrySnapshotRaw(primarySnap.val() || {}, startMs, endMs);
+      pts.forEach((p) => collected.set(p.timestamp, p));
+    }
+  } catch (err) {
+    console.warn('Fallback read on /historial_telemetria failed:', err);
+  }
+
+  if (collected.size === 0) {
+    try {
+      const espSnap = await get(ref(rtdb, `dispositivos/${deviceId}/historial`));
+      if (espSnap.exists()) {
+        const pts = mapTelemetrySnapshotRaw(espSnap.val() || {}, startMs, endMs);
+        pts.forEach((p) => collected.set(p.timestamp, p));
+      }
+    } catch (err) {
+      console.warn('Secondary fallback read on /dispositivos/{id}/historial failed:', err);
+    }
+  }
+
+  return Array.from(collected.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
 /**
  * Consulta paginada por cursor (`orderByChild('timestamp') + startAt + limitToFirst`) para evitar
  * truncamiento silencioso en ventanas extensas de telemetría.
+ * Si RTDB no tiene `.indexOn: "timestamp"` definido en reglas, hace fallback automático
+ * a lectura directa sin índice + filtrado/ordenamiento en cliente.
  */
 export async function fetchPaginatedTelemetryHistory(
   deviceId: string,
@@ -5264,6 +5395,7 @@ export async function fetchPaginatedTelemetryHistory(
     pageSize?: number;
     maxPages?: number;
     fetchPage?: (cursorTs: number, endMs: number, pageSize: number) => Promise<TelemetryHistoryPoint[]>;
+    fetchUnindexedFallback?: (startMs: number, endMs: number) => Promise<TelemetryHistoryPoint[]>;
   }
 ): Promise<TelemetryHistoryPageResult> {
   if (!deviceId) {
@@ -5323,9 +5455,40 @@ export async function fetchPaginatedTelemetryHistory(
       }
     }
 
+    // Si /historial_telemetria devolvió 0 muestras en modo real, revisar /dispositivos/{id}/historial
+    if (collectedMap.size === 0 && !options?.fetchPage) {
+      const espPoints = await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
+      espPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
+    }
+
     const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
     return { points, pagesFetched, truncated, error: null };
   } catch (err: any) {
+    if (isRTDBIndexMissingError(err)) {
+      try {
+        const fallbackPoints = options?.fetchUnindexedFallback
+          ? await options.fetchUnindexedFallback(startMs, endMs)
+          : await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
+        fallbackPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
+        const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
+        return {
+          points,
+          pagesFetched: Math.max(1, pagesFetched),
+          truncated: false,
+          error: null,
+        };
+      } catch (fallbackErr: any) {
+        return {
+          points: Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp),
+          pagesFetched,
+          truncated,
+          error:
+            fallbackErr?.message ||
+            'Error leyendo historial de telemetría en modo respaldo desde Firebase RTDB.',
+        };
+      }
+    }
+
     return {
       points: Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp),
       pagesFetched,
@@ -5345,6 +5508,33 @@ export function subscribeToTelemetryHistory(
     return () => {};
   }
   const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
+  let disposed = false;
+  let activeUnsub: (() => void) | null = null;
+
+  const attachFallbackListener = () => {
+    if (disposed) return;
+    const rawRef = ref(rtdb, `historial_telemetria/${deviceId}`);
+    activeUnsub = onValue(
+      rawRef,
+      (snapshot) => {
+        if (disposed) return;
+        if (!snapshot.exists()) {
+          callback([], { error: null });
+          return;
+        }
+        const points = mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs);
+        const sliced = points.length > limit ? points.slice(-limit) : points;
+        callback(sliced, { error: null });
+      },
+      (fallbackErr) => {
+        if (disposed) return;
+        const msg = fallbackErr?.message || 'Error consultando historial de telemetría.';
+        console.warn('Error in fallback telemetry history subscription:', msg);
+        callback([], { error: msg });
+      }
+    );
+  };
+
   const histQuery = query(
     ref(rtdb, `historial_telemetria/${deviceId}`),
     orderByChild('timestamp'),
@@ -5352,9 +5542,10 @@ export function subscribeToTelemetryHistory(
     endAt(endMs),
     limitToLast(limit)
   );
-  return onValue(
+  activeUnsub = onValue(
     histQuery,
     (snapshot) => {
+      if (disposed) return;
       if (!snapshot.exists()) {
         callback([], { error: null });
         return;
@@ -5363,11 +5554,36 @@ export function subscribeToTelemetryHistory(
       callback(points, { error: null });
     },
     (err) => {
+      if (disposed) return;
+      if (isRTDBIndexMissingError(err)) {
+        if (activeUnsub) {
+          try {
+            activeUnsub();
+          } catch {
+            // ignore
+          }
+          activeUnsub = null;
+        }
+        attachFallbackListener();
+        return;
+      }
       const msg = err?.message || 'Error consultando historial de telemetría.';
       console.warn('Error subscribing to telemetry history:', msg);
       callback([], { error: msg });
     }
   );
+
+  return () => {
+    disposed = true;
+    if (activeUnsub) {
+      try {
+        activeUnsub();
+      } catch {
+        // ignore
+      }
+      activeUnsub = null;
+    }
+  };
 }
 
 /**
@@ -5534,6 +5750,14 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
     ? Object.values(raw.assignmentHistory)
     : [];
 
+  const assignedUserIds: string[] | undefined = Array.isArray(raw?.assignedUserIds)
+    ? Array.from(new Set(raw.assignedUserIds.map((x: any) => String(x || '').trim()).filter(Boolean)))
+    : undefined;
+  const sharedOrganizationIds: string[] | undefined = Array.isArray(raw?.sharedOrganizationIds)
+    ? Array.from(new Set(raw.sharedOrganizationIds.map((x: any) => String(x || '').trim()).filter(Boolean)))
+    : undefined;
+  const isBlocked = raw?.blocked === true || raw?.enabled === false || raw?.active === false;
+
   const base: RegisteredDeviceConfig = {
     id: raw?.id || key,
     name: raw?.name || key,
@@ -5550,8 +5774,15 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
       : raw?.sectorName || 'Pendiente de asignación',
     parentGatewayId: raw?.parentGatewayId || undefined,
     localIp: raw?.localIp || undefined,
-    enabled: raw?.enabled !== false && raw?.active !== false,
-    active: raw?.active !== false && raw?.enabled !== false,
+    enabled: !isBlocked,
+    active: !isBlocked,
+    blocked: isBlocked,
+    blockedAt: typeof raw?.blockedAt === 'number' ? raw.blockedAt : undefined,
+    blockedBy: raw?.blockedBy || undefined,
+    assignedUserIds: assignedUserIds && assignedUserIds.length > 0 ? assignedUserIds : undefined,
+    sharedOrganizationIds:
+      sharedOrganizationIds && sharedOrganizationIds.length > 0 ? sharedOrganizationIds : undefined,
+    sharedWithAllAssignedUsers: raw?.sharedWithAllAssignedUsers === true,
     createdAt: typeof raw?.createdAt === 'number' ? raw.createdAt : Date.now(),
     assignedBy: raw?.assignedBy || undefined,
     assignedAt: typeof raw?.assignedAt === 'number' ? raw.assignedAt : undefined,
@@ -5565,21 +5796,80 @@ export function subscribeToDeviceCatalog(
   callback: (devices: RegisteredDeviceConfig[]) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  const targetRef =
-    scope?.role && !isGlobalMineSafeAdmin(scope.role)
-      ? query(
-          ref(rtdb, 'catalogo_dispositivos'),
-          orderByChild('organizationId'),
-          equalTo(
-            scope.organizationId && scope.organizationId !== 'all'
-              ? scope.organizationId
-              : DEFAULT_ORGANIZATION_ID
-          )
+  if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
+    const targetOrgId =
+      scope.organizationId && scope.organizationId !== 'all'
+        ? scope.organizationId
+        : DEFAULT_ORGANIZATION_ID;
+    let orgRecords: Record<string, RegisteredDeviceConfig> = {};
+    const explicitRecords: Record<string, RegisteredDeviceConfig> = {};
+    const emitMerged = () => {
+      const mergedMap = new Map<string, RegisteredDeviceConfig>();
+      Object.values(orgRecords).forEach((d) => mergedMap.set(d.id, d));
+      Object.values(explicitRecords).forEach((d) => mergedMap.set(d.id, d));
+      const list = Array.from(mergedMap.values()).sort(
+        (a, b) => (b.createdAt || 0) - (a.createdAt || 0)
+      );
+      callback(list);
+    };
+
+    const unsubs: Array<() => void> = [];
+    const scopedRef = query(
+      ref(rtdb, 'catalogo_dispositivos'),
+      orderByChild('organizationId'),
+      equalTo(targetOrgId)
+    );
+    unsubs.push(
+      onValue(
+        scopedRef,
+        (snapshot) => {
+          const next: Record<string, RegisteredDeviceConfig> = {};
+          if (snapshot.exists()) {
+            const raw = snapshot.val() || {};
+            Object.entries(raw)
+              .filter(([, val]) => val && typeof val === 'object')
+              .forEach(([key, val]) => {
+                next[key] = normalizeCatalogRecord(val, key);
+              });
+          }
+          orgRecords = next;
+          emitMerged();
+        },
+        (err) => {
+          console.warn('Error subscribing to scoped RTDB /catalogo_dispositivos:', err?.message || err);
+          orgRecords = {};
+          emitMerged();
+        }
+      )
+    );
+
+    const uniqueIds = Array.from(new Set((scope.deviceIds || []).filter(Boolean)));
+    uniqueIds.forEach((devId) => {
+      unsubs.push(
+        onValue(
+          ref(rtdb, `catalogo_dispositivos/${devId}`),
+          (snapshot) => {
+            if (snapshot.exists()) {
+              explicitRecords[devId] = normalizeCatalogRecord(snapshot.val(), devId);
+            } else {
+              delete explicitRecords[devId];
+            }
+            emitMerged();
+          },
+          () => {
+            // Best-effort read for shared/assigned device catalog record
+          }
         )
-      : ref(rtdb, 'catalogo_dispositivos');
+      );
+    });
+
+    return () => {
+      unsubs.forEach((fn) => fn());
+    };
+  }
 
   return onValue(
-    targetRef,
+    ref(rtdb, 'catalogo_dispositivos'),
     (snapshot) => {
       if (!snapshot.exists()) {
         callback([]);
@@ -5604,7 +5894,7 @@ async function syncPlatformRegisteredDevicesIfSuperAdmin(
   actingUser: UserProfile,
   removeId?: string
 ): Promise<void> {
-  if (actingUser.role !== 'superadmin') return;
+  if (!isGlobalMineSafeAdmin(actingUser.role)) return;
   try {
     const snap = await get(ref(rtdb, 'configuracion_plataforma/registeredDevices'));
     const existing: RegisteredDeviceConfig[] =
@@ -5730,6 +6020,16 @@ export async function registerIoTDeviceInRTDB(
   const prevHistory = existingCatalog?.assignmentHistory || [];
   const nextHistory = [auditEntry, ...prevHistory].slice(0, 25);
 
+  const existingLegacy = legacyList.find((d) => d.id === cleanId);
+  const existingBlocked = existingCatalog?.blocked ?? existingLegacy?.blocked ?? false;
+  const existingAssignedUsers = existingCatalog?.assignedUserIds ?? existingLegacy?.assignedUserIds;
+  const existingSharedOrgs = isUnassigned
+    ? undefined
+    : existingCatalog?.sharedOrganizationIds ?? existingLegacy?.sharedOrganizationIds;
+  const existingSharedAll = isUnassigned
+    ? false
+    : existingCatalog?.sharedWithAllAssignedUsers ?? existingLegacy?.sharedWithAllAssignedUsers ?? false;
+
   const record: RegisteredDeviceConfig = {
     id: cleanId,
     name: cleanName,
@@ -5743,10 +6043,16 @@ export async function registerIoTDeviceInRTDB(
     sectorId: normalizedSectorId,
     sectorName: normalizedSectorName,
     parentGatewayId: cleanCategory === 'nodo' ? params.parentGatewayId?.trim() || undefined : undefined,
-    localIp: params.localIp?.trim() || existingCatalog?.localIp || undefined,
-    enabled: true,
-    active: true,
-    createdAt: existingCatalog?.createdAt || now,
+    localIp: params.localIp?.trim() || existingCatalog?.localIp || existingLegacy?.localIp || undefined,
+    enabled: !existingBlocked,
+    active: !existingBlocked,
+    blocked: existingBlocked,
+    blockedAt: existingBlocked ? existingCatalog?.blockedAt ?? existingLegacy?.blockedAt : undefined,
+    blockedBy: existingBlocked ? existingCatalog?.blockedBy ?? existingLegacy?.blockedBy : undefined,
+    assignedUserIds: existingAssignedUsers,
+    sharedOrganizationIds: existingSharedOrgs,
+    sharedWithAllAssignedUsers: existingSharedAll,
+    createdAt: existingCatalog?.createdAt || existingLegacy?.createdAt || now,
     assignmentStatus,
     assignedBy: actingUser!.name,
     assignedAt: now,
@@ -5932,6 +6238,8 @@ export async function assignOrTransferIoTDeviceInRTDB(
     sectorId: nextSectorId,
     sectorName: nextSectorName,
     parentGatewayId: nextParentGatewayId,
+    sharedOrganizationIds: isUnassigning ? undefined : existing.sharedOrganizationIds,
+    sharedWithAllAssignedUsers: isUnassigning ? false : existing.sharedWithAllAssignedUsers,
     assignmentStatus: nextStatus,
     assignedBy: actingUser!.name,
     assignedAt: now,
@@ -5953,6 +6261,8 @@ export async function assignOrTransferIoTDeviceInRTDB(
     deviceCategory: updated.category,
     assignmentStatus: updated.assignmentStatus,
     parentGatewayId: updated.parentGatewayId || null,
+    sharedOrganizationIds: updated.sharedOrganizationIds || null,
+    sharedWithAllAssignedUsers: Boolean(updated.sharedWithAllAssignedUsers),
     assignedBy: updated.assignedBy || null,
     assignedAt: now,
     assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
@@ -5984,12 +6294,440 @@ export async function assignOrTransferIoTDeviceInRTDB(
   return updated;
 }
 
-export async function deleteIoTDeviceFromCatalogInRTDB(
+async function resolveExistingCatalogRecord(
+  cleanId: string,
+  fallbackDevice?: Partial<RegisteredDeviceConfig>
+): Promise<{
+  record: RegisteredDeviceConfig;
+  devExists: boolean;
+}> {
+  const catalogRef = ref(rtdb, `catalogo_dispositivos/${cleanId}`);
+  const devRef = ref(rtdb, `dispositivos/${cleanId}`);
+  const [catalogSnap, devSnap, cfgSnap] = await Promise.all([
+    get(catalogRef).catch(() => null),
+    get(devRef).catch(() => null),
+    get(ref(rtdb, 'configuracion_plataforma/registeredDevices')).catch(() => null),
+  ]);
+  const legacyList: RegisteredDeviceConfig[] =
+    cfgSnap && cfgSnap.exists() && Array.isArray(cfgSnap.val()) ? cfgSnap.val() : [];
+  const legacyMatch = legacyList.find((d) => d.id === cleanId);
+
+  const record: RegisteredDeviceConfig =
+    catalogSnap && catalogSnap.exists()
+      ? normalizeCatalogRecord(catalogSnap.val(), cleanId)
+      : legacyMatch
+      ? normalizeCatalogRecord(legacyMatch, cleanId)
+      : devSnap && devSnap.exists()
+      ? normalizeCatalogRecord(
+          {
+            ...devSnap.val(),
+            category: devSnap.val()?.deviceCategory || fallbackDevice?.category || 'nodo',
+          },
+          cleanId
+        )
+      : normalizeCatalogRecord(
+          {
+            id: cleanId,
+            name: fallbackDevice?.name || cleanId,
+            category: fallbackDevice?.category || 'nodo',
+            organizationId: fallbackDevice?.organizationId || DEFAULT_ORGANIZATION_ID,
+            siteId: fallbackDevice?.siteId,
+            siteName: fallbackDevice?.siteName,
+            sectorName: fallbackDevice?.sectorName || 'Pendiente de asignación',
+            localIp: fallbackDevice?.localIp,
+            createdAt: fallbackDevice?.createdAt || Date.now(),
+          },
+          cleanId
+        );
+
+  return { record, devExists: Boolean(devSnap && devSnap.exists()) };
+}
+
+export async function toggleIoTDeviceBlockInRTDB(
   deviceId: string,
-  actingUser: UserProfile | null | undefined
-): Promise<void> {
+  nextBlocked: boolean,
+  actingUser: UserProfile | null | undefined,
+  fallbackDevice?: Partial<RegisteredDeviceConfig>,
+  note?: string
+): Promise<RegisteredDeviceConfig> {
+  assertActiveSession(actingUser);
+  const perm = canBlockOrDeleteIoTDevice(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+
+  const cleanId = sanitizeDeviceHardwareId(deviceId);
+  const { record: existing, devExists } = await resolveExistingCatalogRecord(cleanId, fallbackDevice);
+  const now = Date.now();
+
+  const auditEntry: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action: nextBlocked ? 'bloqueo' : 'desbloqueo',
+    toOrganizationId: isUnassignedDeviceOrg(existing.organizationId) ? undefined : existing.organizationId,
+    toOrganizationName: existing.organizationName,
+    note:
+      note?.trim() ||
+      (nextBlocked
+        ? `Dispositivo bloqueado administrativamente por ${actingUser!.name}.`
+        : `Dispositivo reactivado / desbloqueado por ${actingUser!.name}.`),
+  };
+
+  const nextHistory = [auditEntry, ...(existing.assignmentHistory || [])].slice(0, 25);
+  const updated: RegisteredDeviceConfig = {
+    ...existing,
+    blocked: nextBlocked,
+    enabled: !nextBlocked,
+    active: !nextBlocked,
+    blockedAt: nextBlocked ? now : undefined,
+    blockedBy: nextBlocked ? actingUser!.name : undefined,
+    assignmentHistory: nextHistory,
+  };
+
+  await set(ref(rtdb, `catalogo_dispositivos/${cleanId}`), JSON.parse(JSON.stringify(updated)));
+
+  if (devExists) {
+    await update(ref(rtdb, `dispositivos/${cleanId}`), {
+      blocked: nextBlocked,
+      enabled: !nextBlocked,
+      active: !nextBlocked,
+      blockedAt: nextBlocked ? now : null,
+      blockedBy: nextBlocked ? actingUser!.name : null,
+      assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+    }).catch(() => {});
+  }
+
+  await syncPlatformRegisteredDevicesIfSuperAdmin(updated, actingUser!);
+  return updated;
+}
+
+export async function assignDeviceToAllOrgUsersInRTDB(
+  deviceId: string,
+  usersList: UserProfile[],
+  organizations: Organization[],
+  actingUser: UserProfile | null | undefined,
+  fallbackDevice?: Partial<RegisteredDeviceConfig>
+): Promise<{
+  device: RegisteredDeviceConfig;
+  assignedUserIds: string[];
+  sharedOrganizationIds: string[];
+}> {
   assertActiveSession(actingUser);
   const perm = canRegisterAndAssignIoTDevices(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+
+  const cleanId = sanitizeDeviceHardwareId(deviceId);
+  const { record: existing, devExists } = await resolveExistingCatalogRecord(cleanId, fallbackDevice);
+
+  // Obtener también usuarios reales directamente desde RTDB /usuarios para cubrir todos los usuarios con empresa asignada
+  const usersSnap = await get(ref(rtdb, 'usuarios')).catch(() => null);
+  const rtdbUsersMap: Record<string, any> = usersSnap && usersSnap.exists() ? usersSnap.val() || {} : {};
+  const targetUserMap = new Map<string, { id: string; organizationId: string }>();
+
+  Object.entries(rtdbUsersMap).forEach(([uid, raw]) => {
+    if (!raw || typeof raw !== 'object') return;
+    const orgId = typeof raw.organizationId === 'string' ? raw.organizationId.trim() : '';
+    if (orgId && !isUnassignedDeviceOrg(orgId)) {
+      targetUserMap.set(uid, { id: uid, organizationId: orgId });
+    }
+  });
+
+  usersList.forEach((u) => {
+    const orgId = (u.organizationId || '').trim();
+    if (u.id && orgId && !isUnassignedDeviceOrg(orgId)) {
+      targetUserMap.set(u.id, { id: u.id, organizationId: orgId });
+    }
+  });
+
+  const assignedUserIds = Array.from(targetUserMap.keys());
+  const orgIdSet = new Set<string>();
+  targetUserMap.forEach((entry) => orgIdSet.add(entry.organizationId));
+  organizations.forEach((o) => {
+    if (o.id && !isUnassignedDeviceOrg(o.id) && o.status !== 'suspendida') {
+      orgIdSet.add(o.id);
+    }
+  });
+  if (!isUnassignedDeviceOrg(existing.organizationId) && existing.organizationId) {
+    orgIdSet.add(existing.organizationId);
+  }
+  const sharedOrganizationIds = Array.from(orgIdSet);
+
+  const now = Date.now();
+  const auditEntry: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action: 'asignacion_usuarios',
+    toOrganizationId: isUnassignedDeviceOrg(existing.organizationId)
+      ? sharedOrganizationIds[0] || DEFAULT_ORGANIZATION_ID
+      : existing.organizationId,
+    toOrganizationName:
+      existing.organizationName ||
+      `${sharedOrganizationIds.length} empresas (${assignedUserIds.length} usuarios)`,
+    note: `Asignación masiva del dispositivo ${cleanId} a ${assignedUserIds.length} usuarios con empresa asignada (${sharedOrganizationIds.length} empresas).`,
+  };
+
+  const nextHistory = [auditEntry, ...(existing.assignmentHistory || [])].slice(0, 25);
+  const nextPrimaryOrgId = isUnassignedDeviceOrg(existing.organizationId)
+    ? sharedOrganizationIds[0] || DEFAULT_ORGANIZATION_ID
+    : existing.organizationId!;
+
+  const updated: RegisteredDeviceConfig = {
+    ...existing,
+    organizationId: nextPrimaryOrgId,
+    organizationName:
+      existing.organizationName ||
+      organizations.find((o) => o.id === nextPrimaryOrgId)?.name ||
+      nextPrimaryOrgId,
+    assignedUserIds,
+    sharedOrganizationIds,
+    sharedWithAllAssignedUsers: true,
+    assignedBy: actingUser!.name,
+    assignedAt: now,
+    assignmentHistory: nextHistory,
+  };
+  updated.assignmentStatus = resolveDeviceAssignmentStatus(updated);
+
+  await set(ref(rtdb, `catalogo_dispositivos/${cleanId}`), JSON.parse(JSON.stringify(updated)));
+
+  if (devExists) {
+    await update(ref(rtdb, `dispositivos/${cleanId}`), {
+      organizationId: updated.organizationId,
+      organizationName: updated.organizationName || null,
+      assignedUserIds,
+      sharedOrganizationIds,
+      sharedWithAllAssignedUsers: true,
+      enabled: !updated.blocked,
+      blocked: Boolean(updated.blocked),
+      assignedBy: actingUser!.name,
+      assignedAt: now,
+      assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+    }).catch(() => {});
+  }
+
+  // Persistir assignedDeviceCode en cada usuario en /usuarios/{uid}
+  if (assignedUserIds.length > 0) {
+    const userUpdates: Record<string, any> = {};
+    assignedUserIds.forEach((uid) => {
+      userUpdates[`usuarios/${uid}/assignedDeviceCode`] = cleanId;
+    });
+    await update(ref(rtdb), userUpdates);
+  }
+
+  await syncPlatformRegisteredDevicesIfSuperAdmin(updated, actingUser!);
+
+  return {
+    device: updated,
+    assignedUserIds,
+    sharedOrganizationIds,
+  };
+}
+
+export async function replaceDeviceForUsersInRTDB(
+  fromDeviceId: string,
+  toDeviceId: string | null,
+  usersList: UserProfile[],
+  actingUser: UserProfile | null | undefined,
+  fallbackFromDevice?: Partial<RegisteredDeviceConfig>,
+  fallbackToDevice?: Partial<RegisteredDeviceConfig>
+): Promise<{
+  fromDevice: RegisteredDeviceConfig;
+  toDevice: RegisteredDeviceConfig | null;
+  affectedUserIds: string[];
+}> {
+  assertActiveSession(actingUser);
+  const perm = canBlockOrDeleteIoTDevice(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+
+  const cleanFrom = sanitizeDeviceHardwareId(fromDeviceId);
+  const cleanTo = toDeviceId ? sanitizeDeviceHardwareId(toDeviceId) : null;
+  if (cleanTo && cleanTo === cleanFrom) {
+    throw new Error('Selecciona un dispositivo destino distinto al actual para realizar el cambio.');
+  }
+
+  const { record: fromRec, devExists: fromDevExists } = await resolveExistingCatalogRecord(
+    cleanFrom,
+    fallbackFromDevice
+  );
+  const toResolved = cleanTo
+    ? await resolveExistingCatalogRecord(cleanTo, fallbackToDevice)
+    : null;
+
+  const usersSnap = await get(ref(rtdb, 'usuarios')).catch(() => null);
+  const rtdbUsersMap: Record<string, any> = usersSnap && usersSnap.exists() ? usersSnap.val() || {} : {};
+  const affectedSet = new Set<string>(fromRec.assignedUserIds || []);
+
+  Object.entries(rtdbUsersMap).forEach(([uid, raw]) => {
+    if (raw && typeof raw === 'object' && raw.assignedDeviceCode === cleanFrom) {
+      affectedSet.add(uid);
+    }
+  });
+  usersList.forEach((u) => {
+    if (u.assignedDeviceCode === cleanFrom) {
+      affectedSet.add(u.id);
+    }
+  });
+
+  const affectedUserIds = Array.from(affectedSet);
+  const now = Date.now();
+
+  if (affectedUserIds.length > 0) {
+    const userUpdates: Record<string, any> = {};
+    affectedUserIds.forEach((uid) => {
+      userUpdates[`usuarios/${uid}/assignedDeviceCode`] = cleanTo;
+    });
+    await update(ref(rtdb), userUpdates);
+  }
+
+  const fromAudit: DeviceAssignmentAuditEntry = {
+    timestamp: now,
+    actorName: actingUser!.name,
+    actorRole: actingUser!.role,
+    action: 'cambio_dispositivo',
+    note: cleanTo
+      ? `Usuarios (${affectedUserIds.length}) cambiados desde ${cleanFrom} hacia ${cleanTo}.`
+      : `Asignación de usuarios (${affectedUserIds.length}) retirada del dispositivo ${cleanFrom}.`,
+  };
+  const updatedFrom: RegisteredDeviceConfig = {
+    ...fromRec,
+    assignedUserIds: undefined,
+    sharedOrganizationIds: undefined,
+    sharedWithAllAssignedUsers: false,
+    assignmentHistory: [fromAudit, ...(fromRec.assignmentHistory || [])].slice(0, 25),
+  };
+
+  await set(ref(rtdb, `catalogo_dispositivos/${cleanFrom}`), JSON.parse(JSON.stringify(updatedFrom)));
+  if (fromDevExists) {
+    await update(ref(rtdb, `dispositivos/${cleanFrom}`), {
+      assignedUserIds: null,
+      sharedOrganizationIds: null,
+      sharedWithAllAssignedUsers: false,
+      assignmentHistory: JSON.parse(JSON.stringify(updatedFrom.assignmentHistory)),
+    }).catch(() => {});
+  }
+  await syncPlatformRegisteredDevicesIfSuperAdmin(updatedFrom, actingUser!);
+
+  let updatedTo: RegisteredDeviceConfig | null = null;
+  if (cleanTo && toResolved) {
+    const mergedUsers = Array.from(
+      new Set([...(toResolved.record.assignedUserIds || []), ...affectedUserIds])
+    );
+    const mergedOrgs = Array.from(
+      new Set([
+        ...(toResolved.record.sharedOrganizationIds || []),
+        ...(fromRec.sharedOrganizationIds || []),
+      ])
+    );
+    const toAudit: DeviceAssignmentAuditEntry = {
+      timestamp: now,
+      actorName: actingUser!.name,
+      actorRole: actingUser!.role,
+      action: 'cambio_dispositivo',
+      note: `Recibió ${affectedUserIds.length} usuarios transferidos desde ${cleanFrom}.`,
+    };
+    updatedTo = {
+      ...toResolved.record,
+      assignedUserIds: mergedUsers.length > 0 ? mergedUsers : undefined,
+      sharedOrganizationIds: mergedOrgs.length > 0 ? mergedOrgs : undefined,
+      sharedWithAllAssignedUsers: Boolean(
+        toResolved.record.sharedWithAllAssignedUsers || fromRec.sharedWithAllAssignedUsers
+      ),
+      assignmentHistory: [toAudit, ...(toResolved.record.assignmentHistory || [])].slice(0, 25),
+    };
+    await set(ref(rtdb, `catalogo_dispositivos/${cleanTo}`), JSON.parse(JSON.stringify(updatedTo)));
+    if (toResolved.devExists) {
+      await update(ref(rtdb, `dispositivos/${cleanTo}`), {
+        assignedUserIds: updatedTo.assignedUserIds || null,
+        sharedOrganizationIds: updatedTo.sharedOrganizationIds || null,
+        sharedWithAllAssignedUsers: Boolean(updatedTo.sharedWithAllAssignedUsers),
+        assignmentHistory: JSON.parse(JSON.stringify(updatedTo.assignmentHistory)),
+      }).catch(() => {});
+    }
+    await syncPlatformRegisteredDevicesIfSuperAdmin(updatedTo, actingUser!);
+  }
+
+  return {
+    fromDevice: updatedFrom,
+    toDevice: updatedTo,
+    affectedUserIds,
+  };
+}
+
+export async function updateUserAssignedDeviceInRTDB(
+  userId: string,
+  nextDeviceId: string | null,
+  actingUser: UserProfile | null | undefined
+): Promise<string | null> {
+  assertActiveSession(actingUser);
+  const perm = canBlockOrDeleteIoTDevice(actingUser);
+  if (!perm.allowed) {
+    throw new Error(perm.reason);
+  }
+  const cleanUid = String(userId || '').trim();
+  if (!cleanUid) {
+    throw new Error('Usuario inválido para asignar dispositivo.');
+  }
+  const cleanNext = nextDeviceId && nextDeviceId.trim() ? sanitizeDeviceHardwareId(nextDeviceId) : null;
+
+  const userSnap = await get(ref(rtdb, `usuarios/${cleanUid}`)).catch(() => null);
+  const prevDeviceId: string | null =
+    userSnap && userSnap.exists() && typeof userSnap.val()?.assignedDeviceCode === 'string'
+      ? userSnap.val().assignedDeviceCode
+      : null;
+
+  await update(ref(rtdb, `usuarios/${cleanUid}`), {
+    assignedDeviceCode: cleanNext,
+  });
+
+  // Sincronizar assignedUserIds en el dispositivo anterior y en el nuevo
+  if (prevDeviceId && prevDeviceId !== cleanNext) {
+    const prevCatSnap = await get(ref(rtdb, `catalogo_dispositivos/${prevDeviceId}`)).catch(() => null);
+    if (prevCatSnap && prevCatSnap.exists()) {
+      const prevRec = normalizeCatalogRecord(prevCatSnap.val(), prevDeviceId);
+      const filteredUsers = (prevRec.assignedUserIds || []).filter((id) => id !== cleanUid);
+      const nextPrev: RegisteredDeviceConfig = {
+        ...prevRec,
+        assignedUserIds: filteredUsers.length > 0 ? filteredUsers : undefined,
+      };
+      await set(ref(rtdb, `catalogo_dispositivos/${prevDeviceId}`), JSON.parse(JSON.stringify(nextPrev))).catch(() => {});
+      await update(ref(rtdb, `dispositivos/${prevDeviceId}`), {
+        assignedUserIds: filteredUsers.length > 0 ? filteredUsers : null,
+      }).catch(() => {});
+      await syncPlatformRegisteredDevicesIfSuperAdmin(nextPrev, actingUser!);
+    }
+  }
+
+  if (cleanNext) {
+    const { record: nextRec, devExists } = await resolveExistingCatalogRecord(cleanNext);
+    const mergedUsers = Array.from(new Set([...(nextRec.assignedUserIds || []), cleanUid]));
+    const updatedNext: RegisteredDeviceConfig = {
+      ...nextRec,
+      assignedUserIds: mergedUsers,
+    };
+    await set(ref(rtdb, `catalogo_dispositivos/${cleanNext}`), JSON.parse(JSON.stringify(updatedNext))).catch(() => {});
+    if (devExists) {
+      await update(ref(rtdb, `dispositivos/${cleanNext}`), {
+        assignedUserIds: mergedUsers,
+      }).catch(() => {});
+    }
+    await syncPlatformRegisteredDevicesIfSuperAdmin(updatedNext, actingUser!);
+  }
+
+  return cleanNext;
+}
+
+export async function deleteIoTDeviceFromCatalogInRTDB(
+  deviceId: string,
+  actingUser: UserProfile | null | undefined,
+  usersList?: UserProfile[]
+): Promise<string[]> {
+  assertActiveSession(actingUser);
+  const perm = canBlockOrDeleteIoTDevice(actingUser);
   if (!perm.allowed) {
     throw new Error(perm.reason);
   }
@@ -6007,13 +6745,50 @@ export async function deleteIoTDeviceFromCatalogInRTDB(
       sectorId: null,
       sectorName: 'En inventario',
       assignmentStatus: 'en_inventario',
+      blocked: false,
+      enabled: true,
+      blockedAt: null,
+      blockedBy: null,
+      assignedUserIds: null,
+      sharedOrganizationIds: null,
+      sharedWithAllAssignedUsers: false,
     }).catch(() => {});
   }
+
+  // Limpiar assignedDeviceCode en usuarios que tenían asignado este dispositivo
+  const clearedUserIds: string[] = [];
+  try {
+    const usersSnap = await get(ref(rtdb, 'usuarios')).catch(() => null);
+    const rtdbUsersMap: Record<string, any> = usersSnap && usersSnap.exists() ? usersSnap.val() || {} : {};
+    const uidsToClear = new Set<string>();
+    Object.entries(rtdbUsersMap).forEach(([uid, raw]) => {
+      if (raw && typeof raw === 'object' && raw.assignedDeviceCode === cleanId) {
+        uidsToClear.add(uid);
+      }
+    });
+    (usersList || []).forEach((u) => {
+      if (u.assignedDeviceCode === cleanId) {
+        uidsToClear.add(u.id);
+      }
+    });
+    if (uidsToClear.size > 0) {
+      const updates: Record<string, any> = {};
+      uidsToClear.forEach((uid) => {
+        updates[`usuarios/${uid}/assignedDeviceCode`] = null;
+        clearedUserIds.push(uid);
+      });
+      await update(ref(rtdb), updates);
+    }
+  } catch {
+    // Best-effort cleanup of user references
+  }
+
   await syncPlatformRegisteredDevicesIfSuperAdmin(
     { id: cleanId, name: cleanId, category: 'gateway', sectorName: '' },
     actingUser!,
     cleanId
   );
+  return clearedUserIds;
 }
 
 export async function saveRegisteredDeviceHierarchy(

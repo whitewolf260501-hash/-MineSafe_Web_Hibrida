@@ -2,6 +2,7 @@ import React, { useMemo, useState } from 'react';
 import {
   AlertCircle,
   ArrowRightLeft,
+  Ban,
   Building2,
   Check,
   CheckCircle2,
@@ -13,11 +14,14 @@ import {
   Package,
   Plus,
   Radio,
+  RefreshCw,
   RotateCcw,
   Router,
   Search,
   ShieldAlert,
   Trash2,
+  Unlock,
+  Users,
   Wifi,
   WifiOff,
   X,
@@ -31,12 +35,16 @@ import {
   UserProfile,
 } from '../types';
 import {
+  assignDeviceToAllOrgUsersInRTDB,
   assignOrTransferIoTDeviceInRTDB,
   deleteIoTDeviceFromCatalogInRTDB,
   registerIoTDeviceInRTDB,
+  replaceDeviceForUsersInRTDB,
+  toggleIoTDeviceBlockInRTDB,
 } from '../services/firebase';
 import {
   canRegisterAndAssignIoTDevices,
+  isDeviceBlocked,
   isUnassignedDeviceOrg,
   resolveDeviceAssignmentStatus,
   UNASSIGNED_DEVICE_ORG_ID,
@@ -49,8 +57,10 @@ interface DeviceRegistryAndAssignmentPanelProps {
   sites: MiningSite[];
   catalogDevices: RegisteredDeviceConfig[];
   rtdbDevices: SensorDevice[];
+  usersList?: UserProfile[];
   onDeviceUpdated?: (device: RegisteredDeviceConfig) => void;
   onDeviceDeleted?: (deviceId: string) => void;
+  onUsersDeviceUpdated?: (updates: Array<{ userId: string; assignedDeviceCode: string | null }>) => void;
 }
 
 type InitialAssignMode = 'inventario' | 'empresa' | 'faena';
@@ -100,8 +110,10 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
   sites,
   catalogDevices,
   rtdbDevices,
+  usersList = [],
   onDeviceUpdated,
   onDeviceDeleted,
+  onUsersDeviceUpdated,
 }) => {
   const permission = canRegisterAndAssignIoTDevices(currentUser);
 
@@ -125,19 +137,28 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
 
   // Filters & search state
   const [searchTerm, setSearchTerm] = useState<string>('');
-  const [filterStatus, setFilterStatus] = useState<'todos' | DeviceAssignmentStatus>('todos');
+  const [filterStatus, setFilterStatus] = useState<'todos' | 'bloqueado' | DeviceAssignmentStatus>('todos');
   const [filterCategory, setFilterCategory] = useState<'todos' | 'gateway' | 'nodo'>('todos');
   const [filterOrgId, setFilterOrgId] = useState<string>('todos');
   const [filterSiteId, setFilterSiteId] = useState<string>('todos');
 
-  // Inline transfer / reassignment modal state
+  // Inline transfer / reassignment / swap modal state
   const [transferDeviceId, setTransferDeviceId] = useState<string | null>(null);
   const [transferOrgId, setTransferOrgId] = useState<string>('');
   const [transferSiteId, setTransferSiteId] = useState<string>('');
   const [transferNote, setTransferNote] = useState<string>('');
+  const [swapTargetDeviceId, setSwapTargetDeviceId] = useState<string>('');
   const [busyDeviceId, setBusyDeviceId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [expandedHistoryId, setExpandedHistoryId] = useState<string | null>(null);
+
+  const orgAssignedUsers = useMemo(
+    () =>
+      usersList.filter(
+        (u) => Boolean(u.organizationId && u.organizationId.trim() !== '' && !isUnassignedDeviceOrg(u.organizationId))
+      ),
+    [usersList]
+  );
 
   const showNotice = (type: 'success' | 'error', text: string) => {
     setFeedback({ type, text });
@@ -260,14 +281,20 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
     const q = searchTerm.trim().toLowerCase();
     return normalizedCatalog.filter((dev) => {
       const st = dev.assignmentStatus || resolveDeviceAssignmentStatus(dev);
-      const isNode = dev.category === 'nodo' || dev.category === 'sensor';
-      if (filterStatus !== 'todos' && st !== filterStatus) return false;
-      if (filterCategory === 'gateway' && isNode) return false;
+      const isNode = dev.category === 'nodo' || dev.category === 'sensor' || dev.category === 'gateway_sensor';
+      if (filterStatus === 'bloqueado') {
+        if (!isDeviceBlocked(dev)) return false;
+      } else if (filterStatus !== 'todos' && st !== filterStatus) {
+        return false;
+      }
+      if (filterCategory === 'gateway' && (dev.category === 'nodo' || dev.category === 'sensor')) return false;
       if (filterCategory === 'nodo' && !isNode) return false;
       if (filterOrgId === UNASSIGNED_DEVICE_ORG_ID) {
         if (!isUnassignedDeviceOrg(dev.organizationId)) return false;
       } else if (filterOrgId !== 'todos') {
-        if (dev.organizationId !== filterOrgId) return false;
+        const matchesPrimary = dev.organizationId === filterOrgId;
+        const matchesShared = Array.isArray(dev.sharedOrganizationIds) && dev.sharedOrganizationIds.includes(filterOrgId);
+        if (!matchesPrimary && !matchesShared) return false;
       }
       if (filterSiteId !== 'todos') {
         const selectedSiteObj = sites.find((s) => s.id === filterSiteId);
@@ -486,13 +513,113 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
   const handleDeleteFromCatalog = async (devId: string) => {
     setBusyDeviceId(devId);
     try {
-      await deleteIoTDeviceFromCatalogInRTDB(devId, currentUser);
+      const clearedUserIds = await deleteIoTDeviceFromCatalogInRTDB(devId, currentUser, usersList);
       onDeviceDeleted?.(devId);
+      if (clearedUserIds.length > 0) {
+        onUsersDeviceUpdated?.(
+          clearedUserIds.map((userId) => ({ userId, assignedDeviceCode: null }))
+        );
+      }
       setConfirmDeleteId(null);
       soundAlert.playFeedbackBeep();
-      showNotice('success', `Dispositivo "${devId}" eliminado del catálogo registrado.`);
+      showNotice(
+        'success',
+        `Dispositivo "${devId}" eliminado del catálogo registrado${
+          clearedUserIds.length > 0 ? ` (${clearedUserIds.length} usuarios desvinculados)` : ''
+        }.`
+      );
     } catch (err: any) {
       showNotice('error', err?.message || 'No se pudo eliminar el dispositivo del catálogo.');
+    } finally {
+      setBusyDeviceId(null);
+    }
+  };
+
+  const handleToggleBlockDevice = async (dev: RegisteredDeviceConfig) => {
+    const nextBlocked = !isDeviceBlocked(dev);
+    setBusyDeviceId(dev.id);
+    try {
+      const updated = await toggleIoTDeviceBlockInRTDB(dev.id, nextBlocked, currentUser, dev);
+      onDeviceUpdated?.(updated);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        nextBlocked
+          ? `Dispositivo "${dev.name}" (${dev.id}) bloqueado. Quedó suspendido para los usuarios hasta desbloquearlo.`
+          : `Dispositivo "${dev.name}" (${dev.id}) desbloqueado y operativo nuevamente.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo cambiar el estado de bloqueo del dispositivo.');
+    } finally {
+      setBusyDeviceId(null);
+    }
+  };
+
+  const handleAssignToAllOrgUsers = async (dev: RegisteredDeviceConfig) => {
+    setBusyDeviceId(dev.id);
+    try {
+      const result = await assignDeviceToAllOrgUsersInRTDB(
+        dev.id,
+        usersList,
+        organizations,
+        currentUser,
+        dev
+      );
+      onDeviceUpdated?.(result.device);
+      if (result.assignedUserIds.length > 0) {
+        onUsersDeviceUpdated?.(
+          result.assignedUserIds.map((userId) => ({ userId, assignedDeviceCode: dev.id }))
+        );
+      }
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        `Dispositivo "${dev.name}" (${dev.id}) asignado a ${result.assignedUserIds.length} usuarios con empresa (${result.sharedOrganizationIds.length} empresas).`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo asignar el dispositivo a todos los usuarios con empresa.');
+    } finally {
+      setBusyDeviceId(null);
+    }
+  };
+
+  const handleSwapUsersDevice = async (dev: RegisteredDeviceConfig) => {
+    const targetId = swapTargetDeviceId === '__clear__' ? null : swapTargetDeviceId || null;
+    if (!swapTargetDeviceId) {
+      showNotice('error', 'Selecciona el nuevo dispositivo destino o "Quitar asignación a usuarios".');
+      return;
+    }
+    const targetDev = targetId ? normalizedCatalog.find((d) => d.id === targetId) : undefined;
+    setBusyDeviceId(dev.id);
+    try {
+      const res = await replaceDeviceForUsersInRTDB(
+        dev.id,
+        targetId,
+        usersList,
+        currentUser,
+        dev,
+        targetDev
+      );
+      onDeviceUpdated?.(res.fromDevice);
+      if (res.toDevice) {
+        onDeviceUpdated?.(res.toDevice);
+      }
+      if (res.affectedUserIds.length > 0) {
+        onUsersDeviceUpdated?.(
+          res.affectedUserIds.map((userId) => ({ userId, assignedDeviceCode: targetId }))
+        );
+      }
+      setSwapTargetDeviceId('');
+      setTransferDeviceId(null);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        targetId
+          ? `Se cambió el dispositivo de ${res.affectedUserIds.length} usuarios desde "${dev.id}" hacia "${targetId}".`
+          : `Se retiró el dispositivo "${dev.id}" de ${res.affectedUserIds.length} usuarios asignados.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo cambiar el dispositivo para los usuarios.');
     } finally {
       setBusyDeviceId(null);
     }
@@ -971,6 +1098,7 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
               className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
             >
               <option value="todos">Estado: Todos</option>
+              <option value="bloqueado">Solo Bloqueados</option>
               <option value="en_inventario">En Inventario (Sin asignar)</option>
               <option value="asignado_empresa">Asignado a Empresa</option>
               <option value="asignado_faena">Asignado a Faena</option>
@@ -1033,18 +1161,30 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
               filteredDevices.map((dev) => {
                 const live = rtdbMap.get(dev.id);
                 const isOnline = Boolean(live?.gatewayOnline);
-                const isNode = dev.category === 'nodo' || dev.category === 'sensor';
+                const isNode = dev.category === 'nodo' || dev.category === 'sensor' || dev.category === 'gateway_sensor';
+                const isBlocked = isDeviceBlocked(dev);
                 const status = dev.assignmentStatus || resolveDeviceAssignmentStatus(dev);
                 const statusMeta = STATUS_META[status];
                 const isUnassigned = isUnassignedDeviceOrg(dev.organizationId);
                 const isTransferOpen = transferDeviceId === dev.id;
                 const isHistoryOpen = expandedHistoryId === dev.id;
                 const historyEntries = dev.assignmentHistory || [];
+                const assignedUsersCount = Math.max(
+                  dev.assignedUserIds?.length || 0,
+                  usersList.filter((u) => u.assignedDeviceCode === dev.id).length
+                );
+                const otherDevicesForSwap = normalizedCatalog.filter(
+                  (d) => d.id !== dev.id && !isDeviceBlocked(d)
+                );
 
                 return (
                   <div
                     key={dev.id}
-                    className="p-4 rounded-xl bg-slate-950/80 border border-slate-800 space-y-3"
+                    className={`p-4 rounded-xl border space-y-3 transition-colors ${
+                      isBlocked
+                        ? 'bg-rose-950/20 border-rose-800/80'
+                        : 'bg-slate-950/80 border-slate-800'
+                    }`}
                   >
                     <div className="flex flex-col md:flex-row md:items-start justify-between gap-3">
                       <div className="space-y-1.5 min-w-0">
@@ -1056,16 +1196,37 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                                 : 'bg-sky-950/80 text-sky-300 border-sky-700'
                             }`}
                           >
-                            {isNode ? 'Nodo' : 'Gateway'}
+                            {dev.category === 'gateway_sensor'
+                              ? 'Nodo / Gateway'
+                              : isNode
+                              ? 'Nodo'
+                              : 'Gateway'}
                           </span>
                           <span className="font-bold text-sm text-white truncate">
                             {dev.name}
                           </span>
-                          <span
-                            className={`px-2 py-0.5 rounded text-[10px] font-bold border ${statusMeta.badgeClass}`}
-                          >
-                            {statusMeta.label}
-                          </span>
+                          {isBlocked ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-rose-950 text-rose-300 border border-rose-700">
+                              <Ban className="w-3 h-3" />
+                              <span>Bloqueado</span>
+                            </span>
+                          ) : (
+                            <span
+                              className={`px-2 py-0.5 rounded text-[10px] font-bold border ${statusMeta.badgeClass}`}
+                            >
+                              {statusMeta.label}
+                            </span>
+                          )}
+                          {(assignedUsersCount > 0 || dev.sharedWithAllAssignedUsers) && (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold bg-purple-950/80 text-purple-200 border border-purple-700/80">
+                              <Users className="w-3 h-3 text-purple-300" />
+                              <span>
+                                {assignedUsersCount > 0
+                                  ? `${assignedUsersCount} usuarios asignados`
+                                  : 'Compartido con empresas'}
+                              </span>
+                            </span>
+                          )}
                           <span
                             className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-bold border ${
                               isOnline
@@ -1112,6 +1273,11 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                                 : dev.organizationName || dev.organizationId}
                             </strong>
                           </span>
+                          {dev.sharedOrganizationIds && dev.sharedOrganizationIds.length > 1 && (
+                            <span className="text-[10px] px-1.5 py-0.5 rounded bg-indigo-950/70 border border-indigo-700/70 text-indigo-200">
+                              +{dev.sharedOrganizationIds.length - 1} empresas compartidas
+                            </span>
+                          )}
                           {!isUnassigned && (
                             <>
                               <span className="inline-flex items-center gap-1">
@@ -1142,8 +1308,24 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                         )}
                       </div>
 
-                      {/* Actions */}
+                      {/* Actions: Asignar a todos, Cambiar, Editar, Bloquear/Desbloquear, Eliminar */}
                       <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                        {!isBlocked && (
+                          <button
+                            type="button"
+                            disabled={busyDeviceId === dev.id}
+                            onClick={() => handleAssignToAllOrgUsers(dev)}
+                            className="px-2.5 py-1.5 rounded-lg bg-purple-950/80 hover:bg-purple-900 border border-purple-700 text-purple-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                            title="Asignar este dispositivo a todos los usuarios que actualmente tienen una empresa asignada"
+                          >
+                            <Users className="w-3.5 h-3.5" />
+                            <span>
+                              Asignar a usuarios con empresa
+                              {orgAssignedUsers.length > 0 ? ` (${orgAssignedUsers.length})` : ''}
+                            </span>
+                          </button>
+                        )}
+
                         <button
                           type="button"
                           disabled={busyDeviceId === dev.id}
@@ -1151,9 +1333,49 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                             isTransferOpen ? setTransferDeviceId(null) : handleOpenTransfer(dev)
                           }
                           className="px-2.5 py-1.5 rounded-lg bg-cyan-950/80 hover:bg-cyan-900 border border-cyan-700 text-cyan-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                          title="Cambiar empresa/faena o cambiar este dispositivo por otro para sus usuarios"
                         >
                           <ArrowRightLeft className="w-3.5 h-3.5" />
-                          <span>{isUnassigned ? 'Asignar' : 'Trasladar'}</span>
+                          <span>{isUnassigned ? 'Asignar' : 'Cambiar'}</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={busyDeviceId === dev.id}
+                          onClick={() => handleStartEdit(dev)}
+                          className="px-2.5 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-200 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
+                          title="Editar nombre, categoría, IP o asignación del dispositivo"
+                        >
+                          <Edit3 className="w-3.5 h-3.5" />
+                          <span>Editar</span>
+                        </button>
+
+                        <button
+                          type="button"
+                          disabled={busyDeviceId === dev.id}
+                          onClick={() => handleToggleBlockDevice(dev)}
+                          className={`px-2.5 py-1.5 rounded-lg border text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer ${
+                            isBlocked
+                              ? 'bg-emerald-950/80 hover:bg-emerald-900 border-emerald-700 text-emerald-200'
+                              : 'bg-amber-950/80 hover:bg-amber-900 border-amber-700 text-amber-200'
+                          }`}
+                          title={
+                            isBlocked
+                              ? 'Desbloquear dispositivo y reactivar su telemetría'
+                              : 'Bloquear dispositivo para suspenderlo operativamente'
+                          }
+                        >
+                          {isBlocked ? (
+                            <>
+                              <Unlock className="w-3.5 h-3.5" />
+                              <span>Desbloquear</span>
+                            </>
+                          ) : (
+                            <>
+                              <Ban className="w-3.5 h-3.5" />
+                              <span>Bloquear</span>
+                            </>
+                          )}
                         </button>
 
                         {!isUnassigned && (
@@ -1161,7 +1383,7 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                             type="button"
                             disabled={busyDeviceId === dev.id}
                             onClick={() => handleUnassignToInventory(dev)}
-                            className="px-2.5 py-1.5 rounded-lg bg-amber-950/70 hover:bg-amber-900 border border-amber-700/80 text-amber-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                            className="px-2 py-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-amber-300 text-[11px] font-semibold inline-flex items-center gap-1 cursor-pointer"
                             title="Desasignar y devolver al inventario global sin borrar el equipo"
                           >
                             <RotateCcw className="w-3.5 h-3.5" />
@@ -1183,28 +1405,20 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                           </button>
                         )}
 
-                        <button
-                          type="button"
-                          onClick={() => handleStartEdit(dev)}
-                          className="p-1.5 rounded-lg bg-slate-900 hover:bg-slate-800 border border-slate-700 text-slate-300 cursor-pointer"
-                          title="Editar ficha del dispositivo"
-                        >
-                          <Edit3 className="w-3.5 h-3.5" />
-                        </button>
-
                         {confirmDeleteId === dev.id ? (
-                          <div className="inline-flex items-center gap-1 bg-rose-950/90 border border-rose-700 rounded-lg px-2 py-1">
+                          <div className="inline-flex items-center gap-1.5 bg-rose-950/90 border border-rose-700 rounded-lg px-2.5 py-1">
                             <button
                               type="button"
+                              disabled={busyDeviceId === dev.id}
                               onClick={() => handleDeleteFromCatalog(dev.id)}
-                              className="text-[10px] font-bold text-rose-200 hover:text-white cursor-pointer"
+                              className="text-[11px] font-bold text-rose-200 hover:text-white cursor-pointer"
                             >
                               Confirmar
                             </button>
                             <button
                               type="button"
                               onClick={() => setConfirmDeleteId(null)}
-                              className="text-[10px] text-slate-400 hover:text-white cursor-pointer"
+                              className="text-[11px] text-slate-400 hover:text-white cursor-pointer"
                             >
                               No
                             </button>
@@ -1212,24 +1426,26 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                         ) : (
                           <button
                             type="button"
+                            disabled={busyDeviceId === dev.id}
                             onClick={() => setConfirmDeleteId(dev.id)}
-                            className="p-1.5 rounded-lg bg-rose-950/50 hover:bg-rose-900 border border-rose-800/70 text-rose-300 cursor-pointer"
-                            title="Quitar del catálogo"
+                            className="px-2.5 py-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 border border-rose-800/80 text-rose-200 text-[11px] font-bold inline-flex items-center gap-1 cursor-pointer"
+                            title="Eliminar dispositivo del catálogo y desvincular usuarios"
                           >
                             <Trash2 className="w-3.5 h-3.5" />
+                            <span>Eliminar</span>
                           </button>
                         )}
                       </div>
                     </div>
 
-                    {/* Inline Transfer / Assignment Drawer */}
+                    {/* Inline Transfer / Swap / Reassignment Drawer */}
                     {isTransferOpen && (
-                      <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-700/70 space-y-3 text-xs">
+                      <div className="p-3.5 rounded-xl bg-slate-900/95 border border-cyan-700/70 space-y-4 text-xs">
                         <div className="flex items-center justify-between">
                           <span className="font-bold text-cyan-200">
                             {isUnassigned
                               ? `Asignar ${dev.id} a Empresa o Faena`
-                              : `Reasignar / Trasladar ${dev.id}`}
+                              : `Cambiar / Reasignar ${dev.id}`}
                           </span>
                           <button
                             type="button"
@@ -1239,67 +1455,103 @@ export const DeviceRegistryAndAssignmentPanel: React.FC<
                             <X className="w-4 h-4" />
                           </button>
                         </div>
-                        <p className="text-[11px] text-slate-400">
-                          Al cambiar de empresa o faena, se limpiarán automáticamente los vínculos anteriores de cuadrilla y sector para evitar datos huérfanos.
-                        </p>
-                        <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
-                          <select
-                            value={transferOrgId}
-                            onChange={(e) => {
-                              setTransferOrgId(e.target.value);
-                              setTransferSiteId('');
-                            }}
-                            className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
-                          >
-                            <option value="">Selecciona Empresa destino...</option>
-                            {organizations.map((org) => (
-                              <option key={org.id} value={org.id}>
-                                {org.name}
-                              </option>
-                            ))}
-                          </select>
-                          <select
-                            value={transferSiteId}
-                            onChange={(e) => setTransferSiteId(e.target.value)}
-                            disabled={!transferOrgId}
-                            className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white disabled:opacity-50"
-                          >
-                            <option value="">Solo a Empresa (Admin distribuye luego)</option>
-                            {transferSites.map((s) => (
-                              <option key={s.id} value={s.id}>
-                                Faena: {s.name}
-                              </option>
-                            ))}
-                          </select>
-                          <input
-                            type="text"
-                            value={transferNote}
-                            onChange={(e) => setTransferNote(e.target.value)}
-                            placeholder="Motivo de traslado / contrato (opcional)"
-                            className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
-                          />
+
+                        {/* Section A: Change Org / Faena */}
+                        <div className="space-y-2">
+                          <div className="text-[11px] font-bold text-slate-200">
+                            1. Cambiar Empresa / Faena principal del equipo
+                          </div>
+                          <p className="text-[11px] text-slate-400">
+                            Al cambiar de empresa o faena, se limpiarán automáticamente los vínculos anteriores de cuadrilla y sector para evitar datos huérfanos.
+                          </p>
+                          <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+                            <select
+                              value={transferOrgId}
+                              onChange={(e) => {
+                                setTransferOrgId(e.target.value);
+                                setTransferSiteId('');
+                              }}
+                              className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                            >
+                              <option value="">Selecciona Empresa destino...</option>
+                              {organizations.map((org) => (
+                                <option key={org.id} value={org.id}>
+                                  {org.name}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              value={transferSiteId}
+                              onChange={(e) => setTransferSiteId(e.target.value)}
+                              disabled={!transferOrgId}
+                              className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white disabled:opacity-50"
+                            >
+                              <option value="">Solo a Empresa (Admin distribuye luego)</option>
+                              {transferSites.map((s) => (
+                                <option key={s.id} value={s.id}>
+                                  Faena: {s.name}
+                                </option>
+                              ))}
+                            </select>
+                            <input
+                              type="text"
+                              value={transferNote}
+                              onChange={(e) => setTransferNote(e.target.value)}
+                              placeholder="Motivo de traslado / contrato (opcional)"
+                              className="px-2.5 py-2 rounded-lg bg-slate-950 border border-slate-700 text-white"
+                            />
+                          </div>
+                          <div className="flex flex-wrap items-center justify-end gap-2">
+                            <button
+                              type="button"
+                              disabled={busyDeviceId === dev.id || !transferOrgId}
+                              onClick={() => handleConfirmTransfer(dev)}
+                              className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
+                            >
+                              <Check className="w-3.5 h-3.5" />
+                              <span>
+                                {busyDeviceId === dev.id
+                                  ? 'Aplicando...'
+                                  : 'Confirmar Asignación / Traslado'}
+                              </span>
+                            </button>
+                          </div>
                         </div>
-                        <div className="flex flex-wrap items-center justify-end gap-2">
-                          <button
-                            type="button"
-                            onClick={() => setTransferDeviceId(null)}
-                            className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 font-semibold cursor-pointer"
-                          >
-                            Cancelar
-                          </button>
-                          <button
-                            type="button"
-                            disabled={busyDeviceId === dev.id || !transferOrgId}
-                            onClick={() => handleConfirmTransfer(dev)}
-                            className="px-3.5 py-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 text-white font-bold inline-flex items-center gap-1.5 cursor-pointer"
-                          >
-                            <Check className="w-3.5 h-3.5" />
+
+                        {/* Section B: Swap / Replace Device for Assigned Users */}
+                        <div className="pt-3 border-t border-slate-800 space-y-2">
+                          <div className="text-[11px] font-bold text-purple-200 flex items-center gap-1.5">
+                            <RefreshCw className="w-3.5 h-3.5 text-purple-400" />
                             <span>
-                              {busyDeviceId === dev.id
-                                ? 'Aplicando...'
-                                : 'Confirmar Asignación / Traslado'}
+                              2. Cambiar este dispositivo por otro para sus usuarios asignados ({assignedUsersCount})
                             </span>
-                          </button>
+                          </div>
+                          <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
+                            <select
+                              value={swapTargetDeviceId}
+                              onChange={(e) => setSwapTargetDeviceId(e.target.value)}
+                              className="flex-1 px-2.5 py-2 rounded-lg bg-slate-950 border border-purple-800/70 text-white"
+                            >
+                              <option value="">Selecciona dispositivo de reemplazo o quitar...</option>
+                              {otherDevicesForSwap.map((cand) => (
+                                <option key={cand.id} value={cand.id}>
+                                  Reemplazar por: {cand.name} ({cand.id})
+                                </option>
+                              ))}
+                              <option value="__clear__">
+                                Quitar asignación de este dispositivo a todos los usuarios
+                              </option>
+                            </select>
+                            <button
+                              type="button"
+                              disabled={busyDeviceId === dev.id || !swapTargetDeviceId}
+                              onClick={() => handleSwapUsersDevice(dev)}
+                              className="px-3.5 py-2 rounded-lg bg-purple-600 hover:bg-purple-500 disabled:opacity-50 text-white font-bold inline-flex items-center justify-center gap-1.5 cursor-pointer"
+                            >
+                              <RefreshCw className="w-3.5 h-3.5" />
+                              <span>Aplicar Cambio</span>
+                            </button>
+                          </div>
                         </div>
                       </div>
                     )}

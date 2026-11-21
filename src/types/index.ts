@@ -32,7 +32,7 @@ export interface TelemetryHistoryPageResult {
   error: string | null;
 }
 
-export type TelemetryRangeKey = '1h' | '6h' | '24h' | '7d' | '30d' | 'custom';
+export type TelemetryRangeKey = '1h' | '6h' | '24h' | '7d' | '30d' | 'all' | 'custom';
 
 export interface AlertAttachment {
   id: string;
@@ -116,6 +116,13 @@ export interface SensorDevice {
   assignedBy?: string;
   assignedAt?: number;
   assignmentHistory?: DeviceAssignmentAuditEntry[];
+  blocked?: boolean;
+  blockedAt?: number;
+  blockedBy?: string;
+  enabled?: boolean;
+  assignedUserIds?: string[];
+  sharedOrganizationIds?: string[];
+  sharedWithAllAssignedUsers?: boolean;
 }
 
 export interface AlarmAuditRecord {
@@ -183,6 +190,7 @@ export interface MiningSite {
   elevationMsl: number;
   activeSectors: MiningSector[];
   isPreloaded?: boolean;
+  status?: 'activa' | 'bloqueada';
 }
 
 export type AlertResolutionType =
@@ -279,7 +287,7 @@ export interface MiningCrew {
   sectorId?: string;
   sectorName?: string;
   notes?: string;
-  status: 'activa' | 'en_descanso' | 'inactiva';
+  status: 'activa' | 'en_descanso' | 'inactiva' | 'bloqueada';
   members: CrewMember[];
   createdBy?: string;
   createdAt: number;
@@ -531,7 +539,11 @@ export interface DeviceAssignmentAuditEntry {
     | 'asignacion_faena'
     | 'asignacion_sector'
     | 'reasignacion'
-    | 'desasignacion';
+    | 'desasignacion'
+    | 'bloqueo'
+    | 'desbloqueo'
+    | 'asignacion_usuarios'
+    | 'cambio_dispositivo';
   fromOrganizationId?: string;
   fromOrganizationName?: string;
   toOrganizationId?: string;
@@ -557,6 +569,12 @@ export interface RegisteredDeviceConfig {
   localIp?: string;
   enabled?: boolean;
   active?: boolean;
+  blocked?: boolean;
+  blockedAt?: number;
+  blockedBy?: string;
+  assignedUserIds?: string[];
+  sharedOrganizationIds?: string[];
+  sharedWithAllAssignedUsers?: boolean;
   createdAt?: number;
   assignmentStatus?: DeviceAssignmentStatus;
   assignedBy?: string;

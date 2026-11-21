@@ -14,6 +14,7 @@ import {
   KeyRound,
   Eye,
   EyeOff,
+  Lock,
   CheckCircle2,
   AlertCircle,
   Loader2,
@@ -23,6 +24,13 @@ import {
 import { MiningCrew, MiningSite, Organization, UserProfile } from '../types';
 import { updateCurrentUserPasswordWithPolicy } from '../services/firebase';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
+import {
+  canUnmaskEmail,
+  canUnmaskRut,
+  formatEmailForViewer,
+  formatRutForViewer,
+} from '../utils/privacyMask';
+import { isPlaceholderRut } from '../utils/rut';
 import { soundAlert } from '../services/audioAlert';
 
 interface LoginModalProps {
@@ -55,10 +63,15 @@ export const LoginModal: React.FC<LoginModalProps> = ({
   const [isUpdatingPassword, setIsUpdatingPassword] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [revealRut, setRevealRut] = useState(false);
+  const [revealEmail, setRevealEmail] = useState(false);
 
   if (!currentUser) {
     return null;
   }
+
+  const allowRutUnmask = canUnmaskRut(currentUser.role);
+  const allowEmailUnmask = canUnmaskEmail(currentUser.role);
 
   const org = organizations.find((o) => o.id === currentUser.organizationId);
   const orgName = org?.name || currentUser.organizationId || 'MineSafe Corporativo';
@@ -251,16 +264,30 @@ export const LoginModal: React.FC<LoginModalProps> = ({
               </div>
 
               <div className="grid grid-cols-2 gap-2.5">
-                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start gap-2.5">
-                  <CreditCard className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
-                  <div className="min-w-0">
-                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
-                      RUT / ID
-                    </span>
-                    <span className="font-mono font-semibold text-white truncate block">
-                      {currentUser.rut || 'No registrado'}
-                    </span>
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start justify-between gap-2">
+                  <div className="flex items-start gap-2.5 min-w-0">
+                    <CreditCard className="w-4 h-4 text-cyan-400 shrink-0 mt-0.5" />
+                    <div className="min-w-0">
+                      <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                        RUT / ID
+                      </span>
+                      <span className="font-mono font-semibold text-white truncate block">
+                        {formatRutForViewer(currentUser.rut, currentUser.role, revealRut)}
+                      </span>
+                    </div>
                   </div>
+                  {currentUser.rut && !isPlaceholderRut(currentUser.rut) && allowRutUnmask ? (
+                    <button
+                      type="button"
+                      onClick={() => setRevealRut((prev) => !prev)}
+                      className="p-1 rounded bg-slate-900 border border-slate-700 text-purple-300 hover:border-purple-500 shrink-0"
+                      title={revealRut ? 'Ocultar RUT' : 'Desbloquear RUT completo'}
+                    >
+                      {revealRut ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                    </button>
+                  ) : currentUser.rut && !isPlaceholderRut(currentUser.rut) ? (
+                    <Lock className="w-3 h-3 text-slate-500 shrink-0 mt-1" />
+                  ) : null}
                 </div>
 
                 <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start gap-2.5">
@@ -276,14 +303,30 @@ export const LoginModal: React.FC<LoginModalProps> = ({
                 </div>
               </div>
 
-              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-3">
-                <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
-                <div className="min-w-0">
-                  <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
-                    Correo Corporativo
-                  </span>
-                  <span className="font-semibold text-white truncate block">{currentUser.email}</span>
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-3">
+                <div className="flex items-center gap-3 min-w-0">
+                  <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] uppercase tracking-wider text-slate-400 block">
+                      Correo Corporativo
+                    </span>
+                    <span className="font-semibold text-white truncate block">
+                      {formatEmailForViewer(currentUser.email, currentUser.role, revealEmail)}
+                    </span>
+                  </div>
                 </div>
+                {currentUser.email && allowEmailUnmask ? (
+                  <button
+                    type="button"
+                    onClick={() => setRevealEmail((prev) => !prev)}
+                    className="p-1.5 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 hover:border-cyan-500 shrink-0"
+                    title={revealEmail ? 'Ocultar correo' : 'Desbloquear correo completo'}
+                  >
+                    {revealEmail ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                ) : currentUser.email ? (
+                  <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                ) : null}
               </div>
 
               <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 space-y-2">

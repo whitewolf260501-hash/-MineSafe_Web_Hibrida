@@ -1,6 +1,7 @@
 import React, { useState } from 'react';
 import {
   AlertCircle,
+  Ban,
   Building2,
   Check,
   CheckCircle2,
@@ -16,7 +17,11 @@ import {
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
-import { isGlobalMineSafeAdmin } from '../utils/accessControl';
+import {
+  canBlockOrganization,
+  canDeleteOrganization,
+  isGlobalMineSafeAdmin,
+} from '../utils/accessControl';
 import { RutInput } from './RutInput';
 
 interface OrganizationsManagerPanelProps {
@@ -44,6 +49,7 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
   const [orgRut, setOrgRut] = useState('');
   const [orgIndustry, setOrgIndustry] = useState('Minería Subterránea & Rajo');
   const [orgStatus, setOrgStatus] = useState<'activa' | 'suspendida'>('activa');
+  const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState<string | null>(null);
   const [isSaving, setIsSaving] = useState(false);
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(
     null
@@ -115,14 +121,41 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
     }
   };
 
+  const handleToggleBlockOrg = async (org: Organization) => {
+    const check = canBlockOrganization(currentUser, org);
+    if (!check.allowed) {
+      showNotice('error', check.reason || 'No tienes permisos para bloquear esta organización.');
+      return;
+    }
+    const nextStatus: 'activa' | 'suspendida' = org.status === 'activa' ? 'suspendida' : 'activa';
+    setIsSaving(true);
+    try {
+      const updated = await saveOrganizationToRTDB({ ...org, status: nextStatus }, currentUser);
+      onOrganizationsChanged?.(updated);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        nextStatus === 'suspendida'
+          ? `Organización "${org.name}" bloqueada (suspendida).`
+          : `Organización "${org.name}" reactivada correctamente.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo actualizar el estado de la organización.');
+    } finally {
+      setIsSaving(false);
+    }
+  };
+
   const handleDeleteOrg = async (org: Organization) => {
-    if (!canDeleteAnyOrg && org.ownerUid !== currentUser.id) {
-      showNotice('error', 'No tienes permisos para eliminar esta organización.');
+    const check = canDeleteOrganization(currentUser, org);
+    if (!check.allowed && org.ownerUid !== currentUser.id) {
+      showNotice('error', check.reason || 'No tienes permisos para eliminar esta organización.');
       return;
     }
     setIsSaving(true);
     try {
       await deleteOrganizationFromRTDB(org.id, currentUser);
+      setConfirmDeleteOrgId(null);
       onOrganizationsChanged?.(org, org.id);
       if (activeOrganizationId === org.id && onSelectOrganization) {
         onSelectOrganization(canViewAllOrganizations ? 'all' : currentUser.organizationId || DEFAULT_ORGANIZATION.id);
@@ -332,7 +365,7 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
                         </div>
                       </div>
 
-                      <div className="flex items-center gap-2 shrink-0">
+                      <div className="flex flex-wrap items-center gap-2 shrink-0">
                         {onSelectOrganization && (
                           <button
                             type="button"
@@ -362,16 +395,62 @@ export const OrganizationsManagerPanel: React.FC<OrganizationsManagerPanelProps>
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
                         )}
-                        {canDeleteThisOrg && (
+                        {canBlockOrganization(currentUser, org).allowed && (
                           <button
                             type="button"
-                            onClick={() => handleDeleteOrg(org)}
+                            onClick={() => handleToggleBlockOrg(org)}
                             disabled={isSaving}
-                            className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
-                            title="Eliminar organización"
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border disabled:opacity-50 ${
+                              org.status === 'activa'
+                                ? 'bg-amber-950/60 hover:bg-amber-900 text-amber-200 border-amber-700'
+                                : 'bg-emerald-950/60 hover:bg-emerald-900 text-emerald-200 border-emerald-700'
+                            }`}
+                            title={org.status === 'activa' ? 'Bloquear / suspender organización' : 'Activar organización'}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {org.status === 'activa' ? (
+                              <>
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>Bloquear</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Activar</span>
+                              </>
+                            )}
                           </button>
+                        )}
+                        {canDeleteThisOrg && (
+                          confirmDeleteOrgId === org.id ? (
+                            <div className="flex items-center gap-1 bg-rose-950 border border-rose-700 rounded-lg px-2 py-1">
+                              <span className="text-[10px] text-rose-200 font-semibold">¿Eliminar?</span>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteOrg(org)}
+                                disabled={isSaving}
+                                className="text-[10px] font-bold text-rose-300 hover:text-white px-1"
+                              >
+                                Sí
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteOrgId(null)}
+                                className="text-[10px] text-slate-400 hover:text-white px-1"
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteOrgId(org.id)}
+                              disabled={isSaving}
+                              className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
+                              title="Eliminar organización"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )
                         )}
                       </div>
                     </div>

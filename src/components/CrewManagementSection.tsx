@@ -16,6 +16,9 @@ import {
   Cpu,
   UserCheck,
   Building2,
+  EyeOff,
+  Unlock,
+  Ban,
 } from 'lucide-react';
 import {
   CrewMember,
@@ -32,8 +35,15 @@ import {
   canManageCrews,
   DEFAULT_ORGANIZATION_ID,
   getCrewMemberIdentityKey,
+  isGlobalMineSafeAdmin,
 } from '../utils/accessControl';
 import { soundAlert } from '../services/audioAlert';
+import {
+  canUnmaskEmail,
+  canUnmaskRut,
+  formatEmailForViewer,
+  formatRutForViewer,
+} from '../utils/privacyMask';
 
 interface CrewCandidateWorker {
   key: string;
@@ -100,6 +110,11 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
   const [notice, setNotice] = useState<{ text: string; tone: 'success' | 'error' } | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [confirmRemoveMemberKey, setConfirmRemoveMemberKey] = useState<string | null>(null);
+  const [revealCrewRuts, setRevealCrewRuts] = useState(false);
+  const [revealCrewEmails, setRevealCrewEmails] = useState(false);
+
+  const allowRutUnmask = canUnmaskRut(currentUser?.role);
+  const allowEmailUnmask = canUnmaskEmail(currentUser?.role);
 
   // Create / Edit Crew Modal State
   const [showCrewModal, setShowCrewModal] = useState(false);
@@ -533,11 +548,41 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
         </span>
       );
     }
+    if (status === 'bloqueada') {
+      return (
+        <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-rose-950 text-rose-300 border border-rose-700">
+          Bloqueada
+        </span>
+      );
+    }
     return (
       <span className="px-2 py-0.5 rounded text-[10px] font-bold uppercase bg-slate-900 text-slate-400 border border-slate-700">
         Inactiva
       </span>
     );
+  };
+
+  const canBlockCrews = isGlobalMineSafeAdmin(currentUser?.role);
+
+  const handleToggleBlockCrew = async (crew: MiningCrew) => {
+    if (!canBlockCrews) return;
+    const nextStatus: MiningCrew['status'] = crew.status === 'bloqueada' ? 'activa' : 'bloqueada';
+    try {
+      await onSaveCrew({
+        ...crew,
+        status: nextStatus,
+        updatedAt: Date.now(),
+      });
+      soundAlert.playFeedbackBeep();
+      showTempNotice(
+        nextStatus === 'bloqueada'
+          ? `Cuadrilla "${crew.name}" bloqueada correctamente.`
+          : `Cuadrilla "${crew.name}" desbloqueada y reactivada.`,
+        'success'
+      );
+    } catch (err: any) {
+      showTempNotice(err?.message || 'No se pudo actualizar el estado de la cuadrilla.', 'error');
+    }
   };
 
   return (
@@ -567,6 +612,36 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
             />
           </div>
 
+          {allowEmailUnmask && (
+            <button
+              type="button"
+              onClick={() => setRevealCrewEmails((prev) => !prev)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                revealCrewEmails
+                  ? 'bg-cyan-950/80 border-cyan-600 text-cyan-200'
+                  : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-cyan-500'
+              }`}
+              title="Permitido para SuperAdmin, Admin MineSafe y Administrador de Empresa"
+            >
+              {revealCrewEmails ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-cyan-400" />}
+              <span>{revealCrewEmails ? 'Ocultar Correos' : 'Desbloquear Correos'}</span>
+            </button>
+          )}
+          {allowRutUnmask && (
+            <button
+              type="button"
+              onClick={() => setRevealCrewRuts((prev) => !prev)}
+              className={`inline-flex items-center gap-1 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors ${
+                revealCrewRuts
+                  ? 'bg-purple-950/80 border-purple-600 text-purple-200'
+                  : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-purple-500'
+              }`}
+              title="Exclusivo de SuperAdmin y Admin Corporativo MineSafe"
+            >
+              {revealCrewRuts ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-purple-400" />}
+              <span>{revealCrewRuts ? 'Ocultar RUTs' : 'Desbloquear RUTs'}</span>
+            </button>
+          )}
           {canEditCrews && (
             <button
               type="button"
@@ -630,7 +705,11 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
             return (
               <div
                 key={crew.id}
-                className="p-5 rounded-xl bg-slate-900/70 border border-slate-800 hover:border-slate-700 transition-colors flex flex-col justify-between gap-4"
+                className={`p-5 rounded-xl bg-slate-900/70 border transition-colors flex flex-col justify-between gap-4 ${
+                  crew.status === 'bloqueada'
+                    ? 'border-rose-800/80 bg-rose-950/15'
+                    : 'border-slate-800 hover:border-slate-700'
+                }`}
               >
                 <div className="space-y-3">
                   {/* Card Header */}
@@ -649,6 +728,24 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
 
                     {canEditCrews && (
                       <div className="flex items-center gap-1 shrink-0">
+                        {canBlockCrews && (
+                          <button
+                            type="button"
+                            onClick={() => handleToggleBlockCrew(crew)}
+                            title={crew.status === 'bloqueada' ? 'Desbloquear cuadrilla' : 'Bloquear cuadrilla'}
+                            className={`p-1.5 rounded-lg border transition-colors ${
+                              crew.status === 'bloqueada'
+                                ? 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-300 border-emerald-700'
+                                : 'bg-amber-950/60 hover:bg-amber-900 text-amber-300 border-amber-700'
+                            }`}
+                          >
+                            {crew.status === 'bloqueada' ? (
+                              <CheckCircle2 className="w-3.5 h-3.5" />
+                            ) : (
+                              <Ban className="w-3.5 h-3.5" />
+                            )}
+                          </button>
+                        )}
                         <button
                           type="button"
                           onClick={() => openEditCrewModal(crew)}
@@ -741,7 +838,9 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                                 <span className="font-semibold text-white truncate">{m.name}</span>
                               </div>
                               <div className="flex flex-wrap items-center gap-1.5 text-[10px] text-slate-400">
-                                <span className="font-mono">{m.rut}</span>
+                                <span className="font-mono">
+                                  {formatRutForViewer(m.rut, currentUser?.role, revealCrewRuts)}
+                                </span>
                                 <span>·</span>
                                 <span className="truncate">{m.role}</span>
                                 {m.assignedDeviceCode && (
@@ -908,6 +1007,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                     <option value="activa">Activa en Turno</option>
                     <option value="en_descanso">En Descanso / Relevo</option>
                     <option value="inactiva">Inactiva</option>
+                    <option value="bloqueada">Bloqueada</option>
                   </select>
                 </div>
               </div>
@@ -1109,7 +1209,7 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                             <div className="flex flex-wrap items-center gap-1.5">
                               <span className="font-bold text-white">{cand.name}</span>
                               <span className="font-mono text-[10px] text-slate-400 bg-slate-900 px-1.5 py-0.2 rounded border border-slate-800">
-                                {cand.rut}
+                                {formatRutForViewer(cand.rut, currentUser?.role, revealCrewRuts)}
                               </span>
                               <span className="text-[10px] px-1.5 py-0.2 rounded bg-cyan-950/70 text-cyan-300 border border-cyan-800/60">
                                 {cand.source === 'usuario'
@@ -1121,7 +1221,9 @@ export const CrewManagementSection: React.FC<CrewManagementSectionProps> = ({
                             </div>
                             <p className="text-[11px] text-slate-400 mt-0.5 truncate">
                               {cand.role}
-                              {cand.email ? ` · ${cand.email}` : ''}
+                              {cand.email
+                                ? ` · ${formatEmailForViewer(cand.email, currentUser?.role, revealCrewEmails)}`
+                                : ''}
                               {cand.assignedDeviceCode ? ` · Sensor: ${cand.assignedDeviceCode}` : ''}
                             </p>
                             {cand.otherCrews.length > 0 && (

@@ -18,6 +18,8 @@ import {
   Shield,
   Download,
   Lock,
+  Unlock,
+  EyeOff,
   Edit2,
   X,
   Building2
@@ -51,6 +53,7 @@ import { CrewManagementSection } from './CrewManagementSection';
 import { DeviceRegistryAndAssignmentPanel } from './DeviceRegistryAndAssignmentPanel';
 import { OrganizationsManagerPanel } from './OrganizationsManagerPanel';
 import { validateChileanRut, validateEmergencyPhone } from '../utils/rut';
+import { canUnmaskRut, formatRutForViewer } from '../utils/privacyMask';
 import { RutInput } from './RutInput';
 
 interface DevicesAndRentalsViewProps {
@@ -76,6 +79,7 @@ interface DevicesAndRentalsViewProps {
   onOrganizationsChanged?: (org: Organization, deletedId?: string) => void;
   onCatalogDeviceUpdated?: (saved: RegisteredDeviceConfig) => void;
   onCatalogDeviceDeleted?: (deviceId: string) => void;
+  onUsersDeviceUpdated?: (updates: Array<{ userId: string; assignedDeviceCode: string | null }>) => void;
 }
 
 const EQUIPOS_SUBTAB_ORDER: EquiposSubTab[] = [
@@ -110,7 +114,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
   onOrganizationsChanged,
   onCatalogDeviceUpdated,
   onCatalogDeviceDeleted,
+  onUsersDeviceUpdated,
 }) => {
+  const [revealAssignmentRuts, setRevealAssignmentRuts] = useState(false);
+  const allowRutUnmask = canUnmaskRut(currentUser?.role);
   const effectiveCatalogDevices = useMemo<RegisteredDeviceConfig[]>(
     () => catalogDevices || platformConfig?.registeredDevices || [],
     [catalogDevices, platformConfig?.registeredDevices]
@@ -748,11 +755,26 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
           )}
 
           <div className="space-y-3">
-            <div className="flex items-center justify-between">
+            <div className="flex flex-wrap items-center justify-between gap-2">
               <h2 className="text-sm font-bold text-white flex items-center gap-2">
                 <UserCheck className="w-4 h-4 text-cyan-400" />
                 Sensores IoT Asignados por Trabajador ({assignments.length})
               </h2>
+              {allowRutUnmask && (
+                <button
+                  type="button"
+                  onClick={() => setRevealAssignmentRuts((prev) => !prev)}
+                  className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-semibold rounded-lg border transition-colors ${
+                    revealAssignmentRuts
+                      ? 'bg-purple-950/80 border-purple-600 text-purple-200'
+                      : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-purple-500'
+                  }`}
+                  title="Exclusivo de SuperAdmin y Admin Corporativo MineSafe"
+                >
+                  {revealAssignmentRuts ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-purple-400" />}
+                  <span>{revealAssignmentRuts ? 'Ocultar RUTs' : 'Desbloquear RUTs'}</span>
+                </button>
+              )}
             </div>
 
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
@@ -768,7 +790,9 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                     </div>
                     <div>
                       <h3 className="text-sm font-bold text-white">{item.workerName}</h3>
-                      <span className="text-[11px] font-mono text-slate-400">{item.workerRut}</span>
+                      <span className="text-[11px] font-mono text-slate-400">
+                        {formatRutForViewer(item.workerRut, currentUser?.role, revealAssignmentRuts)}
+                      </span>
                     </div>
                   </div>
                   <span className="text-[11px] font-mono font-bold text-cyan-300 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800">
@@ -1003,8 +1027,10 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
           sites={allSites}
           catalogDevices={effectiveCatalogDevices}
           rtdbDevices={rtdbDevices || devices}
+          usersList={usersList}
           onDeviceUpdated={onCatalogDeviceUpdated}
           onDeviceDeleted={onCatalogDeviceDeleted}
+          onUsersDeviceUpdated={onUsersDeviceUpdated}
         />
       )}
 
@@ -1060,7 +1086,7 @@ export const DevicesAndRentalsView: React.FC<DevicesAndRentalsViewProps> = ({
                     <option value="">-- Ingresar o elegir trabajador registrado --</option>
                     {orgAssignableUsers.map((u) => (
                       <option key={u.id} value={u.id}>
-                        {u.name} {u.rut ? `(${u.rut})` : ''} · {u.roleLabel || u.role}
+                        {u.name} {u.rut ? `(${formatRutForViewer(u.rut, currentUser?.role, revealAssignmentRuts)})` : ''} · {u.roleLabel || u.role}
                       </option>
                     ))}
                   </select>

@@ -24,6 +24,9 @@ import {
   Link2,
   Search,
   UserCheck,
+  EyeOff,
+  Unlock,
+  Ban,
 } from 'lucide-react';
 import {
   MiningCrew,
@@ -37,7 +40,9 @@ import {
 import {
   BulkImportExecutionResult,
   DEFAULT_ORGANIZATION,
+  deleteCrewFromRTDB,
   deleteOrganizationFromRTDB,
+  deleteSiteFromRTDB,
   executeBulkCompanyImport,
   saveCrewToRTDB,
   saveOrganizationToRTDB,
@@ -45,6 +50,8 @@ import {
   saveSiteToRTDB,
 } from '../services/firebase';
 import {
+  canBlockOrganization,
+  canBlockOrDeleteSite,
   canCreateOrEditOrganization,
   canDeleteOrganization,
   canModifyTargetUser,
@@ -67,6 +74,7 @@ import {
   parseBulkInput,
 } from '../utils/bulkCompanyImport';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import { canUnmaskEmail, formatEmailForViewer } from '../utils/privacyMask';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import { RutInput } from './RutInput';
 import { soundAlert } from '../services/audioAlert';
@@ -85,9 +93,12 @@ interface CompanyBulkManagementViewProps {
   onSelectOrganization: (orgId: string) => void;
   onOrganizationsChanged?: (org: Organization, deletedId?: string) => void;
   onSiteSaved?: (site: MiningSite) => void;
+  onSiteDeleted?: (siteId: string) => Promise<void> | void;
   onCrewSaved?: (crew: MiningCrew) => void;
+  onCrewDeleted?: (crewId: string, organizationId: string) => Promise<void> | void;
   onDeviceHierarchySaved?: (device: RegisteredDeviceConfig) => void;
   onDeviceDeleted?: (deviceId: string) => void;
+  onUsersDeviceUpdated?: (updates: Array<{ userId: string; assignedDeviceCode: string | null }>) => void;
   onAssignUserToOrganization?: (userId: string, targetOrgId: string) => Promise<void> | void;
   onBulkImportCompleted?: (result: BulkImportExecutionResult) => void;
 }
@@ -156,9 +167,12 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   onSelectOrganization,
   onOrganizationsChanged,
   onSiteSaved,
+  onSiteDeleted,
   onCrewSaved,
+  onCrewDeleted,
   onDeviceHierarchySaved,
   onDeviceDeleted,
+  onUsersDeviceUpdated,
   onAssignUserToOrganization,
   onBulkImportCompleted,
 }) => {
@@ -177,6 +191,9 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   );
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string } | null>(null);
   const [isSavingOrg, setIsSavingOrg] = useState(false);
+  const [confirmDeleteOrgId, setConfirmDeleteOrgId] = useState<string | null>(null);
+  const [confirmDeleteSiteId, setConfirmDeleteSiteId] = useState<string | null>(null);
+  const [confirmDeleteCrewId, setConfirmDeleteCrewId] = useState<string | null>(null);
 
   // Company create/edit form state (only for SuperAdmin / Admin MineSafe)
   const [editingOrgId, setEditingOrgId] = useState<string | null>(null);
@@ -226,6 +243,8 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
   const [linkUserIdToOrg, setLinkUserIdToOrg] = useState('');
   const [linkUserTargetOrgId, setLinkUserTargetOrgId] = useState(defaultTargetOrg);
   const [linkUserSearch, setLinkUserSearch] = useState('');
+  const [revealBulkEmails, setRevealBulkEmails] = useState(false);
+  const allowEmailUnmask = canUnmaskEmail(currentUser.role);
   const [linkCrewId, setLinkCrewId] = useState('');
   const [linkCrewSiteId, setLinkCrewSiteId] = useState('');
   const [linkSectorSiteId, setLinkSectorSiteId] = useState('');
@@ -363,6 +382,31 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     }
   };
 
+  const handleToggleOrganizationBlock = async (org: Organization) => {
+    const check = canBlockOrganization(currentUser, org);
+    if (!check.allowed) {
+      showNotice('error', check.reason || 'Acción denegada.');
+      return;
+    }
+    const nextStatus: 'activa' | 'suspendida' = org.status === 'activa' ? 'suspendida' : 'activa';
+    setIsSavingOrg(true);
+    try {
+      const updated = await saveOrganizationToRTDB({ ...org, status: nextStatus }, currentUser);
+      onOrganizationsChanged?.(updated);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        nextStatus === 'suspendida'
+          ? `Empresa "${org.name}" bloqueada (suspendida).`
+          : `Empresa "${org.name}" reactivada correctamente.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo actualizar el estado de la empresa.');
+    } finally {
+      setIsSavingOrg(false);
+    }
+  };
+
   const handleDeleteOrganization = async (org: Organization) => {
     const check = canDeleteOrganization(currentUser, org);
     if (!check.allowed) {
@@ -372,6 +416,7 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
     setIsSavingOrg(true);
     try {
       await deleteOrganizationFromRTDB(org.id, currentUser);
+      setConfirmDeleteOrgId(null);
       onOrganizationsChanged?.(org, org.id);
       if (activeOrganizationId === org.id) {
         onSelectOrganization(currentUser.organizationId || DEFAULT_ORGANIZATION.id);
@@ -380,6 +425,103 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
       showNotice('success', `Empresa "${org.name}" eliminada.`);
     } catch (err: any) {
       showNotice('error', err?.message || 'No se pudo eliminar la empresa.');
+    } finally {
+      setIsSavingOrg(false);
+    }
+  };
+
+  const handleToggleSiteBlock = async (site: MiningSite) => {
+    const check = canBlockOrDeleteSite(currentUser, site);
+    if (!check.allowed) {
+      showNotice('error', check.reason || 'Solo SuperAdmin o Admin MineSafe pueden bloquear faenas.');
+      return;
+    }
+    const nextStatus: 'activa' | 'bloqueada' = site.status === 'bloqueada' ? 'activa' : 'bloqueada';
+    const updated: MiningSite = { ...site, status: nextStatus };
+    setIsSavingOrg(true);
+    try {
+      await saveSiteToRTDB(updated);
+      onSiteSaved?.(updated);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        nextStatus === 'bloqueada'
+          ? `Faena "${site.name}" bloqueada correctamente.`
+          : `Faena "${site.name}" desbloqueada y reactivada.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'Error al actualizar el estado de la faena.');
+    } finally {
+      setIsSavingOrg(false);
+    }
+  };
+
+  const handleDeleteSite = async (site: MiningSite) => {
+    const check = canBlockOrDeleteSite(currentUser, site);
+    if (!check.allowed) {
+      showNotice('error', check.reason || 'Solo SuperAdmin o Admin MineSafe pueden eliminar faenas.');
+      return;
+    }
+    setIsSavingOrg(true);
+    try {
+      if (onSiteDeleted) {
+        await onSiteDeleted(site.id);
+      } else {
+        await deleteSiteFromRTDB(site.id, currentUser);
+      }
+      setConfirmDeleteSiteId(null);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Faena "${site.name}" eliminada.`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo eliminar la faena.');
+    } finally {
+      setIsSavingOrg(false);
+    }
+  };
+
+  const handleToggleCrewBlock = async (crew: MiningCrew) => {
+    if (!isGlobalAdmin) {
+      showNotice('error', 'Solo SuperAdmin o Admin MineSafe pueden bloquear cuadrillas.');
+      return;
+    }
+    const nextStatus: MiningCrew['status'] = crew.status === 'bloqueada' ? 'activa' : 'bloqueada';
+    const updated: MiningCrew = { ...crew, status: nextStatus, updatedAt: Date.now() };
+    setIsSavingOrg(true);
+    try {
+      const res = await saveCrewToRTDB(updated, currentUser, organizations);
+      onCrewSaved?.(res.crew);
+      soundAlert.playFeedbackBeep();
+      showNotice(
+        'success',
+        nextStatus === 'bloqueada'
+          ? `Cuadrilla "${crew.name}" bloqueada correctamente.`
+          : `Cuadrilla "${crew.name}" desbloqueada y reactivada.`
+      );
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo cambiar el estado de la cuadrilla.');
+    } finally {
+      setIsSavingOrg(false);
+    }
+  };
+
+  const handleDeleteCrew = async (crew: MiningCrew) => {
+    if (!isGlobalAdmin) {
+      showNotice('error', 'Solo SuperAdmin o Admin MineSafe pueden eliminar cuadrillas desde esta vista.');
+      return;
+    }
+    setIsSavingOrg(true);
+    try {
+      const orgId = crew.organizationId || selectedBulkOrg.id;
+      if (onCrewDeleted) {
+        await onCrewDeleted(crew.id, orgId);
+      } else {
+        await deleteCrewFromRTDB(crew.id, orgId, currentUser, organizations);
+      }
+      setConfirmDeleteCrewId(null);
+      soundAlert.playFeedbackBeep();
+      showNotice('success', `Cuadrilla "${crew.name}" eliminada.`);
+    } catch (err: any) {
+      showNotice('error', err?.message || 'No se pudo eliminar la cuadrilla.');
     } finally {
       setIsSavingOrg(false);
     }
@@ -912,8 +1054,10 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
           sites={sites}
           catalogDevices={effectiveCatalogDevices}
           rtdbDevices={rtdbDevices || devices}
+          usersList={usersList}
           onDeviceUpdated={(saved) => onDeviceHierarchySaved?.(saved)}
           onDeviceDeleted={(devId) => onDeviceDeleted?.(devId)}
+          onUsersDeviceUpdated={onUsersDeviceUpdated}
         />
       )}
 
@@ -1046,9 +1190,26 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                     <UserCheck className="w-4 h-4 text-indigo-400" />
                     <span>2. Asignar Usuario Existente a Empresa</span>
                   </div>
-                  <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 text-indigo-300">
-                    {usersInTargetOrgCount} en destino
-                  </span>
+                  <div className="flex items-center gap-1.5">
+                    {allowEmailUnmask && (
+                      <button
+                        type="button"
+                        onClick={() => setRevealBulkEmails((prev) => !prev)}
+                        className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[10px] font-semibold border transition-colors ${
+                          revealBulkEmails
+                            ? 'bg-cyan-950/80 border-cyan-600 text-cyan-200'
+                            : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-cyan-500'
+                        }`}
+                        title="Desbloquear u ocultar correos en el selector"
+                      >
+                        {revealBulkEmails ? <EyeOff className="w-3 h-3" /> : <Unlock className="w-3 h-3 text-cyan-400" />}
+                        <span>{revealBulkEmails ? 'Ocultar correos' : 'Ver correos'}</span>
+                      </button>
+                    )}
+                    <span className="text-[10px] font-mono px-2 py-0.5 rounded bg-indigo-950 border border-indigo-800 text-indigo-300">
+                      {usersInTargetOrgCount} en destino
+                    </span>
+                  </div>
                 </div>
                 <p className="text-[11px] text-slate-400">
                   Exclusivo de SuperAdmin / Admin MineSafe: agrega o traslada un usuario ya creado a una organización existente.
@@ -1078,9 +1239,14 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                         organizations.find(
                           (o) => o.id === (u.organizationId || DEFAULT_ORGANIZATION_ID)
                         )?.name || DEFAULT_ORGANIZATION.name;
+                      const displayEmail = formatEmailForViewer(
+                        u.email,
+                        currentUser.role,
+                        revealBulkEmails
+                      );
                       return (
                         <option key={u.id} value={u.id}>
-                          {u.name} ({u.email}) — Actual: {uOrgName}
+                          {u.name} ({displayEmail}) — Actual: {uOrgName}
                         </option>
                       );
                     })}
@@ -1457,6 +1623,215 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                 ))
               )}
             </div>
+
+            {isGlobalAdmin && (
+              <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 pt-4 border-t border-slate-800">
+                {/* Gestión rápida de Faenas (Bloquear / Eliminar) */}
+                <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <MapPin className="w-3.5 h-3.5 text-emerald-400" />
+                      Faenas de {selectedBulkOrg.name} ({scopedOrgSites.length})
+                    </h4>
+                    <span className="text-[10px] text-slate-400">Bloquear / Eliminar</span>
+                  </div>
+                  {scopedOrgSites.length === 0 ? (
+                    <p className="text-[11px] text-slate-500">No hay faenas registradas en esta empresa.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                      {scopedOrgSites.map((site) => {
+                        const isBlocked = site.status === 'bloqueada';
+                        return (
+                          <div
+                            key={site.id}
+                            className={`p-2.5 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-xs ${
+                              isBlocked
+                                ? 'bg-rose-950/25 border-rose-800/80'
+                                : 'bg-slate-900/80 border-slate-800'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-bold text-white truncate">{site.name}</span>
+                                <span
+                                  className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    isBlocked
+                                      ? 'bg-rose-950 text-rose-300 border-rose-700'
+                                      : 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                  }`}
+                                >
+                                  {isBlocked ? 'Bloqueada' : 'Activa'}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-400">
+                                {site.region} · {site.activeSectors.length} sector(es)
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleSiteBlock(site)}
+                                disabled={isSavingOrg}
+                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold border disabled:opacity-50 ${
+                                  isBlocked
+                                    ? 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-200 border-emerald-700'
+                                    : 'bg-amber-950/70 hover:bg-amber-900 text-amber-200 border-amber-700'
+                                }`}
+                              >
+                                {isBlocked ? (
+                                  <>
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>Activar</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Ban className="w-3 h-3" />
+                                    <span>Bloquear</span>
+                                  </>
+                                )}
+                              </button>
+                              {confirmDeleteSiteId === site.id ? (
+                                <div className="flex items-center gap-1 bg-rose-950 border border-rose-700 rounded-md px-1.5 py-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteSite(site)}
+                                    disabled={isSavingOrg}
+                                    className="text-[10px] font-bold text-rose-300 hover:text-white px-1"
+                                  >
+                                    Sí
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteSiteId(null)}
+                                    className="text-[10px] text-slate-400 hover:text-white px-1"
+                                  >
+                                    No
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteSiteId(site.id)}
+                                  disabled={isSavingOrg}
+                                  className="p-1 rounded-md bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
+                                  title="Eliminar faena"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+
+                {/* Gestión rápida de Cuadrillas (Bloquear / Eliminar) */}
+                <div className="bg-slate-950/60 border border-slate-800 rounded-xl p-4 space-y-3">
+                  <div className="flex items-center justify-between gap-2">
+                    <h4 className="text-xs font-bold text-white flex items-center gap-1.5">
+                      <HardHat className="w-3.5 h-3.5 text-purple-400" />
+                      Cuadrillas de {selectedBulkOrg.name} ({scopedOrgCrews.length})
+                    </h4>
+                    <span className="text-[10px] text-slate-400">Bloquear / Eliminar</span>
+                  </div>
+                  {scopedOrgCrews.length === 0 ? (
+                    <p className="text-[11px] text-slate-500">No hay cuadrillas registradas en esta empresa.</p>
+                  ) : (
+                    <div className="space-y-2 max-h-60 overflow-y-auto pr-1">
+                      {scopedOrgCrews.map((crew) => {
+                        const isBlocked = crew.status === 'bloqueada';
+                        return (
+                          <div
+                            key={crew.id}
+                            className={`p-2.5 rounded-lg border flex flex-wrap items-center justify-between gap-2 text-xs ${
+                              isBlocked
+                                ? 'bg-rose-950/25 border-rose-800/80'
+                                : 'bg-slate-900/80 border-slate-800'
+                            }`}
+                          >
+                            <div className="min-w-0">
+                              <div className="flex items-center gap-1.5 flex-wrap">
+                                <span className="font-mono text-[10px] text-cyan-300">{crew.code}</span>
+                                <span className="font-bold text-white truncate">{crew.name}</span>
+                                <span
+                                  className={`text-[9px] font-bold uppercase px-1.5 py-0.5 rounded border ${
+                                    isBlocked
+                                      ? 'bg-rose-950 text-rose-300 border-rose-700'
+                                      : crew.status === 'activa'
+                                      ? 'bg-emerald-950 text-emerald-300 border-emerald-800'
+                                      : 'bg-slate-900 text-slate-400 border-slate-700'
+                                  }`}
+                                >
+                                  {crew.status}
+                                </span>
+                              </div>
+                              <p className="text-[10px] text-slate-400">
+                                {crew.siteName || 'Sin faena'} · {(crew.members || []).length} trabajador(es)
+                              </p>
+                            </div>
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                onClick={() => handleToggleCrewBlock(crew)}
+                                disabled={isSavingOrg}
+                                className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[10px] font-bold border disabled:opacity-50 ${
+                                  isBlocked
+                                    ? 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-200 border-emerald-700'
+                                    : 'bg-amber-950/70 hover:bg-amber-900 text-amber-200 border-amber-700'
+                                }`}
+                              >
+                                {isBlocked ? (
+                                  <>
+                                    <CheckCircle2 className="w-3 h-3" />
+                                    <span>Activar</span>
+                                  </>
+                                ) : (
+                                  <>
+                                    <Ban className="w-3 h-3" />
+                                    <span>Bloquear</span>
+                                  </>
+                                )}
+                              </button>
+                              {confirmDeleteCrewId === crew.id ? (
+                                <div className="flex items-center gap-1 bg-rose-950 border border-rose-700 rounded-md px-1.5 py-0.5">
+                                  <button
+                                    type="button"
+                                    onClick={() => handleDeleteCrew(crew)}
+                                    disabled={isSavingOrg}
+                                    className="text-[10px] font-bold text-rose-300 hover:text-white px-1"
+                                  >
+                                    Sí
+                                  </button>
+                                  <button
+                                    type="button"
+                                    onClick={() => setConfirmDeleteCrewId(null)}
+                                    className="text-[10px] text-slate-400 hover:text-white px-1"
+                                  >
+                                    No
+                                  </button>
+                                </div>
+                              ) : (
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirmDeleteCrewId(crew.id)}
+                                  disabled={isSavingOrg}
+                                  className="p-1 rounded-md bg-rose-950/70 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
+                                  title="Eliminar cuadrilla"
+                                >
+                                  <Trash2 className="w-3.5 h-3.5" />
+                                </button>
+                              )}
+                            </div>
+                          </div>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              </div>
+            )}
           </div>
         </div>
       )}
@@ -1691,16 +2066,62 @@ export const CompanyBulkManagementView: React.FC<CompanyBulkManagementViewProps>
                             <Edit3 className="w-3.5 h-3.5" />
                           </button>
                         )}
-                        {canDel && (
+                        {canBlockOrganization(currentUser, org).allowed && (
                           <button
                             type="button"
-                            onClick={() => handleDeleteOrganization(org)}
+                            onClick={() => handleToggleOrganizationBlock(org)}
                             disabled={isSavingOrg}
-                            className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
-                            title="Eliminar empresa"
+                            className={`inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg text-[11px] font-bold border disabled:opacity-50 ${
+                              org.status === 'activa'
+                                ? 'bg-amber-950/60 hover:bg-amber-900 text-amber-200 border-amber-700'
+                                : 'bg-emerald-950/60 hover:bg-emerald-900 text-emerald-200 border-emerald-700'
+                            }`}
+                            title={org.status === 'activa' ? 'Bloquear / suspender empresa' : 'Activar empresa'}
                           >
-                            <Trash2 className="w-3.5 h-3.5" />
+                            {org.status === 'activa' ? (
+                              <>
+                                <Ban className="w-3.5 h-3.5" />
+                                <span>Bloquear</span>
+                              </>
+                            ) : (
+                              <>
+                                <CheckCircle2 className="w-3.5 h-3.5" />
+                                <span>Activar</span>
+                              </>
+                            )}
                           </button>
+                        )}
+                        {canDel && (
+                          confirmDeleteOrgId === org.id ? (
+                            <div className="flex items-center gap-1 bg-rose-950 border border-rose-700 rounded-lg px-2 py-1">
+                              <span className="text-[10px] text-rose-200 font-semibold">¿Eliminar?</span>
+                              <button
+                                type="button"
+                                onClick={() => handleDeleteOrganization(org)}
+                                disabled={isSavingOrg}
+                                className="text-[10px] font-bold text-rose-300 hover:text-white px-1"
+                              >
+                                Sí
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => setConfirmDeleteOrgId(null)}
+                                className="text-[10px] text-slate-400 hover:text-white px-1"
+                              >
+                                No
+                              </button>
+                            </div>
+                          ) : (
+                            <button
+                              type="button"
+                              onClick={() => setConfirmDeleteOrgId(org.id)}
+                              disabled={isSavingOrg}
+                              className="p-1.5 rounded-lg bg-rose-950/60 hover:bg-rose-900 text-rose-300 border border-rose-800 disabled:opacity-50"
+                              title="Eliminar empresa"
+                            >
+                              <Trash2 className="w-3.5 h-3.5" />
+                            </button>
+                          )
                         )}
                       </div>
                     </div>

@@ -19,6 +19,7 @@ import {
   isTabVisibleForUser,
   isWindowPolicyLockedForRole,
   mapRTDBContractToRental,
+  mapTelemetrySnapshotRaw,
   normalizeHeroTitleScale,
   sanitizeDeviceHardwareId,
   validateRentalDatesAndCost,
@@ -32,7 +33,11 @@ import {
   planScheduledTelemetryPruning,
 } from '../firebase-functions/telemetryCollector';
 import { planLegacyOrganizationBackfill } from '../scripts/migrateLegacyOrganization';
-import { buildTelemetryCsvContentAsync } from '../src/components/HistoricalReportsView';
+import {
+  buildConsolidatedCsvContentAsync,
+  buildTelemetryCsvContentAsync,
+  computeTelemetryWindow,
+} from '../src/components/HistoricalReportsView';
 import { resolveNode3DLiveTelemetry } from '../src/components/Node3DInspectorView';
 import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspectorView';
 import { computeSectionPreviewDiff } from '../src/components/SuperAdminWindowPreview';
@@ -40,6 +45,10 @@ import {
   assignWorkersToCrew,
   buildCrewMemberFromUser,
   belongsToOrganization,
+  canBlockOrganization,
+  canBlockOrDeleteCrew,
+  canBlockOrDeleteIoTDevice,
+  canBlockOrDeleteSite,
   canControlMineAlarm,
   canCreateOrEditOrganization,
   canDeleteOrganization,
@@ -57,6 +66,8 @@ import {
   filterScopedUsers,
   findUserEmailConflictInOrg,
   getAuthorizedOrganizationIds,
+  isDeviceBlocked,
+  isDeviceVisibleToUser,
   isUnassignedDeviceOrg,
   resolveDeviceAssignmentStatus,
   resolveEffectiveOrgId,
@@ -1379,7 +1390,8 @@ async function runTests() {
   assert.equal(canCreateOrEditOrganization(admMs, null).allowed, true, 'Can create new client orgs');
   assert.equal(canCreateOrEditOrganization(admMs, ownedOrgs[1]).allowed, true, 'Can edit client orgs');
   assert.equal(canCreateOrEditOrganization(admMs, ownedOrgs[0]).allowed, false, 'Cannot edit Principal org');
-  assert.equal(canDeleteOrganization(admMs, ownedOrgs[1]).allowed, false, 'Cannot permanently delete orgs');
+  assert.equal(canDeleteOrganization(admMs, ownedOrgs[1]).allowed, true, 'Admin MineSafe can delete client orgs');
+  assert.equal(canDeleteOrganization(admMs, ownedOrgs[0]).allowed, false, 'Admin MineSafe cannot delete Principal org');
   assert.equal(canManageContractsAndPayments(admMs, 'org-gamma', ownedOrgs).allowed, true);
 
   assert.equal(canProvisionUserInOrganization(admMs, 'org-gamma', 'admin', ownedOrgs).allowed, true);
@@ -2596,6 +2608,291 @@ async function runTests() {
   );
 
   console.log('✅ 30. MineSafe Technical Audit Hardening (MS-01 through MS-09) passed');
+
+  // =========================================================================
+  // 31. PII Masking: RUT (last 4 digits) & Email + RBAC Unlock Controls
+  // =========================================================================
+  const {
+    canUnmaskRut,
+    canUnmaskEmail,
+    maskRut,
+    maskEmail,
+    formatRutForViewer,
+    formatEmailForViewer,
+  } = await import('../src/utils/privacyMask');
+
+  // RUT masking preserves only the last 4 alphanumeric characters
+  assert.equal(maskRut('20.776.701-8'), '**.***.701-8', 'Standard 9-digit RUT masks all but last 4 chars');
+  assert.equal(maskRut('18.901.234-5'), '**.***.234-5', 'RUT 18.901.234-5 shows only last 4 digits');
+  assert.equal(maskRut('7.654.321-K'), '*.***.321-K', '8-char RUT with K check digit shows last 4 chars');
+  assert.equal(maskRut('189012345'), '*****2345', 'Unformatted RUT shows only last 4 digits');
+  assert.equal(maskRut('No registrado'), 'No registrado', 'Placeholder RUT is not masked');
+
+  // Email masking hides username prefix & domain body
+  assert.equal(maskEmail('manuelcrisostomo2605@gmail.com'), '******2605@*****.com');
+  assert.equal(maskEmail('lmunoz@empresa.cl'), '**unoz@*******.cl');
+  assert.equal(maskEmail('a@aa.cl'), '*@**.cl');
+
+  // RBAC: RUT unlock ONLY for superadmin & admin_minesafe
+  assert.equal(canUnmaskRut('superadmin'), true);
+  assert.equal(canUnmaskRut('admin_minesafe'), true);
+  assert.equal(canUnmaskRut('admin'), false, 'Company admin MUST NOT unmask RUT');
+  assert.equal(canUnmaskRut('supervisor'), false);
+  assert.equal(canUnmaskRut('operador'), false);
+
+  // RBAC: Email unlock for superadmin, admin_minesafe AND admin (company admin)
+  assert.equal(canUnmaskEmail('superadmin'), true);
+  assert.equal(canUnmaskEmail('admin_minesafe'), true);
+  assert.equal(canUnmaskEmail('admin'), true, 'Company admin CAN unmask email');
+  assert.equal(canUnmaskEmail('supervisor'), false);
+  assert.equal(canUnmaskEmail('operador'), false);
+
+  // formatRutForViewer & formatEmailForViewer enforce RBAC even when isUnlocked=true
+  assert.equal(formatRutForViewer('18.901.234-5', 'superadmin', false), '**.***.234-5');
+  assert.equal(formatRutForViewer('18.901.234-5', 'superadmin', true), '18.901.234-5');
+  assert.equal(formatRutForViewer('18.901.234-5', 'admin_minesafe', true), '18.901.234-5');
+  assert.equal(formatRutForViewer('18.901.234-5', 'admin', true), '**.***.234-5');
+  assert.equal(formatRutForViewer('18.901.234-5', 'supervisor', true), '**.***.234-5');
+
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'admin', false), '**unoz@*******.cl');
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'admin', true), 'lmunoz@empresa.cl');
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'admin_minesafe', true), 'lmunoz@empresa.cl');
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'superadmin', true), 'lmunoz@empresa.cl');
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'supervisor', true), '**unoz@*******.cl');
+  assert.equal(formatEmailForViewer('lmunoz@empresa.cl', 'operador', true), '**unoz@*******.cl');
+
+  // Static audit of PII masking wiring in primary user views
+  const maskedUsersViewSrc = readRepoFile('src/components/UsersManagementView.tsx');
+  const maskedChartUsersSrc = readRepoFile('src/components/InteractiveDeviceChartAndUsers.tsx');
+  const maskedCrewSrc = readRepoFile('src/components/CrewManagementSection.tsx');
+  const maskedDevicesSrc = readRepoFile('src/components/DevicesAndRentalsView.tsx');
+  assert.ok(
+    maskedUsersViewSrc.includes('formatRutForViewer') &&
+      maskedUsersViewSrc.includes('formatEmailForViewer') &&
+      maskedUsersViewSrc.includes('Desbloquear RUTs') &&
+      maskedUsersViewSrc.includes('Desbloquear Correos'),
+    'UsersManagementView wires masked RUT/email display and RBAC unlock toggles'
+  );
+  assert.ok(
+    maskedChartUsersSrc.includes('formatRutForViewer') &&
+      maskedChartUsersSrc.includes('formatEmailForViewer') &&
+      maskedCrewSrc.includes('formatRutForViewer') &&
+      maskedDevicesSrc.includes('formatRutForViewer'),
+    'Directory, Crews, and Device Assignments views wire PII masking'
+  );
+
+  console.log('✅ 31. PII Masking (RUT last 4 digits & Email + RBAC Unlock) passed');
+
+  // -------------------------------------------------------------------------
+  // 32. ENTITY BLOCK/DELETE (EMPRESAS, FAENAS, CUADRILLAS) + RTDB INDEX FALLBACK + CONSOLIDATED CHART
+  // -------------------------------------------------------------------------
+  const testOrgPrincipal: Organization = {
+    id: DEFAULT_ORGANIZATION_ID,
+    name: 'MineSafe Principal',
+    status: 'activa',
+    createdAt: 1000,
+  };
+  const testOrgClient: Organization = {
+    id: 'org-cliente-demo',
+    name: 'Minera Demo Norte',
+    status: 'activa',
+    createdAt: 2000,
+  };
+  const testSite = { id: 'site-demo-1', organizationId: 'org-cliente-demo' };
+
+  // SuperAdmin & Admin MineSafe can block/delete client orgs, sites, and crews
+  assert.equal(canBlockOrganization(sa, testOrgClient).allowed, true);
+  assert.equal(canBlockOrganization(admMs, testOrgClient).allowed, true);
+  assert.equal(canBlockOrganization(sa, testOrgPrincipal).allowed, false, 'Principal org cannot be blocked');
+  assert.equal(canBlockOrganization(admMs, testOrgPrincipal).allowed, false, 'Principal org cannot be blocked');
+  assert.equal(canDeleteOrganization(sa, testOrgClient).allowed, true);
+  assert.equal(canDeleteOrganization(admMs, testOrgClient).allowed, true);
+  assert.equal(canDeleteOrganization(sa, testOrgPrincipal).allowed, false);
+  assert.equal(canDeleteOrganization(admMs, testOrgPrincipal).allowed, false);
+  assert.equal(canBlockOrganization(admB, testOrgClient).allowed, false);
+  assert.equal(canDeleteOrganization(admB, testOrgClient).allowed, false);
+
+  assert.equal(canBlockOrDeleteSite(sa, testSite).allowed, true);
+  assert.equal(canBlockOrDeleteSite(admMs, testSite).allowed, true);
+  assert.equal(canBlockOrDeleteSite(admB, testSite).allowed, false);
+
+  assert.equal(canBlockOrDeleteCrew(sa, 'org-cliente-demo', [testOrgPrincipal, testOrgClient]).allowed, true);
+  assert.equal(canBlockOrDeleteCrew(admMs, 'org-cliente-demo', [testOrgPrincipal, testOrgClient]).allowed, true);
+
+  // RTDB index-missing fallback returns real points with error: null
+  const fallbackResult = await fetchPaginatedTelemetryHistory(
+    'device_38A839E81F84',
+    { startMs: 0, endMs: 1_900_000_000_000 },
+    {
+      fetchPage: async () => {
+        throw new Error(
+          'Index not defined, add ".indexOn": "timestamp", for path "/historial_telemetria/device_38A839E81F84", to the rules'
+        );
+      },
+      fetchUnindexedFallback: async () => [
+        { timestamp: 1795138248362, co: 45, pm25: 25, temperatura: 24.5, humedad: 41 },
+        { timestamp: 1795138258362, co: 48, pm25: 28, temperatura: 24.8, humedad: 40.5 },
+      ],
+    }
+  );
+  assert.equal(fallbackResult.error, null, 'RTDB index error must recover silently via unindexed fallback');
+  assert.equal(fallbackResult.points.length, 2);
+  assert.equal(fallbackResult.points[0].temperatura, 24.5);
+
+  // mapTelemetrySnapshotRaw parses both lowercase RTDB and uppercase ESP32 keys
+  const mappedMixed = mapTelemetrySnapshotRaw(
+    {
+      a: { timestamp: 1795138248362, co: 45, pm25: 25, temperatura: 24.5, humedad: 41 },
+      b: { timestamp_server: 1795138258362, CO: 52, PM2_5: 31, temp: 25.1, hum: 39.2 },
+    },
+    0,
+    1_900_000_000_000
+  );
+  assert.equal(mappedMixed.length, 2);
+  assert.equal(mappedMixed[1].co, 52);
+  assert.equal(mappedMixed[1].pm25, 31);
+  assert.equal(mappedMixed[1].temperatura, 25.1);
+  assert.equal(mappedMixed[1].humedad, 39.2);
+
+  // 'all' telemetry window + consolidated CSV export
+  const allWin = computeTelemetryWindow('all', undefined, undefined, 1795138258362);
+  assert.equal(allWin.key, 'all');
+  assert.equal(allWin.startMs, 0);
+  assert.ok(allWin.endMs >= 1795138258362);
+
+  const consolidatedCsv = await buildConsolidatedCsvContentAsync({
+    points: mappedMixed,
+    deviceId: 'device_38A839E81F84',
+    siteName: 'Faena Central',
+    sectorName: 'Rampa Principal',
+  });
+  assert.ok(
+    consolidatedCsv.includes('Temperatura_C,Humedad_Pct,Gas_MQ2_ADC,Polvo_PM25_ugm3') &&
+      consolidatedCsv.includes('24.5,41,45,25'),
+    'Consolidated CSV exports all 4 sensor variables chronologically'
+  );
+
+  // Static audit of UI controls for block/delete & consolidated chart
+  const reportsConsolidatedSrc = readRepoFile('src/components/HistoricalReportsView.tsx');
+  const sectorsViewSrc = readRepoFile('src/components/MiningSectorsView.tsx');
+  const bulkBlockDeleteSrc = readRepoFile('src/components/CompanyBulkManagementView.tsx');
+  assert.ok(
+    reportsConsolidatedSrc.includes('Gráfico Consolidado') &&
+      reportsConsolidatedSrc.includes('CONSOLIDATED_SERIES'),
+    'HistoricalReportsView renders consolidated multi-variable historical chart'
+  );
+  assert.ok(
+    sectorsViewSrc.includes('Bloquear Faena') && sectorsViewSrc.includes('Eliminar Faena'),
+    'MiningSectorsView provides Block and Delete controls for mining sites'
+  );
+  assert.ok(
+    bulkBlockDeleteSrc.includes('handleToggleOrganizationBlock') &&
+      bulkBlockDeleteSrc.includes('handleToggleSiteBlock') &&
+      bulkBlockDeleteSrc.includes('handleToggleCrewBlock'),
+    'CompanyBulkManagementView provides Block and Delete controls for Empresas, Faenas, and Cuadrillas'
+  );
+
+  console.log('✅ 32. Entity Block/Delete (Empresas/Faenas/Cuadrillas) + RTDB History Fallback + Consolidated Chart passed');
+
+  // ---------------------------------------------------------------------------
+  // 33. SHARED NODE ASSIGNMENT TO ALL ORG USERS & DEVICE LIFECYCLE (BLOCK/EDIT/CHANGE/DELETE)
+  // ---------------------------------------------------------------------------
+  assert.equal(canBlockOrDeleteIoTDevice(sa).allowed, true, 'SuperAdmin can block/edit/change/delete IoT devices');
+  assert.equal(canBlockOrDeleteIoTDevice(admMs).allowed, true, 'Admin MineSafe can block/edit/change/delete IoT devices');
+  assert.equal(canBlockOrDeleteIoTDevice(admA).allowed, false, 'Company Admin cannot block/delete IoT devices');
+  assert.equal(canBlockOrDeleteIoTDevice(monA).allowed, false, 'Supervisor cannot block/delete IoT devices');
+  assert.equal(canBlockOrDeleteIoTDevice(opA).allowed, false, 'Operador cannot block/delete IoT devices');
+
+  const sharedLiveNode = {
+    id: 'device_38A839E81F84',
+    organizationId: DEFAULT_ORGANIZATION_ID,
+    enabled: true,
+    active: true,
+    blocked: false,
+    sharedWithAllAssignedUsers: true,
+    sharedOrganizationIds: [DEFAULT_ORGANIZATION_ID, 'org-b'],
+    assignedUserIds: [opA.id, opB.id],
+  };
+  assert.equal(isDeviceBlocked(sharedLiveNode), false);
+  assert.equal(
+    isDeviceVisibleToUser(sharedLiveNode, opB, 'org-b'),
+    true,
+    'Shared live node assigned to org users is visible to user in org-b'
+  );
+  assert.equal(
+    isDeviceVisibleToUser(sharedLiveNode, admA, 'org-a'),
+    true,
+    'Shared live node with sharedWithAllAssignedUsers=true is visible to user in org-a'
+  );
+
+  // Blocked device is hidden from operational telemetry
+  const blockedLiveNode = { ...sharedLiveNode, blocked: true, enabled: false };
+  assert.equal(isDeviceBlocked(blockedLiveNode), true);
+  assert.equal(
+    isDeviceVisibleToUser(blockedLiveNode, opB, 'org-b'),
+    false,
+    'Blocked IoT device is excluded from operational telemetry for org users'
+  );
+  assert.equal(
+    isDeviceVisibleToUser(blockedLiveNode, sa, 'all'),
+    false,
+    'Blocked IoT device is excluded from active telemetry until unblocked in catalog'
+  );
+
+  // Unshared org-a device remains strictly isolated from org-b
+  const privateOrgADevice = {
+    id: 'NODO_PRIVATE_A',
+    organizationId: 'org-a',
+    enabled: true,
+    blocked: false,
+  };
+  assert.equal(isDeviceVisibleToUser(privateOrgADevice, admA, 'org-a'), true);
+  assert.equal(
+    isDeviceVisibleToUser(privateOrgADevice, opB, 'org-b'),
+    false,
+    'Private unshared device in org-a stays invisible to org-b users'
+  );
+
+  // Explicit per-user assignedDeviceCode grants visibility to that user
+  const userWithAssignedDev: UserProfile = {
+    ...opB,
+    assignedDeviceCode: 'NODO_PRIVATE_A',
+  };
+  assert.equal(
+    isDeviceVisibleToUser(privateOrgADevice, userWithAssignedDev, 'org-b'),
+    true,
+    'User with explicit assignedDeviceCode sees their assigned active device'
+  );
+
+  // Static audit of UI controls & Firebase service functions
+  const panelLifecycleSrc = readRepoFile('src/components/DeviceRegistryAndAssignmentPanel.tsx');
+  const usersDeviceSrc = readRepoFile('src/components/UsersManagementView.tsx');
+  const fbLifecycleSrc = readRepoFile('src/services/firebase.ts');
+  assert.ok(
+    fbLifecycleSrc.includes('export async function toggleIoTDeviceBlockInRTDB') &&
+      fbLifecycleSrc.includes('export async function assignDeviceToAllOrgUsersInRTDB') &&
+      fbLifecycleSrc.includes('export async function replaceDeviceForUsersInRTDB') &&
+      fbLifecycleSrc.includes('export async function updateUserAssignedDeviceInRTDB'),
+    'firebase.ts exports device block, mass org-user assignment, user swap, and per-user device assignment functions'
+  );
+  assert.ok(
+    panelLifecycleSrc.includes('Asignar a usuarios con empresa') &&
+      panelLifecycleSrc.includes('handleToggleBlockDevice') &&
+      panelLifecycleSrc.includes('handleSwapUsersDevice') &&
+      panelLifecycleSrc.includes('Bloquear') &&
+      panelLifecycleSrc.includes('Desbloquear') &&
+      panelLifecycleSrc.includes('Editar') &&
+      panelLifecycleSrc.includes('Cambiar') &&
+      panelLifecycleSrc.includes('Eliminar'),
+    'DeviceRegistryAndAssignmentPanel exposes Assign-All, Edit, Change/Swap, Block/Unblock, and Delete controls'
+  );
+  assert.ok(
+    usersDeviceSrc.includes('onUpdateUserDevice') &&
+      usersDeviceSrc.includes('assignedDeviceCode'),
+    'UsersManagementView exposes per-user assigned device display and swap dropdown'
+  );
+
+  console.log('✅ 33. Shared Node Assignment to Org Users & Device Lifecycle (Block/Edit/Change/Delete) passed');
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

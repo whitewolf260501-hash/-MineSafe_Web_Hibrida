@@ -17,6 +17,7 @@ import {
   HardHat,
   Sparkles,
   Lock,
+  Ban,
 } from 'lucide-react';
 import {
   MiningSite,
@@ -36,7 +37,7 @@ import {
 } from '../data/chileGeography';
 import { soundAlert } from '../services/audioAlert';
 import { DEFAULT_ORGANIZATION, isSectionVisibleForUser } from '../services/firebase';
-import { isAnyAdminRole } from '../utils/accessControl';
+import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 import { CrewManagementSection } from './CrewManagementSection';
 
 interface MiningSectorsViewProps {
@@ -52,6 +53,8 @@ interface MiningSectorsViewProps {
   onSelectSite: (siteId: string) => void;
   onAddSite: (newSite: MiningSite) => void;
   onUpdateSite?: (updatedSite: MiningSite) => void;
+  onToggleSiteBlock?: (site: MiningSite) => void;
+  onDeleteSite?: (siteId: string) => Promise<void> | void;
   onSaveCrew?: (crew: MiningCrew) => Promise<void> | void;
   onDeleteCrew?: (crewId: string, organizationId: string) => Promise<void> | void;
   onNavigateTab: (tab: NavigationTab) => void;
@@ -106,11 +109,14 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
   onSelectSite,
   onAddSite,
   onUpdateSite,
+  onToggleSiteBlock,
+  onDeleteSite,
   onSaveCrew,
   onDeleteCrew,
   onNavigateTab,
 }) => {
   const canManageSites = isAnyAdminRole(currentUser?.role);
+  const canBlockOrDeleteSites = isGlobalMineSafeAdmin(currentUser?.role);
   const showSectorCards = isSectionVisibleForUser(
     'faenas_sector_cards',
     currentUser,
@@ -129,6 +135,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
     currentSite.activeSectors[0]?.id || ''
   );
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
+  const [confirmDeleteSiteId, setConfirmDeleteSiteId] = useState<string | null>(null);
 
   // Modals visibility
   const [showAddSiteModal, setShowAddSiteModal] = useState(false);
@@ -622,6 +629,7 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
                 <optgroup label={`Faenas de la Empresa (${allSites.length})`}>
                   {allSites.map((site) => (
                     <option key={site.id} value={site.id}>
+                      {site.status === 'bloqueada' ? '[BLOQUEADA] ' : ''}
                       {site.isPreloaded ? '★ ' : ''}
                       {site.name} · {site.activeSectors.length} sectores
                     </option>
@@ -660,6 +668,74 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
                       <Users className="w-3.5 h-3.5" />
                       Asignar Cuadrilla
                     </button>
+
+                    {canBlockOrDeleteSites && onToggleSiteBlock && (
+                      <button
+                        type="button"
+                        onClick={() => {
+                          onToggleSiteBlock(currentSite);
+                          soundAlert.playFeedbackBeep();
+                        }}
+                        className={`flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold rounded-lg border transition-colors whitespace-nowrap ${
+                          currentSite.status === 'bloqueada'
+                            ? 'bg-emerald-950/70 hover:bg-emerald-900 text-emerald-200 border-emerald-700'
+                            : 'bg-amber-950/70 hover:bg-amber-900 text-amber-200 border-amber-700'
+                        }`}
+                        title={
+                          currentSite.status === 'bloqueada'
+                            ? 'Desbloquear esta faena minera'
+                            : 'Bloquear esta faena minera'
+                        }
+                      >
+                        {currentSite.status === 'bloqueada' ? (
+                          <>
+                            <CheckCircle2 className="w-3.5 h-3.5" />
+                            <span>Desbloquear Faena</span>
+                          </>
+                        ) : (
+                          <>
+                            <Ban className="w-3.5 h-3.5" />
+                            <span>Bloquear Faena</span>
+                          </>
+                        )}
+                      </button>
+                    )}
+
+                    {canBlockOrDeleteSites && onDeleteSite && (
+                      confirmDeleteSiteId === currentSite.id ? (
+                        <div className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-rose-950 border border-rose-700 text-xs">
+                          <span className="text-rose-200 font-semibold">¿Eliminar faena?</span>
+                          <button
+                            type="button"
+                            onClick={async () => {
+                              await onDeleteSite(currentSite.id);
+                              setConfirmDeleteSiteId(null);
+                              soundAlert.playFeedbackBeep();
+                            }}
+                            className="px-2 py-0.5 rounded bg-rose-700 hover:bg-rose-600 text-white font-bold"
+                          >
+                            Sí
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setConfirmDeleteSiteId(null)}
+                            className="px-2 py-0.5 rounded bg-slate-800 hover:bg-slate-700 text-slate-300 font-semibold"
+                          >
+                            No
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => setConfirmDeleteSiteId(currentSite.id)}
+                          className="flex items-center gap-1.5 px-3 py-1.5 text-xs font-semibold bg-rose-950/70 hover:bg-rose-900 text-rose-200 border border-rose-800 rounded-lg transition-colors whitespace-nowrap"
+                          title="Eliminar faena minera"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Eliminar Faena</span>
+                        </button>
+                      )
+                    )}
                   </>
                 )}
 
@@ -680,6 +756,26 @@ export const MiningSectorsView: React.FC<MiningSectorsViewProps> = ({
             )}
           </div>
         </div>
+
+        {allSites.length > 0 && currentSite.status === 'bloqueada' && (
+          <div className="mb-4 p-3 rounded-xl bg-rose-950/75 border border-rose-700/80 text-rose-200 text-xs flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-2">
+              <Ban className="w-4 h-4 text-rose-400 shrink-0" />
+              <span>
+                <strong>Faena Bloqueada:</strong> La faena <strong>{currentSite.name}</strong> se encuentra temporalmente bloqueada por administración corporativa MineSafe.
+              </span>
+            </div>
+            {canBlockOrDeleteSites && onToggleSiteBlock && (
+              <button
+                type="button"
+                onClick={() => onToggleSiteBlock(currentSite)}
+                className="px-2.5 py-1 rounded-lg bg-emerald-700 hover:bg-emerald-600 text-white font-bold text-[11px]"
+              >
+                Reactivar Faena
+              </button>
+            )}
+          </div>
+        )}
 
         {allSites.length === 0 ? (
           <div className="p-8 bg-slate-950/70 rounded-xl border border-slate-800 text-center space-y-3">

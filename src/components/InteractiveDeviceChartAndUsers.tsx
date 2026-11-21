@@ -14,6 +14,9 @@ import {
   Zap,
   ShieldCheck,
   Eye,
+  EyeOff,
+  Lock,
+  Unlock,
   MapPin,
   Building2,
   IdCard,
@@ -40,6 +43,13 @@ import {
   UserRole,
 } from '../types';
 import { isGlobalMineSafeAdmin } from '../utils/accessControl';
+import {
+  canUnmaskEmail,
+  canUnmaskRut,
+  formatEmailForViewer,
+  formatRutForViewer,
+} from '../utils/privacyMask';
+import { isPlaceholderRut } from '../utils/rut';
 
 interface InteractiveDeviceChartAndUsersProps {
   currentUser?: UserProfile | null;
@@ -101,12 +111,16 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
   const [userSearchQuery, setUserSearchQuery] = useState<string>('');
   const [userRoleFilter, setUserRoleFilter] = useState<'all' | UserRole>('all');
   const [inspectedUser, setInspectedUser] = useState<UserProfile | null>(null);
+  const [revealDirectoryRuts, setRevealDirectoryRuts] = useState<boolean>(false);
+  const [revealDirectoryEmails, setRevealDirectoryEmails] = useState<boolean>(false);
 
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser?.role);
   const isCompanyAdmin = currentUser?.role === 'admin';
   const isSupervisor = currentUser?.role === 'supervisor';
   const isOperador = currentUser?.role === 'operador';
+  const allowRutUnmask = canUnmaskRut(currentUser?.role);
+  const allowEmailUnmask = canUnmaskEmail(currentUser?.role);
   const showUsersPanel = isSuperAdmin ? (canViewSystemUsers ?? true) : Boolean(canViewSystemUsers);
   const effectiveShowWelcomeStats = showWelcomeStats ?? (currentUser?.role !== 'operador');
   const effectiveShowWelcomeDiagnostics = showWelcomeDiagnostics ?? isSuperAdmin;
@@ -1539,6 +1553,40 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             />
           </div>
 
+          {/* PII Unlock Controls (RBAC) */}
+          {(allowEmailUnmask || allowRutUnmask) && (
+            <div className="flex flex-wrap items-center gap-1.5 mt-2.5">
+              {allowEmailUnmask && (
+                <button
+                  type="button"
+                  onClick={() => setRevealDirectoryEmails((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer ${
+                    revealDirectoryEmails
+                      ? 'bg-cyan-950/80 border-cyan-600 text-cyan-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-cyan-700'
+                  }`}
+                >
+                  {revealDirectoryEmails ? <EyeOff className="w-3 h-3" /> : <Unlock className="w-3 h-3 text-cyan-400" />}
+                  <span>{revealDirectoryEmails ? 'Ocultar Correos' : 'Desbloquear Correos'}</span>
+                </button>
+              )}
+              {allowRutUnmask && (
+                <button
+                  type="button"
+                  onClick={() => setRevealDirectoryRuts((prev) => !prev)}
+                  className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-[10px] font-semibold border transition-colors cursor-pointer ${
+                    revealDirectoryRuts
+                      ? 'bg-purple-950/80 border-purple-600 text-purple-200'
+                      : 'bg-slate-950 border-slate-800 text-slate-300 hover:border-purple-700'
+                  }`}
+                >
+                  {revealDirectoryRuts ? <EyeOff className="w-3 h-3" /> : <Unlock className="w-3 h-3 text-purple-400" />}
+                  <span>{revealDirectoryRuts ? 'Ocultar RUTs' : 'Desbloquear RUTs'}</span>
+                </button>
+              )}
+            </div>
+          )}
+
           {/* Role Filter Tabs */}
           <div className="flex flex-wrap items-center gap-1.5 mt-3">
             {(
@@ -1605,10 +1653,10 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
                             )}
                           </div>
                           <span className="text-[11px] text-slate-300 block truncate">
-                            {user.email}
+                            {formatEmailForViewer(user.email, currentUser?.role, revealDirectoryEmails)}
                           </span>
                           <span className="text-[10px] font-mono text-slate-400 block mt-0.5">
-                            RUT: {user.rut || 'No registrado'}
+                            RUT: {formatRutForViewer(user.rut, currentUser?.role, revealDirectoryRuts)}
                           </span>
                         </div>
                       </div>
@@ -1690,19 +1738,49 @@ export const InteractiveDeviceChartAndUsers: React.FC<InteractiveDeviceChartAndU
             </div>
 
             <div className="space-y-2.5 text-xs">
-              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center gap-2.5">
-                <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
-                <div>
-                  <span className="text-[10px] text-slate-400 block">Correo Corporativo</span>
-                  <span className="font-semibold text-white">{inspectedUser.email}</span>
+              <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-2.5">
+                <div className="flex items-center gap-2.5 min-w-0">
+                  <Mail className="w-4 h-4 text-cyan-400 shrink-0" />
+                  <div className="min-w-0">
+                    <span className="text-[10px] text-slate-400 block">Correo Corporativo</span>
+                    <span className="font-semibold text-white truncate block">
+                      {formatEmailForViewer(inspectedUser.email, currentUser?.role, revealDirectoryEmails)}
+                    </span>
+                  </div>
                 </div>
+                {inspectedUser.email && allowEmailUnmask ? (
+                  <button
+                    type="button"
+                    onClick={() => setRevealDirectoryEmails((prev) => !prev)}
+                    className="p-1.5 rounded-lg bg-slate-900 border border-slate-700 text-cyan-300 hover:border-cyan-500 shrink-0"
+                    title={revealDirectoryEmails ? 'Ocultar correo' : 'Desbloquear correo completo'}
+                  >
+                    {revealDirectoryEmails ? <EyeOff className="w-3.5 h-3.5" /> : <Eye className="w-3.5 h-3.5" />}
+                  </button>
+                ) : (
+                  <Lock className="w-3.5 h-3.5 text-slate-500 shrink-0" />
+                )}
               </div>
               <div className="grid grid-cols-2 gap-2.5">
-                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
-                  <span className="text-[10px] text-slate-400 block">RUT</span>
-                  <span className="font-mono font-bold text-slate-200">
-                    {inspectedUser.rut || 'No registrado'}
-                  </span>
+                <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800 flex items-start justify-between gap-2">
+                  <div className="min-w-0">
+                    <span className="text-[10px] text-slate-400 block">RUT</span>
+                    <span className="font-mono font-bold text-slate-200 truncate block">
+                      {formatRutForViewer(inspectedUser.rut, currentUser?.role, revealDirectoryRuts)}
+                    </span>
+                  </div>
+                  {inspectedUser.rut && !isPlaceholderRut(inspectedUser.rut) && allowRutUnmask ? (
+                    <button
+                      type="button"
+                      onClick={() => setRevealDirectoryRuts((prev) => !prev)}
+                      className="p-1 rounded bg-slate-900 border border-slate-700 text-purple-300 hover:border-purple-500 shrink-0"
+                      title={revealDirectoryRuts ? 'Ocultar RUT' : 'Desbloquear RUT completo'}
+                    >
+                      {revealDirectoryRuts ? <EyeOff className="w-3 h-3" /> : <Eye className="w-3 h-3" />}
+                    </button>
+                  ) : (
+                    <Lock className="w-3 h-3 text-slate-500 shrink-0 mt-1" />
+                  )}
                 </div>
                 <div className="p-3 rounded-xl bg-slate-950/80 border border-slate-800">
                   <span className="text-[10px] text-slate-400 block">Rol en Plataforma</span>

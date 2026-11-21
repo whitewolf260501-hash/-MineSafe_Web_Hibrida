@@ -57,6 +57,7 @@ import {
 } from './data/mockData';
 
 import {
+  canBlockOrDeleteSite,
   canControlMineAlarm,
   canModifyTargetUser,
   canProvisionUserInOrganization,
@@ -66,6 +67,8 @@ import {
   filterScopedUsers,
   getAuthorizedOrganizationIds,
   isAnyAdminRole,
+  isDeviceBlocked,
+  isDeviceVisibleToUser,
   isGlobalMineSafeAdmin,
   isOrgAuthorizedForUser,
   isUnassignedDeviceOrg,
@@ -97,6 +100,7 @@ import {
   DEFAULT_ORGANIZATION,
   addUserToRTDB,
   updateUserInRTDB,
+  updateUserAssignedDeviceInRTDB,
   addRentalContractToRTDB,
   updateRentalContractInRTDB,
   recordPaymentInRTDB,
@@ -125,6 +129,7 @@ import {
   loadCachedSites,
   mergeMiningSites,
   saveSiteToRTDB,
+  deleteSiteFromRTDB,
   subscribeToRTDBSites,
   loadCachedCrews,
   mergeMiningCrews,
@@ -243,7 +248,7 @@ export default function App({
     allowInitialPrincipalDefaults ? 'device_38A839E81F84' : ''
   );
   const [telemetryWindow, setTelemetryWindow] = useState<TelemetryRangeWindow>(() =>
-    computeTelemetryWindow('24h')
+    computeTelemetryWindow('all')
   );
   const [isSimulating, setIsSimulating] = useState<boolean>(false);
   const [showLoginModal, setShowLoginModal] = useState<boolean>(false);
@@ -444,13 +449,22 @@ export default function App({
   const scopedDeviceIdsKey = useMemo(() => {
     const regList = mergedRegisteredDevices;
     const ids = regList
-      .filter((r) => r.enabled !== false && matchesOrg(r.organizationId))
+      .filter((r) => isDeviceVisibleToUser(r, currentUser, effectiveOrgId))
       .map((r) => r.id);
+    if (currentUser?.assignedDeviceCode) {
+      const assignedReg = regList.find((r) => r.id === currentUser.assignedDeviceCode);
+      if (!assignedReg || !isDeviceBlocked(assignedReg)) {
+        ids.push(currentUser.assignedDeviceCode);
+      }
+    }
     if (ids.length === 0 && (effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id)) {
-      ids.push('device_38A839E81F84');
+      const defaultReg = regList.find((r) => r.id === 'device_38A839E81F84');
+      if (!defaultReg || !isDeviceBlocked(defaultReg)) {
+        ids.push('device_38A839E81F84');
+      }
     }
     return Array.from(new Set(ids)).sort().join(',');
-  }, [mergedRegisteredDevices, matchesOrg, effectiveOrgId]);
+  }, [mergedRegisteredDevices, currentUser, effectiveOrgId]);
 
   const subscriptionScope = useMemo<RTDBSubscriptionScope>(
     () => ({
@@ -734,6 +748,13 @@ export default function App({
           deviceCategory: reg.category,
           parentGatewayId: reg.parentGatewayId || existing.parentGatewayId,
           localIp: reg.localIp || existing.localIp,
+          blocked: isDeviceBlocked(reg),
+          enabled: !isDeviceBlocked(reg),
+          blockedAt: reg.blockedAt ?? existing.blockedAt,
+          blockedBy: reg.blockedBy ?? existing.blockedBy,
+          assignedUserIds: reg.assignedUserIds ?? existing.assignedUserIds,
+          sharedOrganizationIds: reg.sharedOrganizationIds ?? existing.sharedOrganizationIds,
+          sharedWithAllAssignedUsers: reg.sharedWithAllAssignedUsers ?? existing.sharedWithAllAssignedUsers,
           type: reg.category === 'sensor' || reg.category === 'nodo' ? 'multigas_portatil' : 'estacion_fija',
         };
       }
@@ -763,6 +784,13 @@ export default function App({
         deviceCategory: reg.category,
         parentGatewayId: reg.parentGatewayId,
         localIp: reg.localIp,
+        blocked: isDeviceBlocked(reg),
+        enabled: !isDeviceBlocked(reg),
+        blockedAt: reg.blockedAt,
+        blockedBy: reg.blockedBy,
+        assignedUserIds: reg.assignedUserIds,
+        sharedOrganizationIds: reg.sharedOrganizationIds,
+        sharedWithAllAssignedUsers: reg.sharedWithAllAssignedUsers,
         metrics: {
           temperatura: 0,
           humedad: 0,
@@ -777,24 +805,26 @@ export default function App({
       };
     };
 
+    const primaryReg = regList.find((r) => r.id === INITIAL_SINGLE_DEVICE.id);
+    const primaryBlocked = Boolean(primaryReg && isDeviceBlocked(primaryReg));
     const primaryLiveFallback =
-      rtdbMap.get(INITIAL_SINGLE_DEVICE.id) ||
-      devices.find((d) => !isUnassignedDeviceOrg(d.organizationId) && matchesOrg(d.organizationId)) ||
-      INITIAL_SINGLE_DEVICE;
+      (!primaryBlocked ? rtdbMap.get(INITIAL_SINGLE_DEVICE.id) : undefined) ||
+      devices.find((d) => isDeviceVisibleToUser(d, currentUser, effectiveOrgId)) ||
+      (!primaryBlocked ? INITIAL_SINGLE_DEVICE : undefined);
 
     if (platformConfig.onlyShowRegisteredDevices) {
-      const enabledRegs = regList.filter(
-        (r) => r.enabled !== false && !isUnassignedDeviceOrg(r.organizationId) && matchesOrg(r.organizationId)
+      const enabledRegs = regList.filter((r) =>
+        isDeviceVisibleToUser(r, currentUser, effectiveOrgId)
       );
       const effectiveRegs =
         enabledRegs.length > 0
           ? enabledRegs
           : effectiveOrgId === 'all'
-          ? regList.filter((r) => !isUnassignedDeviceOrg(r.organizationId)).slice(0, 1)
+          ? regList.filter((r) => !isDeviceBlocked(r) && !isUnassignedDeviceOrg(r.organizationId)).slice(0, 1)
           : [];
       const mapped = effectiveRegs.map(buildFromRegistry);
       if (mapped.length > 0) return mapped;
-      return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
+      return primaryLiveFallback && (effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id)
         ? [primaryLiveFallback]
         : [];
     }
@@ -835,19 +865,26 @@ export default function App({
         deviceCategory: reg.category,
         parentGatewayId: reg.parentGatewayId || d.parentGatewayId,
         localIp: reg.localIp || d.localIp,
+        blocked: isDeviceBlocked(reg),
+        enabled: !isDeviceBlocked(reg),
+        blockedAt: reg.blockedAt ?? d.blockedAt,
+        blockedBy: reg.blockedBy ?? d.blockedBy,
+        assignedUserIds: reg.assignedUserIds ?? d.assignedUserIds,
+        sharedOrganizationIds: reg.sharedOrganizationIds ?? d.sharedOrganizationIds,
+        sharedWithAllAssignedUsers: reg.sharedWithAllAssignedUsers ?? d.sharedWithAllAssignedUsers,
       };
     });
     const missingEnabled = regList
-      .filter((r) => r.enabled !== false && !isUnassignedDeviceOrg(r.organizationId) && !rtdbMap.has(r.id))
+      .filter((r) => !isDeviceBlocked(r) && !rtdbMap.has(r.id) && isDeviceVisibleToUser(r, currentUser, effectiveOrgId))
       .map(buildFromRegistry);
-    const combined = [...enrichedRTDB, ...missingEnabled].filter(
-      (d) => !isUnassignedDeviceOrg(d.organizationId) && matchesOrg(d.organizationId)
+    const combined = [...enrichedRTDB, ...missingEnabled].filter((d) =>
+      isDeviceVisibleToUser(d, currentUser, effectiveOrgId)
     );
     if (combined.length > 0) return combined;
-    return effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id
+    return primaryLiveFallback && (effectiveOrgId === 'all' || effectiveOrgId === DEFAULT_ORGANIZATION.id)
       ? [primaryLiveFallback]
       : [];
-  }, [devices, mergedRegisteredDevices, sites, platformConfig.onlyShowRegisteredDevices, matchesOrg, effectiveOrgId]);
+  }, [devices, mergedRegisteredDevices, sites, platformConfig.onlyShowRegisteredDevices, currentUser, effectiveOrgId]);
 
   // Mantener siempre un dispositivo activo válido dentro de los dispositivos visibles
   useEffect(() => {
@@ -1932,6 +1969,55 @@ export default function App({
     });
   }, [currentUser, effectiveOrgId, organizations, showAlarmFeedback]);
 
+  const handleToggleSiteBlock = useCallback((site: MiningSite) => {
+    const check = canBlockOrDeleteSite(currentUser, site);
+    if (!check.allowed) {
+      showAlarmFeedback(check.reason || 'Permisos insuficientes para bloquear o reactivar faenas.', 'error');
+      return;
+    }
+    const nextStatus: 'activa' | 'bloqueada' = site.status === 'bloqueada' ? 'activa' : 'bloqueada';
+    const updatedSite: MiningSite = { ...site, status: nextStatus };
+    setSites((prev) => prev.map((s) => (s.id === updatedSite.id ? updatedSite : s)));
+    setCurrentSite((prev) => (prev.id === updatedSite.id ? updatedSite : prev));
+    saveSiteToRTDB(updatedSite)
+      .then(() => {
+        showAlarmFeedback(
+          nextStatus === 'bloqueada'
+            ? `Faena "${site.name}" bloqueada correctamente.`
+            : `Faena "${site.name}" desbloqueada y reactivada.`,
+          'success'
+        );
+      })
+      .catch((err: any) => {
+        showAlarmFeedback(err?.message || 'Error al actualizar el estado de la faena en RTDB.', 'error');
+      });
+  }, [currentUser, showAlarmFeedback]);
+
+  const handleDeleteSite = useCallback(async (siteId: string) => {
+    const targetSite = sites.find((s) => s.id === siteId) || { id: siteId };
+    const check = canBlockOrDeleteSite(currentUser, targetSite);
+    if (!check.allowed) {
+      const msg = check.reason || 'Permisos insuficientes para eliminar faenas mineras.';
+      showAlarmFeedback(msg, 'error');
+      throw new Error(msg);
+    }
+    await deleteSiteFromRTDB(siteId, currentUser);
+    setSites((prev) => {
+      const remaining = prev.filter((s) => s.id !== siteId);
+      setCurrentSite((curr) =>
+        curr.id === siteId
+          ? resolveScopedCurrentSite(
+              remaining,
+              undefined,
+              effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId
+            )
+          : curr
+      );
+      return remaining;
+    });
+    showAlarmFeedback('Faena minera eliminada correctamente.', 'success');
+  }, [currentUser, effectiveOrgId, sites, showAlarmFeedback]);
+
   const handleSaveCrew = useCallback(async (crewPayload: MiningCrew) => {
     const fallbackOrg = effectiveOrgId === 'all' ? DEFAULT_ORGANIZATION.id : effectiveOrgId;
     const targetOrg = crewPayload.organizationId || fallbackOrg;
@@ -2118,6 +2204,39 @@ export default function App({
       throw err;
     }
   }, [currentUser, organizations, usersList, showAlarmFeedback]);
+
+  const handleUsersDeviceUpdated = useCallback(
+    (updates: Array<{ userId: string; assignedDeviceCode: string | null }>) => {
+      if (!updates || updates.length === 0) return;
+      const updateMap = new Map(updates.map((u) => [u.userId, u.assignedDeviceCode]));
+      setUsersList((prev) =>
+        prev.map((u) =>
+          updateMap.has(u.id)
+            ? { ...u, assignedDeviceCode: updateMap.get(u.id) || undefined }
+            : u
+        )
+      );
+      setCurrentUser((prev) =>
+        updateMap.has(prev.id)
+          ? { ...prev, assignedDeviceCode: updateMap.get(prev.id) || undefined }
+          : prev
+      );
+    },
+    []
+  );
+
+  const handleUpdateUserDevice = useCallback(
+    async (userId: string, nextDeviceId: string | null) => {
+      if (!isGlobalMineSafeAdmin(currentUser.role)) {
+        const msg = 'Solo SuperAdmin o Admin MineSafe puede asignar o cambiar el dispositivo de un usuario.';
+        showAlarmFeedback(msg, 'error');
+        throw new Error(msg);
+      }
+      const savedCode = await updateUserAssignedDeviceInRTDB(userId, nextDeviceId, currentUser);
+      handleUsersDeviceUpdated([{ userId, assignedDeviceCode: savedCode }]);
+    },
+    [currentUser, handleUsersDeviceUpdated, showAlarmFeedback]
+  );
 
   const handleUpdateUserOrganization = useCallback(async (userId: string, targetOrgId: string) => {
     if (!isGlobalMineSafeAdmin(currentUser.role)) {
@@ -2759,6 +2878,7 @@ export default function App({
                     registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== devId),
                   }));
                 }}
+                onUsersDeviceUpdated={handleUsersDeviceUpdated}
               />
             )}
 
@@ -2797,6 +2917,8 @@ export default function App({
                 }}
                 onAddSite={handleAddSite}
                 onUpdateSite={handleUpdateSite}
+                onToggleSiteBlock={handleToggleSiteBlock}
+                onDeleteSite={handleDeleteSite}
                 onSaveCrew={handleSaveCrew}
                 onDeleteCrew={handleDeleteCrew}
                 onNavigateTab={handleSelectTab}
@@ -2808,11 +2930,15 @@ export default function App({
                 currentUser={currentUser}
                 usersList={scopedUsers}
                 organizations={scopedOrganizations}
+                catalogDevices={mergedRegisteredDevices}
                 activeOrganizationId={effectiveOrgId}
                 onAddUser={handleAddUser}
                 onUpdateUserRole={handleUpdateUserRole}
                 onUpdateUserOrganization={
                   isGlobalMineSafeAdmin(currentUser.role) ? handleUpdateUserOrganization : undefined
+                }
+                onUpdateUserDevice={
+                  isGlobalMineSafeAdmin(currentUser.role) ? handleUpdateUserDevice : undefined
                 }
                 onToggleUserStatus={handleToggleUserStatus}
               />
@@ -2849,9 +2975,11 @@ export default function App({
                   setSites((prev) => mergeMiningSites(prev, [savedSite]));
                   setCurrentSite((prev) => (prev.id === savedSite.id ? savedSite : prev));
                 }}
+                onSiteDeleted={handleDeleteSite}
                 onCrewSaved={(savedCrew) => {
                   setCrews((prev) => mergeMiningCrews(prev, [savedCrew]));
                 }}
+                onCrewDeleted={handleDeleteCrew}
                 onDeviceHierarchySaved={(savedReg) => {
                   setCatalogDevices((prev) => {
                     const exists = prev.some((d) => d.id === savedReg.id);
@@ -2877,6 +3005,7 @@ export default function App({
                     registeredDevices: (prev.registeredDevices || []).filter((d) => d.id !== devId),
                   }));
                 }}
+                onUsersDeviceUpdated={handleUsersDeviceUpdated}
                 onBulkImportCompleted={(result: BulkImportExecutionResult) => {
                   if (result.createdUsers.length > 0) {
                     setUsersList((prev) => {
@@ -2986,6 +3115,7 @@ export default function App({
                 onCatalogDeviceDeleted={(devId) => {
                   setCatalogDevices((prev) => prev.filter((d) => d.id !== devId));
                 }}
+                onUsersDeviceUpdated={handleUsersDeviceUpdated}
               />
             )}
 

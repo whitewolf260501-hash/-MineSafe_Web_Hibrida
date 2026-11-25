@@ -2,6 +2,7 @@
 #include <WiFi.h>
 #include <esp_now.h>
 #include <esp_wifi.h>
+#include <time.h>
 #include <DHTesp.h>
 #include <TFT_eSPI.h>
 #include "driver/i2s.h"
@@ -10,7 +11,16 @@
 #include <addons/RTDBHelper.h>
 #include <MD_MAX72XX.h>
 #include <SPI.h>
-#include "secrets.h"
+
+// =======================================
+// CREDENCIALES EXTERNAS (NO EMBEBIDAS)
+// =======================================
+// Copia "secrets.example.h" como "secrets.h" (ignorado por .gitignore).
+#if __has_include("secrets.h")
+  #include "secrets.h"
+#else
+  #error "Falta secrets.h en firmware/nodo_esp32/. Copia secrets.example.h a secrets.h con tus credenciales locales."
+#endif
 
 // =======================================
 // IDENTIFICADOR Y RED (FIREBASE & WIFI)
@@ -18,10 +28,10 @@
 const char NODE_ID[24] = "device_38A839E81F84";
 #define DISPOSITIVO_PATH "/dispositivos/device_38A839E81F84"
 
-// Las constantes WIFI_SSID, WIFI_PASSWORD, FIREBASE_HOST y FIREBASE_AUTH
-// se cargan desde "secrets.h" (ver plantilla en "secrets.example.h").
-
 #define ESPNOW_DEFAULT_CHANNEL 11
+
+const char* NTP_SERVER = "pool.ntp.org";
+const char* TZ_CHILE   = "CLT3CLST,M9.1.0/0,M4.1.0/0";
 
 FirebaseData fbdoNode;
 FirebaseData fbdoControl;
@@ -57,7 +67,7 @@ FirebaseConfig fbConfig;
 MD_MAX72XX mx = MD_MAX72XX(HARDWARE_TYPE, DATA_PIN, CLK_PIN, CS_PIN, MAX_DEVICES);
 
 // =======================================
-// UMBRALES Y CALIBRACION
+// UMBRALES Y CALIBRACION (NO ALTERADOS)
 // =======================================
 #define UMBRAL_MQ2_PRECAUCION  350
 #define UMBRAL_MQ2_CRITICO     500
@@ -142,6 +152,45 @@ float ultimaTempCache = 0.0f;
 int ultimaHumCache = 0;
 bool tieneCacheValidoDHT = false;
 uint8_t fallosConsecutivosDHT = 0;
+
+// =======================================
+// INICIALIZACION SEGURA DE FIREBASE AUTH
+// =======================================
+void iniciarFirebaseSeguro() {
+  fbConfig.database_url = FIREBASE_HOST;
+
+#ifdef FIREBASE_USE_LEGACY_TOKEN
+  // Modo de transición deprecado: deshabilitar una vez activadas cuentas IoT en Firebase Auth
+  fbConfig.signer.tokens.legacy_token = FIREBASE_AUTH;
+#else
+  // Autenticación segura con cuenta dedicada de dispositivo en Firebase Auth (ID Token rotativo)
+  fbConfig.api_key = FIREBASE_API_KEY;
+  auth.user.email = FIREBASE_DEVICE_EMAIL;
+  auth.user.password = FIREBASE_DEVICE_PASSWORD;
+  fbConfig.token_status_callback = tokenStatusCallback;
+#endif
+
+  fbdoNode.setBSSLBufferSize(4096, 1024);
+  fbdoControl.setBSSLBufferSize(4096, 1024);
+  Firebase.begin(&fbConfig, &auth);
+  Firebase.reconnectWiFi(true);
+}
+
+// =======================================
+// HORA NTP
+// =======================================
+void iniciarHoraNTP() {
+  configTzTime(TZ_CHILE, NTP_SERVER);
+}
+
+bool obtenerFechaHoraActual(char* buf, size_t len) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 200)) {
+    return false;
+  }
+  strftime(buf, len, "%Y-%m-%d %H:%M:%S", &timeinfo);
+  return true;
+}
 
 // =======================================
 // FUNCIONES ESP-NOW
@@ -352,7 +401,6 @@ void actualizarMatrizAlarma(bool alarmaActiva, int valorGas, float valorPm25) {
   static unsigned long ultimoParpadeo = 0;
   static bool estadoParpadeo = false;
 
-  // 1. NIVEL PELIGROSO (Alarma o Crítico) -> Barra completa parpadeando
   if (alarmaActiva || valorGas >= UMBRAL_MQ2_CRITICO || valorPm25 >= UMBRAL_PM25_CRITICO) {
     if (millis() - ultimoParpadeo >= 300) {
       ultimoParpadeo = millis();
@@ -371,7 +419,6 @@ void actualizarMatrizAlarma(bool alarmaActiva, int valorGas, float valorPm25) {
       mx.clear();
     }
   }
-  // 2. NIVEL MODERADO (Precaución) -> Barra completa fija encendida
   else if ((valorGas >= UMBRAL_MQ2_PRECAUCION && valorGas < UMBRAL_MQ2_CRITICO) ||
            (valorPm25 >= UMBRAL_PM25_PRECAUCION && valorPm25 < UMBRAL_PM25_CRITICO)) {
     mx.control(MD_MAX72XX::INTENSITY, 10);
@@ -381,7 +428,6 @@ void actualizarMatrizAlarma(bool alarmaActiva, int valorGas, float valorPm25) {
       }
     }
   }
-  // 3. NIVEL ÓPTIMO (Seguro) -> Barra completamente apagada
   else {
     mx.control(MD_MAX72XX::INTENSITY, 0);
     mx.clear();
@@ -533,7 +579,25 @@ bool subirDatosAFirebase(const char* idDispositivo, uint32_t msgId, int co, floa
     jsonHist.set("temperatura", t);
     jsonHist.set("humedad", h);
     jsonHist.set("msgId", (int)msgId);
-    Firebase.RTDB.push(&fbdoNode, pathHistorial.c_str(), &jsonHist);
+
+    char fechaHoraStr[24];
+    if (obtenerFechaHoraActual(fechaHoraStr, sizeof(fechaHoraStr))) {
+      jsonHist.set("fecha_hora", fechaHoraStr);
+      time_t ahoraEpoch = time(nullptr);
+      if (ahoraEpoch > 0) {
+        jsonHist.set("timestamp_unix", (int)ahoraEpoch);
+      }
+    } else {
+      jsonHist.set("fecha_hora", "SIN_SINCRONIZAR_NTP");
+      jsonHist.set("uptime_ms", (int)millis());
+    }
+
+    Serial.printf("[HISTORIAL] Intentando guardar en %s (MsgID: %lu)...\n", pathHistorial.c_str(), (unsigned long)msgId);
+    if (Firebase.RTDB.push(&fbdoNode, pathHistorial.c_str(), &jsonHist)) {
+      Serial.printf("[HISTORIAL OK] Guardado en %s (Clave: %s)\n", pathHistorial.c_str(), fbdoNode.pushName().c_str());
+    } else {
+      Serial.printf("[HISTORIAL ERROR] %s\n", fbdoNode.errorReason().c_str());
+    }
   }
   return true;
 }
@@ -607,12 +671,10 @@ void setup() {
   pinMode(PM25_LED_PIN, OUTPUT);
   digitalWrite(PM25_LED_PIN, HIGH);
 
-  // Inicialización de la Pantalla TFT
   tft.init();
   tft.setRotation(1);
   tft.fillScreen(COLOR_BG);
 
-  // Inicialización de la Matriz LED MAX7219
   mx.begin();
   mx.control(MD_MAX72XX::INTENSITY, 0);
   mx.clear();
@@ -634,12 +696,8 @@ void setup() {
   inicializarEspNowMesh();
 
   if (WiFi.status() == WL_CONNECTED) {
-    fbConfig.database_url = FIREBASE_HOST;
-    fbConfig.signer.tokens.legacy_token = FIREBASE_AUTH;
-    fbdoNode.setBSSLBufferSize(4096, 1024);
-    fbdoControl.setBSSLBufferSize(4096, 1024);
-    Firebase.begin(&fbConfig, &auth);
-    Firebase.reconnectWiFi(true);
+    iniciarHoraNTP();
+    iniciarFirebaseSeguro();
   } else {
     fijarCanalEspNow(ESPNOW_DEFAULT_CHANNEL);
   }
@@ -653,7 +711,6 @@ void loop() {
   procesarPaqueteMeshVecino();
   sincronizarOrdenDesdeWeb();
 
-  // Permitir la actualización continua del parpadeo de la matriz sin bloquear
   actualizarMatrizAlarma(estadoSirenaActiva, ultimoMQ2Medido, ultimoPM25Medido);
 
   if (digitalRead(BOTON_MANUAL) == LOW) {

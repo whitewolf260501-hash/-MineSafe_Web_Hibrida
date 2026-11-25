@@ -1,27 +1,15 @@
-# Firmware Nodo ESP32 — MineSafe
+# Firmware Nodo Físico ESP32 — MineSafe (`device_38A839E81F84`)
 
-Firmware utilizado en el prototipo de nodo minero ESP32 con telemetría híbrida (Wi-Fi + Firebase RTDB y respaldo en malla ESP-NOW), control remoto de alarma (`comando_web`), pantalla TFT y barra luminosa LED MAX7219.
+Firmware del nodo minero físico ESP32 con telemetría híbrida (Wi-Fi + Firebase RTDB y respaldo en malla ESP-NOW), registro autónomo en `/dispositivos/device_38A839E81F84/historial` con hora NTP (`fecha_hora` y `timestamp_unix`), control remoto de alarma (`comando_web`), pantalla TFT, sirena I2S, baliza 12V y barra luminosa LED MAX7219.
 
-## Requisitos de compilación
-
-Completar con las versiones exactas instaladas en el IDE donde se compila el prototipo:
-
-- **Placa:** `[completar, ej. ESP32 Dev Module / DOIT ESP32 DEVKIT V1]`
-- **Core Arduino-ESP32:** `[completar versión]`
-- **Firebase_ESP_Client (Mobizt):** `[completar versión]`
-- **DHTesp:** `[completar versión]`
-- **TFT_eSPI:** `[completar versión]`
-- **MD_MAX72XX:** `[completar versión]`
-- **Configuración de pines del display (`User_Setup.h`):** `[completar o adjuntar archivo]`
-- **Estado:** versión usada en el prototipo de la defensa.
-
-## Configuración de credenciales locales
+## Seguridad de credenciales (Punto 12)
 
 1. Copiar `secrets.example.h` como `secrets.h` dentro de esta misma carpeta (`firmware/nodo_esp32/secrets.h`).
-2. Completar `WIFI_SSID`, `WIFI_PASSWORD`, `FIREBASE_HOST` y `FIREBASE_AUTH`.
-3. `secrets.h` está listado en `.gitignore` para no exponer contraseñas ni tokens en el repositorio.
+2. Completar `WIFI_SSID`, `WIFI_PASSWORD`, `FIREBASE_HOST`, `FIREBASE_API_KEY`, `FIREBASE_DEVICE_EMAIL` y `FIREBASE_DEVICE_PASSWORD`.
+3. `secrets.h` está bloqueado en `.gitignore` para nunca exponer contraseñas ni tokens en el repositorio.
+4. Por defecto el firmware autentica contra **Firebase Authentication** (cuenta dedicada de dispositivo con ID Token rotativo), eliminando el uso de `legacy_token` (Database Secret). Si necesitas un despliegue gradual, puedes habilitar temporalmente `#define FIREBASE_USE_LEGACY_TOKEN` en `secrets.h` y revocar el token legado al finalizar la migración.
 
-## Asignación de pines y periféricos
+## Asignación de pines y periféricos (sin alteraciones)
 
 | Periférico | GPIO | Descripción |
 |---|---|---|
@@ -33,8 +21,8 @@ Completar con las versiones exactas instaladas en el IDE donde se compila el pro
 | Matriz LED MAX7219 (`CLK` / `DIN` / `CS`) | `19` / `21` / `17` | 4 módulos en cascada (`8x32`, `FC16_HW`) |
 | Botón manual / Botón ventanas | `0` / `4` | Silencio/armado local y cambio de vista TFT |
 
-## Umbrales configurados (alineados con la plataforma web)
+## Umbrales locales de seguridad (intactos)
 
-- **MQ-2 (ADC):** Precaución `350` / Crítico `500` *(Preventivo web: `200`)*
-- **PM2.5 (`µg/m³`):** Precaución `55` / Crítico `150` *(Preventivo web: `30`)*
+- **MQ-2 (ADC):** Precaución `350` / Crítico `500`
+- **PM2.5 (`µg/m³`):** Precaución `55.0` / Crítico `150.0`
 - **Control remoto desde web:** lee `/dispositivos/device_38A839E81F84/comando_web` (`"ENCENDER"` / `"APAGAR"`), responde `"PROCESADO_ON"` / `"PROCESADO_OFF"` y difunde la orden por ESP-NOW (`tipo = 2`, destino `"ALL"`).

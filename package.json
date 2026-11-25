@@ -17,9 +17,10 @@
     "test:p013": "tsx tests/test_p013_access_and_landing.ts",
     "test:audit": "tsx tests/test_audit_stabilization.ts",
     "test:p031": "tsx tests/test_p031_comprehensive.ts",
+    "test:p085": "tsx tests/test_p085_security_rules_and_credentials.ts",
     "test:rules": "eslint firestore.rules && node -e \"JSON.parse(require('fs').readFileSync('database.rules.json','utf8')); console.log('database.rules.json OK');\"",
     "validate:firebase": "npm run test:rules && node -e \"JSON.parse(require('fs').readFileSync('firebase.json','utf8')); console.log('firebase.json OK');\"",
-    "test": "npm run test:alerts && npm run test:p013 && npm run test:audit && npm run test:p031"
+    "test": "npm run test:alerts && npm run test:p013 && npm run test:audit && npm run test:p031 && npm run test:p085"
   },
   "dependencies": {
     "@tailwindcss/vite": "^4.3.3",

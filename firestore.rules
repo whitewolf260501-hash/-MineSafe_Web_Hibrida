@@ -56,7 +56,7 @@ service cloud.firestore {
         data.keys().hasOnly(['uid', 'email', 'role', 'createdAt']) &&
         isValidId(data.uid) &&
         data.email is string && data.email.size() >= 3 && data.email.size() <= 200 &&
-        data.role in ['superadmin', 'admin'] &&
+        data.role in ['superadmin', 'admin_minesafe', 'admin'] &&
         data.createdAt is timestamp;
     }
 

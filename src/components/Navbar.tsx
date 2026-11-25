@@ -166,6 +166,16 @@ export const Navbar: React.FC<NavbarProps> = ({
 
   const navLinks: { id: NavigationTab; label: string; shortLabel: string; icon: React.ReactNode; badge?: number }[] = [
     ...allStandardLinks.filter((item) => isTabVisibleForUser(item.id, currentUser, platformConfig)),
+    ...(isGlobalAdmin
+      ? [
+          {
+            id: 'auditoria_seguridad' as NavigationTab,
+            label: 'Seguridad y Legal',
+            shortLabel: 'Seguridad',
+            icon: <ShieldCheck className="w-4 h-4 shrink-0 text-emerald-400" />,
+          },
+        ]
+      : []),
     ...(isSuperAdmin
       ? [
           {

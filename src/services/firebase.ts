@@ -83,7 +83,14 @@ import {
   AlertAttachment,
   WorkerAssignment,
   CrewMember,
-  MiningCrew
+  MiningCrew,
+  SecurityAuditEvent,
+  SecurityAuditAction,
+  SecurityAuditSeverity,
+  CybersecurityIncident,
+  CybersecurityIncidentCategory,
+  CybersecurityIncidentSeverity,
+  CybersecurityIncidentStatus
 } from '../types';
 import {
   assertActiveSession,
@@ -122,6 +129,12 @@ import {
   expandHierarchyRowsToEntities,
 } from '../utils/bulkCompanyImport';
 import { isPlaceholderRut, validateChileanRut } from '../utils/rut';
+import {
+  CURRENT_LEGAL_CONSENT_VERSION,
+  buildAnonymizedUserData,
+  canAnonymizeUserPII,
+  canViewSecurityAuditTab,
+} from '../utils/securityCompliance';
 import {
   CURRENT_PASSWORD_POLICY_VERSION,
   validatePasswordPolicy,
@@ -585,6 +598,14 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
       typeof data?.passwordPolicyVersion === 'number' ? data.passwordPolicyVersion : undefined,
     passwordUpdatedAt:
       typeof data?.passwordUpdatedAt === 'number' ? data.passwordUpdatedAt : undefined,
+    legalConsentVersion:
+      typeof data?.legalConsentVersion === 'string' ? data.legalConsentVersion : undefined,
+    legalConsentAcceptedAt:
+      typeof data?.legalConsentAcceptedAt === 'number' ? data.legalConsentAcceptedAt : undefined,
+    anonymizedAt:
+      typeof data?.anonymizedAt === 'number' ? data.anonymizedAt : undefined,
+    anonymizedBy:
+      typeof data?.anonymizedBy === 'string' ? data.anonymizedBy : undefined,
   };
 }
 
@@ -4117,6 +4138,9 @@ export function isTabVisibleForUser(
   if (tab === 'superadmin_panel' || tab === 'superadmin_vistas' || tab === 'superadmin_docs') {
     return user.role === 'superadmin';
   }
+  if (tab === 'auditoria_seguridad') {
+    return isGlobalMineSafeAdmin(user.role);
+  }
   if (user.role === 'superadmin') {
     return true;
   }
@@ -7211,6 +7235,351 @@ export async function executeBulkCompanyImport(params: {
     errors,
   };
 }
+
+// ============================================================================
+// SEGURIDAD, AUDITORÍA ISO 27001, LEY 19.628 / 21.719 (ARCOP) Y LEY 21.663
+// ============================================================================
+
+export async function logSecurityAuditEventInRTDB(
+  input: {
+    action: SecurityAuditAction;
+    severity?: SecurityAuditSeverity;
+    summary: string;
+    organizationId?: string;
+    targetType?: string;
+    targetId?: string;
+    targetLabel?: string;
+    metadata?: Record<string, string | number | boolean>;
+    anonymousEmail?: string;
+  },
+  actingUser?: UserProfile | null
+): Promise<SecurityAuditEvent | null> {
+  const now = Date.now();
+  const eventId = `aud_${now}_${Math.random().toString(36).slice(2, 8)}`;
+  const event: SecurityAuditEvent = {
+    id: eventId,
+    timestamp: now,
+    fechaHora: new Date(now).toISOString(),
+    action: input.action,
+    severity: input.severity || 'info',
+    actorId: actingUser?.id || 'anonymous',
+    actorName: actingUser?.name || input.anonymousEmail || 'Acceso Público / Sin Sesión',
+    actorEmail: actingUser?.email || input.anonymousEmail || 'sin-correo',
+    actorRole: actingUser?.role || 'anonimo',
+    organizationId: input.organizationId || actingUser?.organizationId || DEFAULT_ORGANIZATION_ID,
+    ...(input.targetType ? { targetType: input.targetType } : {}),
+    ...(input.targetId ? { targetId: input.targetId } : {}),
+    ...(input.targetLabel ? { targetLabel: input.targetLabel } : {}),
+    summary: input.summary,
+    ...(input.metadata ? { metadata: input.metadata } : {}),
+  };
+
+  try {
+    await set(ref(rtdb, `auditoria_seguridad/${eventId}`), event);
+    return event;
+  } catch (err) {
+    console.warn('[MineSafe][Audit] No se pudo escribir evento de auditoría en RTDB:', err);
+    return null;
+  }
+}
+
+export function subscribeToSecurityAuditEvents(
+  callback: (events: SecurityAuditEvent[]) => void,
+  actingUser?: UserProfile | null
+): () => void {
+  if (!canViewSecurityAuditTab(actingUser)) {
+    callback([]);
+    return () => {};
+  }
+  const auditQuery = query(ref(rtdb, 'auditoria_seguridad'), orderByKey(), limitToLast(500));
+  return onValue(
+    auditQuery,
+    (snapshot) => {
+      const val = snapshot.val();
+      if (!val || typeof val !== 'object') {
+        callback([]);
+        return;
+      }
+      const list: SecurityAuditEvent[] = Object.entries(val)
+        .map(([key, raw]: [string, any]) => ({
+          id: raw?.id || key,
+          timestamp: typeof raw?.timestamp === 'number' ? raw.timestamp : 0,
+          fechaHora: raw?.fechaHora || new Date(typeof raw?.timestamp === 'number' ? raw.timestamp : 0).toISOString(),
+          action: raw?.action || 'login_exitoso',
+          severity: raw?.severity || 'info',
+          actorId: raw?.actorId || 'desconocido',
+          actorName: raw?.actorName || 'Sistema',
+          actorEmail: raw?.actorEmail || '',
+          actorRole: raw?.actorRole || 'anonimo',
+          organizationId: raw?.organizationId,
+          targetType: raw?.targetType,
+          targetId: raw?.targetId,
+          targetLabel: raw?.targetLabel,
+          summary: raw?.summary || '',
+          metadata: raw?.metadata && typeof raw.metadata === 'object' ? raw.metadata : undefined,
+        }))
+        .sort((a, b) => b.timestamp - a.timestamp);
+      callback(list);
+    },
+    (error) => {
+      console.warn('[MineSafe][Audit] Error suscribiendo /auditoria_seguridad:', error);
+      callback([]);
+    }
+  );
+}
+
+export async function logCybersecurityIncidentInRTDB(
+  input: {
+    title: string;
+    category: CybersecurityIncidentCategory;
+    severity: CybersecurityIncidentSeverity;
+    affectedSystem: string;
+    description: string;
+    organizationId?: string;
+    csirtNotified?: boolean;
+  },
+  actingUser: UserProfile | null
+): Promise<CybersecurityIncident> {
+  assertActiveSession(actingUser);
+  if (!canViewSecurityAuditTab(actingUser)) {
+    throw new Error('Solo SuperAdmin o Admin MineSafe pueden registrar incidentes de ciberseguridad.');
+  }
+  const cleanTitle = input.title.trim();
+  const cleanDesc = input.description.trim();
+  if (cleanTitle.length < 4 || cleanDesc.length < 10) {
+    throw new Error('Completa un título (mín. 4 caracteres) y una descripción técnica detallada (mín. 10 caracteres).');
+  }
+
+  const now = Date.now();
+  const id = `inc_${now}_${Math.random().toString(36).slice(2, 6)}`;
+  const code = `CSIRT-${new Date(now).toISOString().slice(0, 10).replace(/-/g, '')}-${id.slice(-4).toUpperCase()}`;
+  // Ley 21.663: Alerta temprana obligatoria dentro de 3 horas para incidentes de impacto significativo (alta/crítica)
+  const csirtNotificationDueAt =
+    input.severity === 'alta' || input.severity === 'critica' ? now + 3 * 60 * 60 * 1000 : undefined;
+
+  const incident: CybersecurityIncident = {
+    id,
+    code,
+    title: cleanTitle,
+    category: input.category,
+    severity: input.severity,
+    status: 'abierto',
+    affectedSystem: input.affectedSystem.trim() || 'Plataforma MineSafe IoT',
+    description: cleanDesc,
+    organizationId: input.organizationId || actingUser!.organizationId || DEFAULT_ORGANIZATION_ID,
+    reportedById: actingUser!.id,
+    reportedByName: actingUser!.name,
+    reportedAt: now,
+    updatedAt: now,
+    csirtNotified: Boolean(input.csirtNotified),
+    ...(csirtNotificationDueAt ? { csirtNotificationDueAt } : {}),
+  };
+
+  await set(ref(rtdb, `incidentes_ciberseguridad/${id}`), incident);
+  await logSecurityAuditEventInRTDB(
+    {
+      action: 'incidente_ciberseguridad',
+      severity: input.severity === 'critica' || input.severity === 'alta' ? 'critical' : 'warning',
+      summary: `Incidente ${code} registrado: ${cleanTitle} (${input.severity.toUpperCase()})`,
+      organizationId: incident.organizationId,
+      targetType: 'incidente_ciberseguridad',
+      targetId: id,
+      targetLabel: code,
+      metadata: {
+        category: input.category,
+        severity: input.severity,
+        csirtNotified: Boolean(input.csirtNotified),
+      },
+    },
+    actingUser
+  );
+
+  return incident;
+}
+
+export async function updateCybersecurityIncidentStatusInRTDB(
+  incidentId: string,
+  updates: {
+    status: CybersecurityIncidentStatus;
+    csirtNotified?: boolean;
+    resolutionNotes?: string;
+  },
+  actingUser: UserProfile | null
+): Promise<void> {
+  assertActiveSession(actingUser);
+  if (!canViewSecurityAuditTab(actingUser)) {
+    throw new Error('Solo SuperAdmin o Admin MineSafe pueden actualizar incidentes de ciberseguridad.');
+  }
+  const now = Date.now();
+  const patch: Record<string, any> = {
+    status: updates.status,
+    updatedAt: now,
+  };
+  if (typeof updates.csirtNotified === 'boolean') {
+    patch.csirtNotified = updates.csirtNotified;
+  }
+  if (typeof updates.resolutionNotes === 'string') {
+    patch.resolutionNotes = updates.resolutionNotes.trim();
+  }
+  if (updates.status === 'cerrado') {
+    patch.resolvedBy = actingUser!.name;
+  }
+
+  await update(ref(rtdb, `incidentes_ciberseguridad/${incidentId}`), patch);
+  await logSecurityAuditEventInRTDB(
+    {
+      action: 'incidente_ciberseguridad',
+      severity: updates.status === 'cerrado' ? 'info' : 'warning',
+      summary: `Incidente ${incidentId} actualizado a estado "${updates.status}"${
+        updates.csirtNotified ? ' (CSIRT notificado)' : ''
+      }`,
+      targetType: 'incidente_ciberseguridad',
+      targetId: incidentId,
+      metadata: {
+        status: updates.status,
+        csirtNotified: Boolean(updates.csirtNotified),
+      },
+    },
+    actingUser
+  );
+}
+
+export function subscribeToCybersecurityIncidents(
+  callback: (incidents: CybersecurityIncident[]) => void,
+  actingUser?: UserProfile | null
+): () => void {
+  if (!canViewSecurityAuditTab(actingUser)) {
+    callback([]);
+    return () => {};
+  }
+  return onValue(
+    ref(rtdb, 'incidentes_ciberseguridad'),
+    (snapshot) => {
+      const val = snapshot.val();
+      if (!val || typeof val !== 'object') {
+        callback([]);
+        return;
+      }
+      const list: CybersecurityIncident[] = Object.entries(val)
+        .map(([key, raw]: [string, any]) => ({
+          id: raw?.id || key,
+          code: raw?.code || key,
+          title: raw?.title || 'Incidente sin título',
+          category: raw?.category || 'otro',
+          severity: raw?.severity || 'media',
+          status: raw?.status || 'abierto',
+          affectedSystem: raw?.affectedSystem || 'Plataforma MineSafe IoT',
+          description: raw?.description || '',
+          organizationId: raw?.organizationId,
+          reportedById: raw?.reportedById || '',
+          reportedByName: raw?.reportedByName || 'Sistema',
+          reportedAt: typeof raw?.reportedAt === 'number' ? raw.reportedAt : 0,
+          updatedAt: typeof raw?.updatedAt === 'number' ? raw.updatedAt : 0,
+          csirtNotified: Boolean(raw?.csirtNotified),
+          csirtNotificationDueAt:
+            typeof raw?.csirtNotificationDueAt === 'number' ? raw.csirtNotificationDueAt : undefined,
+          resolutionNotes: raw?.resolutionNotes || undefined,
+          resolvedBy: raw?.resolvedBy || undefined,
+        }))
+        .sort((a, b) => b.reportedAt - a.reportedAt);
+      callback(list);
+    },
+    (error) => {
+      console.warn('[MineSafe][Incidents] Error suscribiendo /incidentes_ciberseguridad:', error);
+      callback([]);
+    }
+  );
+}
+
+export async function recordUserLegalConsentInRTDB(
+  user: UserProfile,
+  version: string = CURRENT_LEGAL_CONSENT_VERSION
+): Promise<UserProfile> {
+  const now = Date.now();
+  await update(ref(rtdb, `usuarios/${user.id}`), {
+    legalConsentVersion: version,
+    legalConsentAcceptedAt: now,
+  });
+  await logSecurityAuditEventInRTDB(
+    {
+      action: 'consentimiento_legal',
+      severity: 'info',
+      summary: `Consentimiento informado aceptado (Política de Privacidad y Términos v${version})`,
+      organizationId: user.organizationId,
+      targetType: 'usuario',
+      targetId: user.id,
+      targetLabel: user.name,
+      metadata: {
+        version,
+        acceptedAt: now,
+      },
+    },
+    user
+  );
+  return {
+    ...user,
+    legalConsentVersion: version,
+    legalConsentAcceptedAt: now,
+  };
+}
+
+export async function anonymizeUserPIIInRTDB(
+  targetUser: UserProfile,
+  actingUser: UserProfile | null
+): Promise<UserProfile> {
+  assertActiveSession(actingUser);
+  const check = canAnonymizeUserPII(actingUser, targetUser);
+  if (!check.allowed) {
+    throw new Error(check.reason || 'No autorizado para anonimizar datos personales.');
+  }
+
+  const now = Date.now();
+  const anonymized = buildAnonymizedUserData(targetUser, actingUser!, now);
+
+  await update(ref(rtdb, `usuarios/${targetUser.id}`), {
+    nombre: anonymized.name,
+    email: anonymized.email,
+    codigoId: anonymized.rut,
+    telefono: anonymized.rut,
+    isActive: false,
+    blockedReason: anonymized.blockedReason,
+    blockedAt: now,
+    blockedBy: actingUser!.name,
+    anonymizedAt: anonymized.anonymizedAt,
+    anonymizedBy: anonymized.anonymizedBy,
+  });
+
+  await logSecurityAuditEventInRTDB(
+    {
+      action: 'anonimizacion_arcop',
+      severity: 'critical',
+      summary: `Anonimización irreversible de PII ejecutada sobre cuenta ${targetUser.id} (derecho ARCOP Ley 19.628 / 21.719)`,
+      organizationId: targetUser.organizationId,
+      targetType: 'usuario',
+      targetId: targetUser.id,
+      targetLabel: anonymized.name,
+      metadata: {
+        previousRole: targetUser.role,
+        anonymizedAt: now,
+      },
+    },
+    actingUser
+  );
+
+  return {
+    ...targetUser,
+    name: anonymized.name,
+    email: anonymized.email,
+    rut: anonymized.rut,
+    status: 'inactivo',
+    blockedReason: anonymized.blockedReason,
+    blockedAt: now,
+    blockedBy: actingUser!.name,
+    anonymizedAt: anonymized.anonymizedAt,
+    anonymizedBy: anonymized.anonymizedBy,
+  };
+}
+
 
 
 

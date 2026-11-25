@@ -91,7 +91,6 @@ La prueba del motor sigue una secuencia de mediciones de ejemplo y sirve para es
 | Fila | Resultado de la revisión |
 |---|---|
 | 4.1 · API y Express | Confirmado para el camino de datos web–Firebase: el SDK conecta directamente. Existe FastAPI por separado, sin llamada desde `src/`. Express está declarado como dependencia. El código fuente usa el servidor de Vite para desarrollo y carece de un servidor Express operativo. [Dependencias][pkg] · [Vite][vite] · [Inicialización][firebase-init] · [API][ai-main] |
-| 4.2 · Android | **Descartado para la entrega y la defensa**, según confirmó el equipo. El APK sigue en el commit revisado como archivo del repositorio. La interfaz que se presenta es la plataforma web. [APK en el repositorio][apk] |
 | 4.3 · Simulacro y análisis | Simulacro comprobado en la web y difusión en RTDB. Análisis estadístico comprobado como servicio aparte. Alcance físico y conexión entre la web y el servicio requieren evidencia adicional. [Simulacro][drill] · [Difusión][broadcast] · [API][ai-main] |
 | 4.4 · Organizaciones | Hay faenas, sectores, nombres de ubicación y un registro de dispositivos. La vista inicial parte de datos de ejemplo y el alta visible de faena modifica el estado de React. No se encuentra alta persistente de organizaciones ni un modelo con membresías y reglas de aislamiento. [Faenas][site-state] · [Vista de sectores][sites-view] · [Reglas][rules] |
 | 4.5 · Lenguaje | La aplicación fuente es TypeScript y TSX, compila a JavaScript y declara React 19. El componente de análisis es Python. [Entrada web][entry] · [Dependencias][pkg] · [Cálculo][ai-analyze] |
@@ -274,7 +273,6 @@ Comentario:
 [audio]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/src/services/audioAlert.ts#L1-L150
 [tests]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/tests/test_alert_engine.ts#L76-L151
 [env]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/.env.example
-[apk]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/MineSafe_IoT_Mobile_v2.4.apk
 [threshold-view]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/src/components/AlertConfigurationView.tsx#L71-L232
 [alerts-view]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/src/components/AlertsView.tsx#L53-L117
 [user-ui]: https://github.com/whitewolf260501-hash/MineSafe_Web_Dark_V3/blob/4a976ccbdd88aa1da3613a4162f61ecbe1b75c7a/src/components/UsersManagementView.tsx#L49-L106

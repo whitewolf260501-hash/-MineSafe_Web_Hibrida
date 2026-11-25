@@ -49,7 +49,7 @@ const rootAssetsDir = path.join(rootDir, 'assets');
 copyDistAssets(rootAssetsDir);
 fs.copyFileSync(distIndexPath, path.join(rootDir, '404.html'));
 
-// 2. Sync /docs/ static Pages mirror (preserving /docs/assets/aistudio, .apk and .zip packages)
+// 2. Sync /docs/ static Pages mirror (preserving /docs/assets/aistudio and .zip packages)
 const docsDir = path.join(rootDir, 'docs');
 const docsAssetsDir = path.join(docsDir, 'assets');
 fs.mkdirSync(docsDir, { recursive: true });

@@ -32,6 +32,7 @@ import nodeSensorsPhoto from '../assets/device-node-sensors.jpg';
 import gatewayDevicePhoto from '../assets/device-gateway.jpg';
 import mineDeploymentPhoto from '../assets/device-mine-deployment.jpg';
 import architecturePlanPhoto from '../assets/device-architecture-plan.jpg';
+import { LegalComplianceModal, LegalDocumentTab } from './LegalComplianceModal';
 
 export interface TeamMemberSlot {
   id: string;
@@ -83,6 +84,7 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
   onToggleTheme,
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocumentTab | null>(null);
   const [formState, setFormState] = useState<ContactFormPayload>({
     name: '',
     organization: '',
@@ -1094,6 +1096,27 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
           </div>
 
           <div className="flex flex-wrap items-center gap-4 text-xs font-semibold">
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('privacidad')}
+              className={`text-[#CBD5E1] hover:text-[#2DD4BF] transition-colors cursor-pointer ${focusRing}`}
+            >
+              Política de Privacidad
+            </button>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('terminos')}
+              className={`text-[#CBD5E1] hover:text-[#2DD4BF] transition-colors cursor-pointer ${focusRing}`}
+            >
+              Términos de Uso
+            </button>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('ciberseguridad')}
+              className={`text-[#CBD5E1] hover:text-[#2DD4BF] transition-colors cursor-pointer ${focusRing}`}
+            >
+              Aviso Ley 21.663 / 21.459
+            </button>
             <a
               href="#contacto"
               onClick={(e) => {
@@ -1115,6 +1138,13 @@ export const PublicLanding: React.FC<PublicLandingProps> = ({
           </div>
         </div>
       </footer>
+
+      <LegalComplianceModal
+        isOpen={Boolean(legalModalTab)}
+        initialTab={legalModalTab || 'privacidad'}
+        onClose={() => setLegalModalTab(null)}
+        theme={theme}
+      />
 
       {/* Lightbox accesible para inspeccionar las fotografías del dispositivo y sensores */}
       {lightboxMedia && (

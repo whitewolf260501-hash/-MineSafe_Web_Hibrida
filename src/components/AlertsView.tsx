@@ -46,9 +46,11 @@ import {
   extractAlarmAuditRecords,
   buildAuditRecordsFromAlerts,
   isSectionVisibleForUser,
+  logSecurityAuditEventInRTDB,
 } from '../services/firebase';
 import { AlertResolutionModal } from './AlertResolutionModal';
 import { getTodayIsoDate, validateDateRange } from '../utils/dateRange';
+import { signCsvExportWithIntegritySeal } from '../utils/securityCompliance';
 
 interface AlertsViewProps {
   alerts: SafetyAlert[];
@@ -240,8 +242,8 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
     setTimeout(() => setExportNotice(null), 3500);
   };
 
-  // 1. Exportar a Excel (.csv con UTF-8 BOM respetando el rango de fechas y filtros activos)
-  const handleExportAuditExcel = () => {
+  // 1. Exportar a Excel (.csv con UTF-8 BOM + Sello SHA-256 DS 132 respetando filtros activos)
+  const handleExportAuditExcel = async () => {
     if (!auditDateValidation.valid) {
       showExportToast(auditDateValidation.error || 'Rango de fechas inválido.');
       return;
@@ -253,7 +255,7 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       return;
     }
 
-    // Headers con estándar de auditoría minera DS 132
+    // Headers con estándar de auditoría minera DS 132 / DS 594
     const headers = [
       'ID_Registro',
       'ID_Dispositivo',
@@ -298,18 +300,47 @@ export const AlertsView: React.FC<AlertsViewProps> = ({
       csvRows.push(row.join(';'));
     });
 
-    // \uFEFF fuerza a Excel a abrir el archivo con codificación UTF-8 correcta (tildes y caracteres especiales)
-    const blob = new Blob(['\uFEFF' + csvRows.join('\r\n')], { type: 'text/csv;charset=utf-8;' });
+    const rawCsv = '\uFEFF' + csvRows.join('\r\n');
+    const { signedCsv, seal } = await signCsvExportWithIntegritySeal({
+      csvContent: rawCsv,
+      reportType: 'Bitácora de Auditoría de Alarmas y Contingencias Mineras',
+      actorName: currentUser?.name || 'Responsable MineSafe',
+      actorRole: currentUser?.role || 'usuario',
+      normativeRef: 'DS 132 (Sernageomin) / DS 594 (MINSAL)',
+      rowCount: rowsToExport.length,
+    });
+
+    const blob = new Blob([signedCsv], { type: 'text/csv;charset=utf-8;' });
     const url = URL.createObjectURL(blob);
     const link = document.createElement('a');
-    const nowStr = new Date().toISOString().slice(0, 10).replace(/-/g, '');
     link.href = url;
-    link.setAttribute('download', `Auditoria_Alarmas_ESP32_DS132_${nowStr}.csv`);
+    link.setAttribute('download', `Auditoria_Alarmas_DS132_${seal.folio}.csv`);
     document.body.appendChild(link);
     link.click();
     document.body.removeChild(link);
+    URL.revokeObjectURL(url);
 
-    showExportToast(`Archivo Excel (.csv) generado con ${rowsToExport.length} registros de auditoría.`);
+    void logSecurityAuditEventInRTDB(
+      {
+        action: 'exportacion_reporte_sellado',
+        severity: 'info',
+        summary: `Exportación CSV DS 132 de auditoría de alarmas (${rowsToExport.length} registros) · Folio ${seal.folio} · SHA-256 ${seal.shortHash}`,
+        organizationId: currentUser?.organizationId,
+        targetType: 'bitacora_alarmas',
+        targetId: seal.folio,
+        targetLabel: seal.folio,
+        metadata: {
+          folio: seal.folio,
+          sha256Short: seal.shortHash,
+          rows: rowsToExport.length,
+        },
+      },
+      currentUser
+    );
+
+    showExportToast(
+      `Excel (.csv) DS 132 sellado con SHA-256 (${rowsToExport.length} registros) · Folio ${seal.folio} (${seal.shortHash}).`
+    );
   };
 
   // 2. Exportar / Imprimir PDF Oficial (Vista Imprimible In-App para compatibilidad iFrame)

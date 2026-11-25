@@ -340,6 +340,10 @@ export interface UserProfile {
   mustChangePassword?: boolean;
   passwordPolicyVersion?: number;
   passwordUpdatedAt?: number;
+  legalConsentVersion?: string;
+  legalConsentAcceptedAt?: number;
+  anonymizedAt?: number;
+  anonymizedBy?: string;
 }
 
 export type ControllableTab =
@@ -367,6 +371,7 @@ export type ControllableRoleKey = 'admin_minesafe' | 'admin' | 'operador' | 'sup
 
 export type NavigationTab =
   | ControllableTab
+  | 'auditoria_seguridad'
   | 'superadmin_panel'
   | 'superadmin_vistas'
   | 'superadmin_docs';
@@ -640,3 +645,75 @@ export interface AlertEventRecord {
   recuperada_en?: number;
   origen: 'motor_umbrales';
 }
+
+export type SecurityAuditAction =
+  | 'login_exitoso'
+  | 'intento_login_fallido'
+  | 'bloqueo_login_temporal'
+  | 'cierre_sesion'
+  | 'cierre_inactividad'
+  | 'consentimiento_legal'
+  | 'acceso_pii_rut'
+  | 'acceso_pii_email'
+  | 'exportacion_arcop'
+  | 'anonimizacion_arcop'
+  | 'cambio_rol_usuario'
+  | 'cambio_estado_usuario'
+  | 'gestion_empresa'
+  | 'gestion_faena_cuadrilla'
+  | 'gestion_dispositivo_iot'
+  | 'control_alarma_emergencia'
+  | 'cambio_umbral'
+  | 'exportacion_reporte_sellado'
+  | 'incidente_ciberseguridad';
+
+export type SecurityAuditSeverity = 'info' | 'warning' | 'critical';
+
+export interface SecurityAuditEvent {
+  id: string;
+  timestamp: number;
+  fechaHora: string;
+  action: SecurityAuditAction;
+  severity: SecurityAuditSeverity;
+  actorId: string;
+  actorName: string;
+  actorEmail: string;
+  actorRole: UserRole | 'anonimo';
+  organizationId?: string;
+  targetType?: string;
+  targetId?: string;
+  targetLabel?: string;
+  summary: string;
+  metadata?: Record<string, string | number | boolean>;
+}
+
+export type CybersecurityIncidentSeverity = 'baja' | 'media' | 'alta' | 'critica';
+export type CybersecurityIncidentStatus = 'abierto' | 'en_investigacion' | 'contenido' | 'cerrado';
+export type CybersecurityIncidentCategory =
+  | 'acceso_no_autorizado'
+  | 'fuerza_bruta'
+  | 'disponibilidad_iot'
+  | 'filtracion_datos'
+  | 'integridad_telemetria'
+  | 'otro';
+
+export interface CybersecurityIncident {
+  id: string;
+  code: string;
+  title: string;
+  category: CybersecurityIncidentCategory;
+  severity: CybersecurityIncidentSeverity;
+  status: CybersecurityIncidentStatus;
+  affectedSystem: string;
+  description: string;
+  organizationId?: string;
+  reportedById: string;
+  reportedByName: string;
+  reportedAt: number;
+  updatedAt: number;
+  csirtNotified?: boolean;
+  csirtNotificationDueAt?: number;
+  resolutionNotes?: string;
+  resolvedBy?: string;
+}
+

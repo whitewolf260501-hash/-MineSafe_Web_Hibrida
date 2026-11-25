@@ -192,6 +192,22 @@
         ".validate": "!newData.exists() || (newData.hasChildren(['id', 'name', 'organizationId', 'status']) && newData.child('name').isString() && newData.child('name').val().length >= 2 && newData.child('name').val().length <= 120)"
       }
     },
+    "auditoria_seguridad": {
+      ".indexOn": ["timestamp", "action", "organizationId"],
+      ".read": "auth != null && ((auth.token.email === 'manuelcrisostomovega@gmail.com' && auth.token.email_verified === true) || (root.child('usuarios/' + auth.uid).exists() && root.child('usuarios/' + auth.uid + '/isActive').val() === true && (root.child('usuarios/' + auth.uid + '/isSuperUser').val() === true || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'superadmin' || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'admin_minesafe')))",
+      "$eventId": {
+        ".write": "auth != null && !data.exists() && newData.exists()",
+        ".validate": "newData.hasChildren(['id', 'timestamp', 'action', 'actorId', 'summary']) && newData.child('timestamp').isNumber()"
+      }
+    },
+    "incidentes_ciberseguridad": {
+      ".indexOn": ["reportedAt", "status", "severity"],
+      ".read": "auth != null && ((auth.token.email === 'manuelcrisostomovega@gmail.com' && auth.token.email_verified === true) || (root.child('usuarios/' + auth.uid).exists() && root.child('usuarios/' + auth.uid + '/isActive').val() === true && (root.child('usuarios/' + auth.uid + '/isSuperUser').val() === true || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'superadmin' || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'admin_minesafe')))",
+      "$incidentId": {
+        ".write": "auth != null && ((auth.token.email === 'manuelcrisostomovega@gmail.com' && auth.token.email_verified === true) || (root.child('usuarios/' + auth.uid).exists() && root.child('usuarios/' + auth.uid + '/isActive').val() === true && (root.child('usuarios/' + auth.uid + '/isSuperUser').val() === true || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'superadmin' || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'admin_minesafe')))",
+        ".validate": "newData.hasChildren(['id', 'code', 'title', 'severity', 'status', 'reportedAt']) && newData.child('reportedAt').isNumber()"
+      }
+    },
     "precarga": {
       ".read": "auth != null && ((auth.token.email === 'manuelcrisostomovega@gmail.com' && auth.token.email_verified === true) || (root.child('usuarios/' + auth.uid).exists() && root.child('usuarios/' + auth.uid + '/isActive').val() === true && (root.child('usuarios/' + auth.uid + '/isSuperUser').val() === true || root.child('usuarios/' + auth.uid + '/tipoUsuario').val() === 'superadmin')))",
       ".write": false

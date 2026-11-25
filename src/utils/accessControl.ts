@@ -1,4 +1,4 @@
-import {
+import type {
   CrewMember,
   DeviceAssignmentStatus,
   MiningCrew,
@@ -9,7 +9,7 @@ import {
   TelemetryVariable,
   UserProfile,
   UserRole,
-} from '../types';
+} from '../types/index.ts';
 
 export const DEFAULT_ORGANIZATION_ID = 'org-minesafe-principal';
 export const UNASSIGNED_DEVICE_ORG_ID = '__unassigned__';

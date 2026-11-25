@@ -18,7 +18,7 @@ def create_zip(source_dir, output_zip_path, exclude_dirs=None, exclude_files=Non
             ]
             
             for file in files:
-                if file in exclude_files or file.endswith('.pyc') or file.endswith('.zip') or file.endswith('.apk'):
+                if file in exclude_files or file.endswith('.pyc') or file.endswith('.zip'):
                     continue
                 file_path = os.path.join(root, file)
                 rel_path = os.path.relpath(file_path, prefix_strip if prefix_strip else source_dir)

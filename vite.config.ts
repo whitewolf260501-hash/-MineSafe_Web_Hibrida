@@ -20,19 +20,6 @@ export default defineConfig(({ command }) => {
           },
         },
       },
-      {
-        name: 'apk-mime-middleware',
-        configureServer(server) {
-          server.middlewares.use((req, res, next) => {
-            if (req.url && (req.url.endsWith('.apk') || req.url.includes('MineSafe_IoT_Mobile'))) {
-              res.setHeader('Content-Type', 'application/vnd.android.package-archive');
-              res.setHeader('Content-Disposition', 'attachment; filename="MineSafe_IoT_Mobile_v2.4.apk"');
-              res.setHeader('Cache-Control', 'public, max-age=86400');
-            }
-            next();
-          });
-        },
-      },
     ],
     resolve: {
       alias: {

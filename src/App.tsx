@@ -20,6 +20,13 @@ const Node3DInspectorView = lazy(() => import('./components/Node3DInspectorView'
 const Gateway3DInspectorView = lazy(() => import('./components/Gateway3DInspectorView'));
 const SuperAdminDocsView = lazy(() => import('./components/SuperAdminDocsView'));
 import { CompanyBulkManagementView } from './components/CompanyBulkManagementView';
+import { SecurityAuditView } from './components/SecurityAuditView';
+import {
+  InactivityWarningModal,
+  LegalComplianceModal,
+  LegalConsentGateModal,
+  LegalDocumentTab,
+} from './components/LegalComplianceModal';
 
 
 import { 
@@ -41,7 +48,9 @@ import {
   TelemetryHistoryPoint,
   AlertEventRecord,
   MiningCrew,
-  TypographySettings
+  TypographySettings,
+  SecurityAuditEvent,
+  CybersecurityIncident
 } from './types';
 import {
   TelemetryRangeWindow,
@@ -77,6 +86,13 @@ import {
   DEFAULT_ORGANIZATION_ID,
   UNASSIGNED_DEVICE_ORG_ID,
 } from './utils/accessControl';
+import {
+  CURRENT_LEGAL_CONSENT_VERSION,
+  INACTIVITY_TIMEOUT_MS,
+  INACTIVITY_WARNING_MS,
+  buildUserPersonalDataExportJson,
+  canViewSecurityAuditTab,
+} from './utils/securityCompliance';
 
 export { createEmptyTelemetryVariables, resolveScopedCurrentSite };
 
@@ -137,7 +153,11 @@ import {
   deleteCrewFromRTDB,
   subscribeToRTDBCrews,
   RTDBSubscriptionScope,
-  BulkImportExecutionResult
+  BulkImportExecutionResult,
+  logSecurityAuditEventInRTDB,
+  subscribeToSecurityAuditEvents,
+  subscribeToCybersecurityIncidents,
+  recordUserLegalConsentInRTDB
 } from './services/firebase';
 
 import { soundAlert } from './services/audioAlert';
@@ -282,6 +302,17 @@ export default function App({
     }
   });
   const [alarmFeedback, setAlarmFeedback] = useState<{ message: string; tone: 'error' | 'success' } | null>(null);
+  const [securityAuditEvents, setSecurityAuditEvents] = useState<SecurityAuditEvent[]>([]);
+  const [cybersecurityIncidents, setCybersecurityIncidents] = useState<CybersecurityIncident[]>([]);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocumentTab | null>(null);
+  const [consentSubmitting, setConsentSubmitting] = useState<boolean>(false);
+  const [consentError, setConsentError] = useState<string | null>(null);
+  const [inactivityWarningOpen, setInactivityWarningOpen] = useState<boolean>(false);
+  const [inactivitySecondsLeft, setInactivitySecondsLeft] = useState<number>(
+    Math.floor(INACTIVITY_WARNING_MS / 1000)
+  );
+  const lastActivityRef = React.useRef<number>(Date.now());
+  const inactivityLoggedOutRef = React.useRef<boolean>(false);
 
   useEffect(() => {
     setCurrentUser(authenticatedUser);
@@ -568,6 +599,21 @@ export default function App({
       unsubDrill();
     };
   }, [subscriptionScope, effectiveOrgId]);
+
+  // Suscripción a bitácora de auditoría ISO 27001 e incidentes Ley 21.663 (SuperAdmin / Admin MineSafe)
+  useEffect(() => {
+    if (!canViewSecurityAuditTab(currentUser)) {
+      setSecurityAuditEvents([]);
+      setCybersecurityIncidents([]);
+      return;
+    }
+    const unsubAudit = subscribeToSecurityAuditEvents(setSecurityAuditEvents, currentUser);
+    const unsubIncidents = subscribeToCybersecurityIncidents(setCybersecurityIncidents, currentUser);
+    return () => {
+      unsubAudit();
+      unsubIncidents();
+    };
+  }, [currentUser?.id, currentUser?.role, currentUser?.status]);
 
   // Suscripciones operativas en RTDB estrictamente acotadas por rol y organización activa
   useEffect(() => {
@@ -2193,6 +2239,19 @@ export default function App({
         currentUser,
         organizations
       );
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'cambio_rol_usuario',
+          severity: 'warning',
+          summary: `Rol de ${targetUser.name} actualizado de "${targetUser.role}" a "${newRole}"`,
+          organizationId: targetUser.organizationId,
+          targetType: 'usuario',
+          targetId: userId,
+          targetLabel: targetUser.name,
+          metadata: { fromRole: targetUser.role, toRole: newRole },
+        },
+        currentUser
+      );
       showAlarmFeedback(`Rol actualizado para ${targetUser.name} en Firebase RTDB.`, 'success');
     } catch (err: any) {
       setUsersList(prevUsers);
@@ -2393,6 +2452,22 @@ export default function App({
         currentUser,
         organizations
       );
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'cambio_estado_usuario',
+          severity: nextStatus === 'inactivo' ? 'critical' : 'warning',
+          summary:
+            nextStatus === 'inactivo'
+              ? `Usuario ${targetUser.name} bloqueado (${cleanReason})`
+              : `Usuario ${targetUser.name} desbloqueado/reactivado`,
+          organizationId: targetUser.organizationId,
+          targetType: 'usuario',
+          targetId: userId,
+          targetLabel: targetUser.name,
+          metadata: { nextStatus, reason: cleanReason },
+        },
+        currentUser
+      );
       showAlarmFeedback(
         nextStatus === 'inactivo'
           ? `Usuario ${targetUser.name} bloqueado (${cleanReason}). Su sesión queda revocada en esta empresa.`
@@ -2413,11 +2488,27 @@ export default function App({
     setShowLoginModal(false);
   }, [onSessionUserUpdated]);
 
-  const handleLogout = useCallback(async () => {
+  const handleLogout = useCallback(async (reason: 'manual' | 'inactivity' = 'manual') => {
+    void logSecurityAuditEventInRTDB(
+      {
+        action: reason === 'inactivity' ? 'cierre_inactividad' : 'cierre_sesion',
+        severity: reason === 'inactivity' ? 'warning' : 'info',
+        summary:
+          reason === 'inactivity'
+            ? 'Sesión cerrada automáticamente tras 15 minutos de inactividad (ISO/IEC 27001)'
+            : 'Cierre de sesión manual ejecutado por el usuario',
+        organizationId: currentUser?.organizationId,
+        targetType: 'sesion',
+        targetId: currentUser?.id,
+        targetLabel: currentUser?.name,
+      },
+      currentUser
+    );
     soundAlert.stopContinuousAlarm();
     alertEngine.clearActiveIncidents();
     processedDismissedAlertIdsRef.current.clear();
     rawDevicesRef.current = {};
+    setInactivityWarningOpen(false);
     setShowLoginModal(false);
     setShowEmergencyModal(false);
     setDevices([]);
@@ -2434,8 +2525,109 @@ export default function App({
     setAlertEvents([]);
     setTelemetryHistory([]);
     setUsersList([]);
+    setSecurityAuditEvents([]);
+    setCybersecurityIncidents([]);
     await onLogoutRequest();
-  }, [onLogoutRequest]);
+  }, [onLogoutRequest, currentUser]);
+
+  // Cierre automático por inactividad (15 minutos con aviso de 60 segundos — ISO/IEC 27001)
+  useEffect(() => {
+    lastActivityRef.current = Date.now();
+    inactivityLoggedOutRef.current = false;
+
+    const markActivity = () => {
+      if (!inactivityWarningOpen) {
+        lastActivityRef.current = Date.now();
+      }
+    };
+
+    const events: (keyof WindowEventMap)[] = ['mousemove', 'keydown', 'click', 'scroll', 'touchstart'];
+    events.forEach((evt) => window.addEventListener(evt, markActivity, { passive: true }));
+
+    const intervalId = window.setInterval(() => {
+      const idleMs = Date.now() - lastActivityRef.current;
+      if (idleMs >= INACTIVITY_TIMEOUT_MS) {
+        if (!inactivityLoggedOutRef.current) {
+          inactivityLoggedOutRef.current = true;
+          setInactivityWarningOpen(false);
+          handleLogout('inactivity').catch(() => {});
+        }
+        return;
+      }
+      const remainingMs = INACTIVITY_TIMEOUT_MS - idleMs;
+      if (remainingMs <= INACTIVITY_WARNING_MS) {
+        setInactivityWarningOpen(true);
+        setInactivitySecondsLeft(Math.max(1, Math.ceil(remainingMs / 1000)));
+      } else if (inactivityWarningOpen) {
+        setInactivityWarningOpen(false);
+      }
+    }, 1000);
+
+    return () => {
+      events.forEach((evt) => window.removeEventListener(evt, markActivity));
+      window.clearInterval(intervalId);
+    };
+  }, [inactivityWarningOpen, handleLogout]);
+
+  const handleStayActiveAfterWarning = useCallback(() => {
+    lastActivityRef.current = Date.now();
+    inactivityLoggedOutRef.current = false;
+    setInactivityWarningOpen(false);
+    setInactivitySecondsLeft(Math.floor(INACTIVITY_WARNING_MS / 1000));
+  }, []);
+
+  const handleAcceptLegalConsent = useCallback(async () => {
+    setConsentSubmitting(true);
+    setConsentError(null);
+    try {
+      const updated = await recordUserLegalConsentInRTDB(
+        currentUser,
+        CURRENT_LEGAL_CONSENT_VERSION
+      );
+      setCurrentUser(updated);
+      onSessionUserUpdated?.(updated);
+      soundAlert.playFeedbackBeep();
+    } catch (err: any) {
+      setConsentError(
+        err?.message || 'No se pudo registrar tu consentimiento en Firebase RTDB. Reintenta.'
+      );
+    } finally {
+      setConsentSubmitting(false);
+    }
+  }, [currentUser, onSessionUserUpdated]);
+
+  const handleExportOwnARCOPData = useCallback(() => {
+    const bundle = buildUserPersonalDataExportJson({
+      targetUser: currentUser,
+      actingUser: currentUser,
+      organizations,
+      sites,
+      assignments,
+    });
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: 'application/json;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `MineSafe_Mis_Datos_ARCOP_${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    soundAlert.playFeedbackBeep();
+    void logSecurityAuditEventInRTDB(
+      {
+        action: 'exportacion_arcop',
+        severity: 'info',
+        summary: `Auto-exportación de datos personales ARCOP por ${currentUser.name}`,
+        organizationId: currentUser.organizationId,
+        targetType: 'usuario',
+        targetId: currentUser.id,
+        targetLabel: currentUser.name,
+      },
+      currentUser
+    );
+    showAlarmFeedback('Copia de tus datos personales (ARCOP JSON) descargada.', 'success');
+  }, [currentUser, organizations, sites, assignments, showAlarmFeedback]);
 
   const authorizedOrgIds = useMemo(
     () => getAuthorizedOrganizationIds(currentUser, organizations),
@@ -2531,6 +2723,9 @@ export default function App({
       (tab === 'superadmin_panel' || tab === 'superadmin_vistas' || tab === 'superadmin_docs') &&
       currentUser.role !== 'superadmin'
     ) {
+      return;
+    }
+    if (tab === 'auditoria_seguridad' && !canViewSecurityAuditTab(currentUser)) {
       return;
     }
     if (!isTabVisibleForUser(tab, currentUser, platformConfig)) {
@@ -3132,6 +3327,16 @@ export default function App({
               />
             )}
 
+            {currentTab === 'auditoria_seguridad' && canViewSecurityAuditTab(currentUser) && (
+              <SecurityAuditView
+                currentUser={currentUser}
+                auditEvents={securityAuditEvents}
+                incidents={cybersecurityIncidents}
+                users={scopedUsers}
+                onOpenLegalModal={(tab) => setLegalModalTab(tab)}
+              />
+            )}
+
             {currentTab === 'superadmin_docs' && currentUser.role === 'superadmin' && (
               <Suspense
                 fallback={
@@ -3214,13 +3419,74 @@ export default function App({
         />
       )}
 
+      {/* Consentimiento Informado Obligatorio (Ley 19.628 / Nueva Ley 21.719 / Ley 21.663) */}
+      <LegalConsentGateModal
+        isOpen={currentUser.legalConsentVersion !== CURRENT_LEGAL_CONSENT_VERSION}
+        userName={currentUser.name}
+        userEmail={currentUser.email}
+        submitting={consentSubmitting}
+        error={consentError}
+        onAccept={handleAcceptLegalConsent}
+        onOpenLegalDoc={(tab) => setLegalModalTab(tab)}
+        onLogout={() => handleLogout('manual')}
+      />
+
+      {/* Aviso previo a cierre automático por inactividad (ISO/IEC 27001 — 15 min) */}
+      <InactivityWarningModal
+        isOpen={inactivityWarningOpen}
+        secondsRemaining={inactivitySecondsLeft}
+        onStayActive={handleStayActiveAfterWarning}
+        onLogoutNow={() => handleLogout('manual')}
+      />
+
+      {/* Modal de Documentos Legales y Normativos */}
+      <LegalComplianceModal
+        isOpen={Boolean(legalModalTab)}
+        initialTab={legalModalTab || 'privacidad'}
+        onClose={() => setLegalModalTab(null)}
+        theme={theme}
+      />
+
       {/* Quiet Industrial Footer */}
       <footer className="border-t border-slate-900 bg-slate-950 py-8 px-4 sm:px-6 lg:px-8 text-center text-xs text-slate-500">
-        <div className="max-w-[1850px] w-full mx-auto flex flex-col sm:flex-row items-center justify-between gap-4">
-          <div className="flex items-center gap-2">
+        <div className="max-w-[1850px] w-full mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
+          <div className="flex items-center gap-2 flex-wrap justify-center">
             <span className="font-bold text-slate-400">MineSafe IoT</span>
             <span>·</span>
             <span>Sistema de Monitoreo y Alertas para Seguridad Minera</span>
+          </div>
+          <div className="flex flex-wrap items-center justify-center gap-3 text-[11px]">
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('privacidad')}
+              className="text-slate-400 hover:text-cyan-400 transition-colors cursor-pointer"
+            >
+              Privacidad (Ley 19.628 / 21.719)
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('terminos')}
+              className="text-slate-400 hover:text-cyan-400 transition-colors cursor-pointer"
+            >
+              Términos
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={() => setLegalModalTab('ciberseguridad')}
+              className="text-slate-400 hover:text-cyan-400 transition-colors cursor-pointer"
+            >
+              Ley 21.663 / 21.459
+            </button>
+            <span>·</span>
+            <button
+              type="button"
+              onClick={handleExportOwnARCOPData}
+              className="text-cyan-400 hover:text-cyan-300 font-semibold transition-colors cursor-pointer"
+            >
+              Exportar Mis Datos (ARCOP)
+            </button>
           </div>
           <div>
             <span>{platformConfig.appearance.footerText}</span>

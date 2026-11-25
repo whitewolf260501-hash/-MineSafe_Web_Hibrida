@@ -21,12 +21,16 @@ import {
   EyeOff,
   Unlock,
   ArrowRight,
-  Building2
+  Building2,
+  Download,
+  UserX
 } from 'lucide-react';
 import { Organization, RegisteredDeviceConfig, UserProfile, UserRole } from '../types';
 import { soundAlert } from '../services/audioAlert';
 import {
+  anonymizeUserPIIInRTDB,
   createUserAccountByAdmin,
+  logSecurityAuditEventInRTDB,
   sendPasswordResetWithFirebase,
   DEFAULT_ORGANIZATION,
 } from '../services/firebase';
@@ -46,6 +50,11 @@ import {
   formatEmailForViewer,
   formatRutForViewer,
 } from '../utils/privacyMask';
+import {
+  buildUserPersonalDataExportJson,
+  canAnonymizeUserPII,
+  canExportUserARCOPData,
+} from '../utils/securityCompliance';
 import { validatePasswordPolicy } from '../utils/passwordPolicy';
 import { RutInput } from './RutInput';
 
@@ -97,6 +106,8 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
   const [revealAllEmails, setRevealAllEmails] = useState(false);
   const [unlockedRutIds, setUnlockedRutIds] = useState<Record<string, boolean>>({});
   const [unlockedEmailIds, setUnlockedEmailIds] = useState<Record<string, boolean>>({});
+  const [userToAnonymize, setUserToAnonymize] = useState<UserProfile | null>(null);
+  const [isAnonymizing, setIsAnonymizing] = useState(false);
 
   // New user form state
   const [newName, setNewName] = useState('');
@@ -130,14 +141,100 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
 
   const toggleSingleRut = (userId: string) => {
     if (!allowRutUnmask) return;
-    setUnlockedRutIds((prev) => ({ ...prev, [userId]: !isUserRutUnlocked(userId) }));
+    const willUnlock = !isUserRutUnlocked(userId);
+    setUnlockedRutIds((prev) => ({ ...prev, [userId]: willUnlock }));
     if (revealAllRuts) setRevealAllRuts(false);
+    if (willUnlock) {
+      const target = usersList.find((u) => u.id === userId);
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'acceso_pii_rut',
+          severity: 'warning',
+          summary: `Desbloqueo individual de RUT para ${target?.name || userId}`,
+          organizationId: target?.organizationId,
+          targetType: 'usuario',
+          targetId: userId,
+          targetLabel: target?.name || userId,
+        },
+        currentUser
+      );
+    }
   };
 
   const toggleSingleEmail = (userId: string) => {
     if (!allowEmailUnmask) return;
-    setUnlockedEmailIds((prev) => ({ ...prev, [userId]: !isUserEmailUnlocked(userId) }));
+    const willUnlock = !isUserEmailUnlocked(userId);
+    setUnlockedEmailIds((prev) => ({ ...prev, [userId]: willUnlock }));
     if (revealAllEmails) setRevealAllEmails(false);
+    if (willUnlock) {
+      const target = usersList.find((u) => u.id === userId);
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'acceso_pii_email',
+          severity: 'warning',
+          summary: `Desbloqueo individual de correo corporativo para ${target?.name || userId}`,
+          organizationId: target?.organizationId,
+          targetType: 'usuario',
+          targetId: userId,
+          targetLabel: target?.name || userId,
+        },
+        currentUser
+      );
+    }
+  };
+
+  const handleExportARCOP = (targetUser: UserProfile) => {
+    const check = canExportUserARCOPData(currentUser, targetUser, organizations);
+    if (!check.allowed) {
+      showToast('error', check.reason || 'No autorizado para exportar datos ARCOP.');
+      return;
+    }
+    const bundle = buildUserPersonalDataExportJson({
+      targetUser,
+      actingUser: currentUser,
+      organizations,
+    });
+    const blob = new Blob([JSON.stringify(bundle, null, 2)], {
+      type: 'application/json;charset=utf-8;',
+    });
+    const url = URL.createObjectURL(blob);
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = `MineSafe_ARCOP_${targetUser.id}_${new Date().toISOString().slice(0, 10)}.json`;
+    link.click();
+    URL.revokeObjectURL(url);
+    soundAlert.playFeedbackBeep();
+    void logSecurityAuditEventInRTDB(
+      {
+        action: 'exportacion_arcop',
+        severity: 'warning',
+        summary: `Exportación JSON de portabilidad de datos personales (ARCOP) para ${targetUser.name}`,
+        organizationId: targetUser.organizationId,
+        targetType: 'usuario',
+        targetId: targetUser.id,
+        targetLabel: targetUser.name,
+      },
+      currentUser
+    );
+    showToast('success', `Paquete ARCOP (JSON) de ${targetUser.name} descargado y auditado.`);
+  };
+
+  const handleConfirmAnonymize = async () => {
+    if (!userToAnonymize) return;
+    setIsAnonymizing(true);
+    try {
+      await anonymizeUserPIIInRTDB(userToAnonymize, currentUser);
+      soundAlert.playFeedbackBeep();
+      showToast(
+        'success',
+        `Datos personales de ${userToAnonymize.name} anonimizados irreversiblemente (ARCOP Ley 19.628 / 21.719).`
+      );
+      setUserToAnonymize(null);
+    } catch (err: any) {
+      showToast('error', err?.message || 'No se pudo anonimizar el usuario.');
+    } finally {
+      setIsAnonymizing(false);
+    }
   };
 
   const showToast = (type: 'success' | 'error', text: string) => {
@@ -602,7 +699,19 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               onClick={() => {
                 const next = !revealAllEmails;
                 setRevealAllEmails(next);
-                if (!next) setUnlockedEmailIds({});
+                if (!next) {
+                  setUnlockedEmailIds({});
+                } else {
+                  void logSecurityAuditEventInRTDB(
+                    {
+                      action: 'acceso_pii_email',
+                      severity: 'warning',
+                      summary: `Desbloqueo masivo de correos corporativos en vista de Usuarios (${filteredUsers.length} registros visibles)`,
+                      metadata: { count: filteredUsers.length },
+                    },
+                    currentUser
+                  );
+                }
               }}
               aria-label={revealAllEmails ? 'Ocultar todos los correos' : 'Desbloquear todos los correos'}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
@@ -610,7 +719,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                   ? 'bg-cyan-950/80 border-cyan-600 text-cyan-200 hover:bg-cyan-900/70'
                   : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-cyan-500 hover:text-white'
               }`}
-              title="Permitido para SuperAdmin, Admin MineSafe y Administrador de Empresa"
+              title="Permitido para SuperAdmin, Admin MineSafe y Administrador de Empresa (auditado)"
             >
               {revealAllEmails ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-cyan-400" />}
               <span>{revealAllEmails ? 'Ocultar Correos' : 'Desbloquear Correos'}</span>
@@ -622,7 +731,19 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
               onClick={() => {
                 const next = !revealAllRuts;
                 setRevealAllRuts(next);
-                if (!next) setUnlockedRutIds({});
+                if (!next) {
+                  setUnlockedRutIds({});
+                } else {
+                  void logSecurityAuditEventInRTDB(
+                    {
+                      action: 'acceso_pii_rut',
+                      severity: 'critical',
+                      summary: `Desbloqueo masivo de RUTs completos en vista de Usuarios (${filteredUsers.length} registros visibles)`,
+                      metadata: { count: filteredUsers.length },
+                    },
+                    currentUser
+                  );
+                }
               }}
               aria-label={revealAllRuts ? 'Ocultar todos los RUT' : 'Desbloquear todos los RUT'}
               className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-semibold rounded-lg border transition-colors cursor-pointer ${
@@ -630,7 +751,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                   ? 'bg-purple-950/80 border-purple-600 text-purple-200 hover:bg-purple-900/70'
                   : 'bg-slate-950 border-slate-700 text-slate-300 hover:border-purple-500 hover:text-white'
               }`}
-              title="Exclusivo de SuperAdmin y Admin Corporativo MineSafe"
+              title="Exclusivo de SuperAdmin y Admin Corporativo MineSafe (auditado)"
             >
               {revealAllRuts ? <EyeOff className="w-3.5 h-3.5" /> : <Unlock className="w-3.5 h-3.5 text-purple-400" />}
               <span>{revealAllRuts ? 'Ocultar RUTs' : 'Desbloquear RUTs'}</span>
@@ -933,7 +1054,7 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                           >
                             {user.status === 'activo' ? 'Bloquear' : 'Desbloquear'}
                           </button>
-                          {user.email && (
+                          {user.email && !user.anonymizedAt && (
                             <button
                               type="button"
                               onClick={() => handleSendPasswordReset(user)}
@@ -944,11 +1065,46 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                               Reset Clave
                             </button>
                           )}
+                          {canExportUserARCOPData(currentUser, user, organizations).allowed && (
+                            <button
+                              type="button"
+                              onClick={() => handleExportARCOP(user)}
+                              title="Exportar datos personales en JSON (Derecho de Acceso y Portabilidad ARCOP)"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-950/70 hover:bg-sky-900 text-sky-300 border border-sky-800 text-[10px] font-semibold"
+                            >
+                              <Download className="w-3 h-3" />
+                              ARCOP
+                            </button>
+                          )}
+                          {canAnonymizeUserPII(currentUser, user).allowed && (
+                            <button
+                              type="button"
+                              onClick={() => setUserToAnonymize(user)}
+                              title="Anonimizar PII irreversiblemente (Derecho de Cancelación Ley 19.628 / 21.719)"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-amber-950/70 hover:bg-amber-900 text-amber-300 border border-amber-800 text-[10px] font-semibold"
+                            >
+                              <UserX className="w-3 h-3" />
+                              Anonimizar PII
+                            </button>
+                          )}
                         </div>
                       ) : (
-                        <span className="text-slate-500 text-[11px]">
-                          {isCurrentSession ? 'Sesión actual' : 'Solo lectura'}
-                        </span>
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className="text-slate-500 text-[11px]">
+                            {isCurrentSession ? 'Sesión actual' : 'Solo lectura'}
+                          </span>
+                          {canExportUserARCOPData(currentUser, user, organizations).allowed && (
+                            <button
+                              type="button"
+                              onClick={() => handleExportARCOP(user)}
+                              title="Descargar copia de mis datos personales (ARCOP)"
+                              className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-sky-950/70 hover:bg-sky-900 text-sky-300 border border-sky-800 text-[10px] font-semibold"
+                            >
+                              <Download className="w-3 h-3" />
+                              Mis Datos ARCOP
+                            </button>
+                          )}
+                        </div>
                       )}
                     </td>
                   </tr>
@@ -1388,6 +1544,70 @@ export const UsersManagementView: React.FC<UsersManagementViewProps> = ({
                 className="px-4 py-2 text-white bg-indigo-600 hover:bg-indigo-500 rounded-lg font-semibold disabled:opacity-50"
               >
                 {isUpdatingOrg ? 'Asignando...' : 'Sí, asignar a empresa'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* MODAL: CONFIRMAR ANONIMIZACIÓN ARCOP DE PII */}
+      {userToAnonymize && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="confirm-anonymize-title"
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-slate-950/85 backdrop-blur-sm"
+        >
+          <div className="bg-slate-900 border border-amber-700/70 rounded-2xl max-w-md w-full p-6 space-y-4 shadow-2xl">
+            <div className="flex items-center justify-between">
+              <h3
+                id="confirm-anonymize-title"
+                className="text-base font-bold text-white flex items-center gap-2"
+              >
+                <UserX className="w-4 h-4 text-amber-400" />
+                Confirmar Anonimización ARCOP
+              </h3>
+              <button
+                type="button"
+                disabled={isAnonymizing}
+                onClick={() => setUserToAnonymize(null)}
+                className="text-slate-400 hover:text-white disabled:opacity-50"
+              >
+                <X className="w-5 h-5" />
+              </button>
+            </div>
+
+            <div className="space-y-3 text-xs text-slate-300 leading-relaxed">
+              <p>
+                Esta acción cumple con el <strong>derecho de cancelación / supresión (Ley 19.628 y Nueva Ley 21.719)</strong>{' '}
+                sobre la cuenta de <strong className="text-white">{userToAnonymize.name}</strong>.
+              </p>
+              <div className="p-3 rounded-xl bg-amber-950/40 border border-amber-800/60 text-amber-200 text-[11px] space-y-1">
+                <p><strong>Acción irreversible:</strong></p>
+                <ul className="list-disc pl-4 space-y-0.5">
+                  <li>Se reemplazarán nombre, correo y RUT por identificadores anonimizados.</li>
+                  <li>La cuenta quedará permanentemente bloqueada/inactiva.</li>
+                  <li>Se conserva la integridad histórica de bitácoras mineras (DS 132) y se registra el evento en Auditoría.</li>
+                </ul>
+              </div>
+            </div>
+
+            <div className="flex justify-end gap-2 pt-3 border-t border-slate-800 text-xs">
+              <button
+                type="button"
+                disabled={isAnonymizing}
+                onClick={() => setUserToAnonymize(null)}
+                className="px-4 py-2 text-slate-300 bg-slate-800 hover:bg-slate-700 rounded-lg disabled:opacity-50"
+              >
+                Cancelar
+              </button>
+              <button
+                type="button"
+                disabled={isAnonymizing}
+                onClick={handleConfirmAnonymize}
+                className="px-4 py-2 text-white bg-amber-600 hover:bg-amber-500 rounded-lg font-semibold disabled:opacity-50"
+              >
+                {isAnonymizing ? 'Anonimizando...' : 'Sí, anonimizar PII'}
               </button>
             </div>
           </div>

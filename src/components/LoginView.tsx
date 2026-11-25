@@ -1,4 +1,4 @@
-import React, { useState, useRef } from 'react';
+import React, { useState, useRef, useEffect } from 'react';
 import {
   Lock,
   Mail,
@@ -14,10 +14,13 @@ import {
   UserPlus,
   Sun,
   Moon,
+  ShieldAlert,
+  Clock,
 } from 'lucide-react';
 import { UserProfile } from '../types';
 import {
   createNewCompanyAccountWithPreviousEmail,
+  logSecurityAuditEventInRTDB,
   loginWithFirebaseAuth,
   sendPasswordResetWithFirebase,
 } from '../services/firebase';
@@ -26,6 +29,12 @@ import {
   requiresPasswordResetForAccount,
   validatePasswordPolicy,
 } from '../utils/passwordPolicy';
+import {
+  clearFailedLoginAttempts,
+  evaluateLoginLockout,
+  recordFailedLoginAttempt,
+} from '../utils/securityCompliance';
+import { LegalComplianceModal, LegalDocumentTab } from './LegalComplianceModal';
 
 interface LoginViewProps {
   onLoginSuccess: (user: UserProfile, mustUpdatePasswordReason?: string) => void;
@@ -55,7 +64,22 @@ export const LoginView: React.FC<LoginViewProps> = ({
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [errorMessage, setErrorMessage] = useState('');
   const [successMessage, setSuccessMessage] = useState('');
+  const [lockoutSeconds, setLockoutSeconds] = useState(0);
+  const [failedAttemptsCount, setFailedAttemptsCount] = useState(0);
+  const [legalModalTab, setLegalModalTab] = useState<LegalDocumentTab | null>(null);
   const passwordInputRef = useRef<HTMLInputElement>(null);
+
+  // Actualiza cuenta regresiva de bloqueo progresivo (ISO/IEC 27001 anti-fuerza bruta)
+  useEffect(() => {
+    const syncLockout = () => {
+      const status = evaluateLoginLockout(email.trim() || '__anonymous__');
+      setLockoutSeconds(status.remainingSeconds);
+      setFailedAttemptsCount(status.failures);
+    };
+    syncLockout();
+    const timer = window.setInterval(syncLockout, 1000);
+    return () => window.clearInterval(timer);
+  }, [email]);
 
   const visibleError = errorMessage || externalAuthError || '';
 
@@ -69,6 +93,16 @@ export const LoginView: React.FC<LoginViewProps> = ({
       setErrorMessage('Ingresa tu correo electrónico autorizado.');
       return;
     }
+
+    const lockout = evaluateLoginLockout(cleanEmail);
+    if (lockout.locked) {
+      setLockoutSeconds(lockout.remainingSeconds);
+      setErrorMessage(
+        `Acceso temporalmente bloqueado por múltiples intentos fallidos (${lockout.failures}). Espera ${lockout.remainingSeconds} segundos antes de reintentar.`
+      );
+      return;
+    }
+
     if (!password) {
       setErrorMessage('Ingresa tu contraseña.');
       passwordInputRef.current?.focus();
@@ -78,6 +112,21 @@ export const LoginView: React.FC<LoginViewProps> = ({
     setIsSubmitting(true);
     try {
       const authenticatedUser = await loginWithFirebaseAuth(cleanEmail, password, rememberMe);
+      clearFailedLoginAttempts(cleanEmail);
+      setLockoutSeconds(0);
+      setFailedAttemptsCount(0);
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'login_exitoso',
+          severity: 'info',
+          summary: `Inicio de sesión autenticado (${authenticatedUser.role})`,
+          organizationId: authenticatedUser.organizationId,
+          targetType: 'sesion',
+          targetId: authenticatedUser.id,
+          targetLabel: authenticatedUser.name,
+        },
+        authenticatedUser
+      );
       soundAlert.playFeedbackBeep();
       const policyReq = requiresPasswordResetForAccount(password, authenticatedUser);
       onLoginSuccess(authenticatedUser, policyReq.required ? policyReq.reason : undefined);
@@ -91,8 +140,25 @@ export const LoginView: React.FC<LoginViewProps> = ({
         );
         return;
       }
+      const nextLock = recordFailedLoginAttempt(cleanEmail);
+      setLockoutSeconds(nextLock.remainingSeconds);
+      setFailedAttemptsCount(nextLock.failures);
+      void logSecurityAuditEventInRTDB({
+        action: nextLock.locked ? 'bloqueo_login_temporal' : 'intento_login_fallido',
+        severity: nextLock.locked ? 'critical' : 'warning',
+        summary: nextLock.locked
+          ? `Bloqueo temporal (${nextLock.remainingSeconds}s) activado tras ${nextLock.failures} intentos fallidos para ${cleanEmail}`
+          : `Intento fallido de inicio de sesión (#${nextLock.failures}) para ${cleanEmail}`,
+        anonymousEmail: cleanEmail,
+        metadata: {
+          failures: nextLock.failures,
+          lockedSeconds: nextLock.remainingSeconds,
+        },
+      });
       setErrorMessage(
-        err?.message || 'No fue posible iniciar sesión. Verifica tus credenciales.'
+        nextLock.locked
+          ? `${err?.message || 'Credenciales inválidas.'} Se activó bloqueo temporal de ${nextLock.remainingSeconds}s por seguridad (intento #${nextLock.failures}).`
+          : err?.message || 'No fue posible iniciar sesión. Verifica tus credenciales.'
       );
     } finally {
       setIsSubmitting(false);
@@ -346,17 +412,38 @@ export const LoginView: React.FC<LoginViewProps> = ({
                   </button>
                 </div>
 
+                {lockoutSeconds > 0 && (
+                  <div
+                    role="status"
+                    className="p-3 rounded-xl bg-amber-500/15 border border-amber-500/40 text-xs text-amber-800 dark:text-amber-300 flex items-center gap-2.5"
+                  >
+                    <Clock className="w-4 h-4 shrink-0" />
+                    <span>
+                      Protección activa ({failedAttemptsCount} intentos fallidos): espera{' '}
+                      <strong className="font-mono">{lockoutSeconds}s</strong> para reintentar.
+                    </span>
+                  </div>
+                )}
+
                 <button
                   type="submit"
-                  disabled={isSubmitting}
+                  disabled={isSubmitting || lockoutSeconds > 0}
                   className={`w-full py-2.5 px-4 rounded-lg text-sm font-semibold bg-[#0D9488] hover:bg-[#0F766E] disabled:bg-[#99F6E4] disabled:text-[#115E59] text-[#FFFFFF] transition-colors flex items-center justify-center gap-2 cursor-pointer ${focusRing}`}
                 >
                   {isSubmitting ? (
                     <Loader2 className="w-4 h-4 animate-spin" />
+                  ) : lockoutSeconds > 0 ? (
+                    <Clock className="w-4 h-4" />
                   ) : (
                     <Fingerprint className="w-4 h-4" />
                   )}
-                  <span>{isSubmitting ? 'Verificando acceso...' : 'Iniciar sesión'}</span>
+                  <span>
+                    {isSubmitting
+                      ? 'Verificando acceso...'
+                      : lockoutSeconds > 0
+                      ? `Bloqueado (${lockoutSeconds}s)`
+                      : 'Iniciar sesión'}
+                  </span>
                 </button>
 
                 <button
@@ -561,8 +648,45 @@ export const LoginView: React.FC<LoginViewProps> = ({
               </form>
             )}
 
-            <div className="pt-4 border-t border-[#E2E8F0] text-xs text-[#64748B] leading-relaxed">
-              Las cuentas de acceso son habilitadas únicamente por un responsable autorizado de cada organización. Si fuiste desvinculado de una empresa anterior y te contrataron en una nueva, solicita que registren tu correo para crear tu nueva cuenta.
+            <div className="pt-4 border-t border-[#E2E8F0] dark:border-slate-800 space-y-3">
+              <div className="p-3 rounded-xl bg-amber-50 dark:bg-amber-950/30 border border-amber-200 dark:border-amber-800/50 flex items-start gap-2.5 text-[11px] text-amber-900 dark:text-amber-200 leading-relaxed">
+                <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <strong>Sistema Monitoreado · Acceso Restringido:</strong> Uso exclusivo para personal
+                  autorizado. Toda actividad queda auditada conforme a la <strong>Ley 21.459</strong>{' '}
+                  (Delitos Informáticos) y <strong>Ley 21.663</strong> (Ley Marco de Ciberseguridad).
+                </div>
+              </div>
+              <p className="text-xs text-[#64748B] dark:text-slate-400 leading-relaxed">
+                Las cuentas de acceso son habilitadas únicamente por un responsable autorizado de cada
+                organización. Si fuiste desvinculado de una empresa anterior y te contrataron en una nueva,
+                solicita que registren tu correo para crear tu nueva cuenta.
+              </p>
+              <div className="flex flex-wrap items-center gap-3 text-[11px] font-semibold">
+                <button
+                  type="button"
+                  onClick={() => setLegalModalTab('privacidad')}
+                  className="text-[#0F766E] dark:text-[#2DD4BF] hover:underline cursor-pointer"
+                >
+                  Política de Privacidad (Ley 19.628 / 21.719)
+                </button>
+                <span className="text-slate-400">·</span>
+                <button
+                  type="button"
+                  onClick={() => setLegalModalTab('terminos')}
+                  className="text-[#0F766E] dark:text-[#2DD4BF] hover:underline cursor-pointer"
+                >
+                  Términos de Uso
+                </button>
+                <span className="text-slate-400">·</span>
+                <button
+                  type="button"
+                  onClick={() => setLegalModalTab('ciberseguridad')}
+                  className="text-[#0F766E] dark:text-[#2DD4BF] hover:underline cursor-pointer"
+                >
+                  Aviso Ciberseguridad
+                </button>
+              </div>
             </div>
           </div>
 
@@ -570,7 +694,7 @@ export const LoginView: React.FC<LoginViewProps> = ({
             <button
               type="button"
               onClick={onBackToLanding}
-              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#475569] hover:text-[#0F766E] transition-colors cursor-pointer"
+              className="inline-flex items-center gap-1.5 text-xs font-semibold text-[#475569] dark:text-slate-400 hover:text-[#0F766E] dark:hover:text-[#2DD4BF] transition-colors cursor-pointer"
             >
               <ArrowLeft className="w-3.5 h-3.5" />
               <span>Regresar a la portada de MineSafe</span>
@@ -578,6 +702,13 @@ export const LoginView: React.FC<LoginViewProps> = ({
           </div>
         </div>
       </main>
+
+      <LegalComplianceModal
+        isOpen={Boolean(legalModalTab)}
+        initialTab={legalModalTab || 'privacidad'}
+        onClose={() => setLegalModalTab(null)}
+        theme={theme}
+      />
     </div>
   );
 };

@@ -42,6 +42,25 @@ import { resolveNode3DLiveTelemetry } from '../src/components/Node3DInspectorVie
 import { resolveGatewayLiveTelemetry } from '../src/components/Gateway3DInspectorView';
 import { computeSectionPreviewDiff } from '../src/components/SuperAdminWindowPreview';
 import {
+  CURRENT_LEGAL_CONSENT_VERSION,
+  DS132_DS594_NORMATIVE_LIMITS,
+  INACTIVITY_TIMEOUT_MS,
+  MINESAFE_SECURITY_HEADERS,
+  buildAnonymizedUserData,
+  buildUserPersonalDataExportJson,
+  canAnonymizeUserPII,
+  canExportUserARCOPData,
+  canViewSecurityAuditTab,
+  clearFailedLoginAttempts,
+  computeSha256Hex,
+  createSlidingWindowRateLimiter,
+  evaluateLoginLockout,
+  recordFailedLoginAttempt,
+  signCsvExportWithIntegritySeal,
+  validateTelemetryIngestPayload,
+  verifyConstantTimeToken,
+} from '../src/utils/securityCompliance';
+import {
   assignWorkersToCrew,
   buildCrewMemberFromUser,
   belongsToOrganization,
@@ -2893,6 +2912,181 @@ async function runTests() {
   );
 
   console.log('✅ 33. Shared Node Assignment to Org Users & Device Lifecycle (Block/Edit/Change/Delete) passed');
+
+  // ---------------------------------------------------------------------------
+  // 34. SEGURIDAD Y CUMPLIMIENTO LEGAL INTEGRAL (7 PILARES: OWASP, ISO 27001, LEY 19.628/21.719, DS 132/594, LEY 21.663/21.459)
+  // ---------------------------------------------------------------------------
+  // 34.1 Constant-time token verification & sliding-window rate limiter (server hardening)
+  assert.equal(verifyConstantTimeToken('secret-token-123', 'secret-token-123'), true);
+  assert.equal(verifyConstantTimeToken('secret-token-124', 'secret-token-123'), false);
+  assert.equal(verifyConstantTimeToken('short', 'secret-token-123'), false);
+  assert.equal(verifyConstantTimeToken('', 'secret-token-123'), false);
+  assert.equal(verifyConstantTimeToken('secret-token-123', ''), false);
+
+  const limiter = createSlidingWindowRateLimiter({ maxRequests: 3, windowMs: 60_000 });
+  const t0 = 1_760_000_000_000;
+  assert.equal(limiter.check('10.0.0.1:devA', t0).allowed, true);
+  assert.equal(limiter.check('10.0.0.1:devA', t0 + 1000).allowed, true);
+  assert.equal(limiter.check('10.0.0.1:devA', t0 + 2000).allowed, true);
+  const blockedCheck = limiter.check('10.0.0.1:devA', t0 + 3000);
+  assert.equal(blockedCheck.allowed, false, '4th request within window is rate-limited');
+  assert.ok(blockedCheck.retryAfterMs > 0);
+  assert.equal(limiter.check('10.0.0.1:devA', t0 + 61_000).allowed, true, 'Window slides and allows again');
+
+  assert.equal(validateTelemetryIngestPayload({ deviceId: 'device_38A839E81F84', CO: 120, PM2_5: 25, temperatura: 22, humedad: 50 }).valid, true);
+  assert.equal(validateTelemetryIngestPayload({ deviceId: '../bad', CO: 10 }).valid, false);
+  assert.equal(validateTelemetryIngestPayload({ deviceId: 'device_OK', temperatura: 999 }).valid, false);
+  assert.equal(MINESAFE_SECURITY_HEADERS['X-Content-Type-Options'], 'nosniff');
+  assert.equal('X-Frame-Options' in MINESAFE_SECURITY_HEADERS, false, 'Must not block AI Studio iframe embedding');
+
+  // 34.2 Progressive login lockout (ISO 27001 anti-brute-force)
+  const memMap = new Map<string, string>();
+  const mockStorage = {
+    getItem: (k: string) => memMap.get(k) ?? null,
+    setItem: (k: string, v: string) => { memMap.set(k, v); },
+    removeItem: (k: string) => { memMap.delete(k); },
+  };
+  assert.equal(evaluateLoginLockout('operador@test.cl', t0, mockStorage).locked, false);
+  assert.equal(recordFailedLoginAttempt('operador@test.cl', t0 + 100, mockStorage).locked, false);
+  assert.equal(recordFailedLoginAttempt('operador@test.cl', t0 + 200, mockStorage).locked, false);
+  const lock3 = recordFailedLoginAttempt('operador@test.cl', t0 + 300, mockStorage);
+  assert.equal(lock3.locked, true, '3rd consecutive failure triggers 15s cooldown');
+  assert.equal(lock3.remainingSeconds, 15);
+  assert.equal(evaluateLoginLockout('operador@test.cl', t0 + 5_000, mockStorage).locked, true);
+  assert.equal(evaluateLoginLockout('operador@test.cl', t0 + 20_000, mockStorage).locked, false);
+  clearFailedLoginAttempts('operador@test.cl', mockStorage);
+  assert.equal(evaluateLoginLockout('operador@test.cl', t0 + 20_500, mockStorage).failures, 0);
+  assert.equal(INACTIVITY_TIMEOUT_MS, 15 * 60 * 1000, 'Inactivity timeout must be 15 minutes');
+
+  // 34.3 SHA-256 verifiable integrity seal (DS 132 / DS 594)
+  const sampleCsv = '\uFEFFDispositivo,Valor\ndevice_38A839E81F84,42\n';
+  const signedA = await signCsvExportWithIntegritySeal({
+    csvContent: sampleCsv,
+    reportType: 'Telemetría CO',
+    deviceId: 'device_38A839E81F84',
+    actorName: 'Manuel Crisostomo',
+    actorRole: 'superadmin',
+    now: new Date('2026-11-25T12:00:00.000Z'),
+  });
+  const signedB = await signCsvExportWithIntegritySeal({
+    csvContent: sampleCsv.replace('42', '43'),
+    reportType: 'Telemetría CO',
+    deviceId: 'device_38A839E81F84',
+    actorName: 'Manuel Crisostomo',
+    actorRole: 'superadmin',
+    now: new Date('2026-11-25T12:00:00.000Z'),
+  });
+  assert.equal(signedA.seal.sha256.length, 64, 'SHA-256 hex digest must be 64 characters');
+  assert.notEqual(signedA.seal.sha256, signedB.seal.sha256, 'Tampering changes SHA-256 integrity hash');
+  assert.ok(signedA.seal.folio.startsWith('MS-DS132-20261125-'));
+  assert.ok(signedA.signedCsv.includes('# === SELLO DE INTEGRIDAD CRIPTOGRÁFICA MINESAFE IOT ==='));
+  assert.ok(signedA.signedCsv.includes(signedA.seal.sha256));
+  const rawDigestCheck = await computeSha256Hex('Dispositivo,Valor\ndevice_38A839E81F84,42\n');
+  assert.equal(rawDigestCheck, signedA.seal.sha256, 'Digest matches body without BOM');
+  assert.ok(DS132_DS594_NORMATIVE_LIMITS.length >= 4, 'Normative DS 132/594 limits table populated');
+
+  // 34.4 ARCOP (Ley 19.628 / Nueva Ley 21.719) & Security Audit RBAC
+  const supSec: UserProfile = {
+    ...opA,
+    id: 'sup-sec-1',
+    role: 'supervisor',
+    roleLabel: 'Supervisor Ambiental',
+  };
+  assert.equal(canViewSecurityAuditTab(sa), true);
+  assert.equal(canViewSecurityAuditTab(admMs), true);
+  assert.equal(canViewSecurityAuditTab(admA), false);
+  assert.equal(canViewSecurityAuditTab(supSec), false);
+  assert.equal(canViewSecurityAuditTab(opA), false);
+  assert.equal(isTabVisibleForUser('auditoria_seguridad', sa, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isTabVisibleForUser('auditoria_seguridad', admMs, DEFAULT_PLATFORM_CONFIG), true);
+  assert.equal(isTabVisibleForUser('auditoria_seguridad', admA, DEFAULT_PLATFORM_CONFIG), false);
+  assert.equal(isTabVisibleForUser('auditoria_seguridad', opA, DEFAULT_PLATFORM_CONFIG), false);
+
+  assert.equal(canExportUserARCOPData(opA, opA).allowed, true, 'User can export own ARCOP data');
+  assert.equal(canExportUserARCOPData(opA, admA).allowed, false, 'Operador cannot export another user ARCOP data');
+  assert.equal(canExportUserARCOPData(admA, opA).allowed, true, 'Org admin can export same-org user ARCOP data');
+  assert.equal(canExportUserARCOPData(admA, opB).allowed, false, 'Org admin cannot export cross-org user ARCOP data');
+
+  assert.equal(canAnonymizeUserPII(sa, opA).allowed, true);
+  assert.equal(canAnonymizeUserPII(admMs, opA).allowed, true);
+  assert.equal(canAnonymizeUserPII(admMs, sa).allowed, false, 'Admin MineSafe cannot anonymize SuperAdmin');
+  assert.equal(canAnonymizeUserPII(admA, opA).allowed, false, 'Org admin cannot anonymize PII');
+  assert.equal(canAnonymizeUserPII(sa, sa).allowed, false, 'Cannot anonymize own active account');
+
+  const arcopExport = buildUserPersonalDataExportJson({
+    targetUser: opA,
+    actingUser: sa,
+    organizations: [],
+  });
+  assert.equal(arcopExport.schemaVersion, '1.0-ARCOP');
+  assert.equal(arcopExport.dataSubject.id, opA.id);
+  const anonPatch = buildAnonymizedUserData(opA, sa, t0);
+  assert.equal(anonPatch.rut, 'ANONIMIZADO');
+  assert.equal(anonPatch.status, 'inactivo');
+  assert.ok(anonPatch.email.endsWith('@minesafe.invalid'));
+  assert.ok(anonPatch.name.includes('Anonimizado'));
+
+  // 34.5 Static verification of all 7 security & legal compliance integrations across codebase
+  const serverSecSrc = readRepoFile('server.ts');
+  const envExSrc = readRepoFile('.env.example');
+  const loginViewSecSrc = readRepoFile('src/components/LoginView.tsx');
+  const landingSecSrc = readRepoFile('src/components/PublicLanding.tsx');
+  const legalModalSrc = readRepoFile('src/components/LegalComplianceModal.tsx');
+  const secAuditSrc = readRepoFile('src/components/SecurityAuditView.tsx');
+  const reportsSecSrc = readRepoFile('src/components/HistoricalReportsView.tsx');
+  const alertsSecSrc = readRepoFile('src/components/AlertsView.tsx');
+  const appSecSrc = readRepoFile('src/App.tsx');
+  const usersSecSrc = readRepoFile('src/components/UsersManagementView.tsx');
+
+  assert.ok(
+    serverSecSrc.includes('MINESAFE_SECURITY_HEADERS') &&
+      serverSecSrc.includes('verifyConstantTimeToken') &&
+      serverSecSrc.includes('ingestRateLimiter') &&
+      serverSecSrc.includes('INGEST_API_TOKEN') &&
+      !serverSecSrc.includes('X-Frame-Options') &&
+      envExSrc.includes('INGEST_API_TOKEN'),
+    'server.ts applies iframe-safe security headers, constant-time bearer auth, and rate limiting'
+  );
+  assert.ok(
+    loginViewSecSrc.includes('evaluateLoginLockout') &&
+      loginViewSecSrc.includes('recordFailedLoginAttempt') &&
+      loginViewSecSrc.includes('Ley 21.459') &&
+      loginViewSecSrc.includes('Ley 21.663') &&
+      loginViewSecSrc.includes('LegalComplianceModal'),
+    'LoginView enforces progressive lockout, audit logging, and Ley 21.459/21.663 notice'
+  );
+  assert.ok(
+    landingSecSrc.includes('LegalComplianceModal') &&
+      !legalModalSrc.includes('firebase/'),
+    'PublicLanding exposes legal compliance modal while keeping zero Firebase imports'
+  );
+  assert.ok(
+    secAuditSrc.includes('Bitácora ISO 27001') &&
+      secAuditSrc.includes('Incidentes Ley 21.663') &&
+      secAuditSrc.includes('CSIRT') &&
+      secAuditSrc.includes('signCsvExportWithIntegritySeal'),
+    'SecurityAuditView provides ISO 27001 audit log, Ley 21.663 CSIRT incidents, and compliance dashboard'
+  );
+  assert.ok(
+    reportsSecSrc.includes('signCsvExportWithIntegritySeal') &&
+      reportsSecSrc.includes('DS132_DS594_NORMATIVE_LIMITS') &&
+      alertsSecSrc.includes('signCsvExportWithIntegritySeal'),
+    'HistoricalReportsView and AlertsView seal exported CSVs with SHA-256 and reference DS 132/594'
+  );
+  assert.ok(
+    appSecSrc.includes('LegalConsentGateModal') &&
+      appSecSrc.includes('InactivityWarningModal') &&
+      appSecSrc.includes('INACTIVITY_TIMEOUT_MS') &&
+      appSecSrc.includes('CURRENT_LEGAL_CONSENT_VERSION') &&
+      appSecSrc.includes("currentTab === 'auditoria_seguridad'") &&
+      usersSecSrc.includes('anonymizeUserPIIInRTDB') &&
+      usersSecSrc.includes('handleExportARCOP') &&
+      usersSecSrc.includes('acceso_pii_rut') &&
+      usersSecSrc.includes('acceso_pii_email'),
+    'App and UsersManagementView wire inactivity logout, mandatory legal consent, ARCOP export/anonymization, and PII unlock audit trail'
+  );
+
+  console.log(`✅ 34. Security & Legal Compliance (7 Pillars · v${CURRENT_LEGAL_CONSENT_VERSION}) passed`);
 
   console.log('\n🎉 ALL P031 COMPREHENSIVE TESTS PASSED!');
 }

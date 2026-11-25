@@ -8,6 +8,7 @@ import {
   Calendar,
   Layers,
   Activity,
+  ShieldCheck,
 } from 'lucide-react';
 import {
   TelemetryVariable,
@@ -20,8 +21,12 @@ import {
   PlatformConfig,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { isSectionVisibleForUser } from '../services/firebase';
+import { isSectionVisibleForUser, logSecurityAuditEventInRTDB } from '../services/firebase';
 import { getTodayIsoDate, validateDateRange } from '../utils/dateRange';
+import {
+  DS132_DS594_NORMATIVE_LIMITS,
+  signCsvExportWithIntegritySeal,
+} from '../utils/securityCompliance';
 
 export interface TelemetryRangeWindow {
   key: TelemetryRangeKey;
@@ -645,6 +650,11 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
   const exportSampleCount =
     chartMode === 'consolidated' ? filteredHistoryPoints.length : fullSeries.length;
 
+  const [lastExportSealInfo, setLastExportSealInfo] = useState<{
+    folio: string;
+    shortHash: string;
+  } | null>(null);
+
   const handleExportCSV = async () => {
     if (isExportingCsv || !customRangeValidation.valid || exportSampleCount === 0) return;
     setIsExportingCsv(true);
@@ -652,7 +662,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
     try {
       const safeDeviceId = activeDeviceId || 'sin_dispositivo';
       const sectorName = currentSite.activeSectors?.[0]?.name || activeDeviceName || 'Sector Minero';
-      const csvContent =
+      const rawCsvContent =
         chartMode === 'consolidated'
           ? await buildConsolidatedCsvContentAsync({
               points: filteredHistoryPoints,
@@ -669,23 +679,55 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
               sectorName,
             });
 
-      const blob = new Blob([csvContent], { type: 'text/csv;charset=utf-8;' });
+      const { signedCsv, seal } = await signCsvExportWithIntegritySeal({
+        csvContent: rawCsvContent,
+        reportType:
+          chartMode === 'consolidated'
+            ? `Telemetría Consolidada 4 Variables (${timeRange})`
+            : `Telemetría ${currentVar.name} (${timeRange})`,
+        deviceId: safeDeviceId,
+        actorName: currentUser?.name || 'Operador MineSafe',
+        actorRole: currentUser?.role || 'usuario',
+        normativeRef: 'DS 132 (Sernageomin) / DS 594 (MINSAL)',
+        rowCount: exportSampleCount,
+      });
+
+      const blob = new Blob([signedCsv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       link.href = url;
       link.setAttribute(
         'download',
         chartMode === 'consolidated'
-          ? `minesafe_consolidado_${safeDeviceId}_${timeRange}.csv`
-          : `minesafe_reporte_${safeDeviceId}_${currentVar.id}_${timeRange}.csv`
+          ? `minesafe_consolidado_${safeDeviceId}_${timeRange}_${seal.folio}.csv`
+          : `minesafe_reporte_${safeDeviceId}_${currentVar.id}_${timeRange}_${seal.folio}.csv`
       );
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
+      void logSecurityAuditEventInRTDB(
+        {
+          action: 'exportacion_reporte_sellado',
+          severity: 'info',
+          summary: `Reporte CSV (${chartMode === 'consolidated' ? 'consolidado' : currentVar.name}) sellado SHA-256 · Folio ${seal.folio} (${exportSampleCount} muestras)`,
+          organizationId: currentUser?.organizationId,
+          targetType: 'reporte_telemetria',
+          targetId: safeDeviceId,
+          targetLabel: seal.folio,
+          metadata: {
+            folio: seal.folio,
+            sha256Short: seal.shortHash,
+            rows: exportSampleCount,
+          },
+        },
+        currentUser
+      );
+
+      setLastExportSealInfo({ folio: seal.folio, shortHash: seal.shortHash });
       setShowExportSuccess(true);
-      setTimeout(() => setShowExportSuccess(false), 3000);
+      setTimeout(() => setShowExportSuccess(false), 6000);
     } finally {
       setIsExportingCsv(false);
     }
@@ -775,7 +817,10 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           <div className="mt-4 p-3 bg-emerald-950/80 border border-emerald-800 text-emerald-300 rounded-lg text-xs flex items-center gap-2 animate-in fade-in">
             <CheckCircle className="w-4 h-4 text-emerald-400 shrink-0" />
             <span>
-              Archivo CSV generado exitosamente con marca temporal completa ISO y orden cronológico ({exportSampleCount} muestras).
+              Archivo CSV sellado criptográficamente (SHA-256) con marca temporal ISO ({exportSampleCount} muestras)
+              {lastExportSealInfo
+                ? ` · Folio ${lastExportSealInfo.folio} · SHA-256: ${lastExportSealInfo.shortHash}`
+                : ''}.
             </span>
           </div>
         )}
@@ -1364,6 +1409,43 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
           )}
         </div>
       )}
+
+      {/* Referencia Normativa DS 132 (Sernageomin) y DS 594 (MINSAL) */}
+      <div className="bg-slate-900/60 border border-slate-800 rounded-xl p-4 sm:p-6 space-y-3">
+        <div className="flex flex-wrap items-center justify-between gap-2">
+          <div className="flex items-center gap-2">
+            <ShieldCheck className="w-5 h-5 text-emerald-400 shrink-0" />
+            <h3 className="text-sm sm:text-base font-bold text-white">
+              Referencia Normativa Minera y Ambiental (DS 132 · DS 594 · Sello SHA-256)
+            </h3>
+          </div>
+          <span className="text-[11px] font-semibold px-2.5 py-1 rounded-md bg-emerald-950/70 text-emerald-300 border border-emerald-800/70">
+            Integridad Verificable SHA-256 en Exportaciones
+          </span>
+        </div>
+        <div className="overflow-x-auto rounded-lg border border-slate-800">
+          <table className="w-full text-left text-xs text-slate-300">
+            <thead className="bg-slate-950 text-slate-400 uppercase text-[10px] tracking-wider">
+              <tr>
+                <th className="px-3.5 py-2.5">Variable</th>
+                <th className="px-3.5 py-2.5">Límites Referenciales DS 594 (MINSAL)</th>
+                <th className="px-3.5 py-2.5">Marco DS 132 (Sernageomin)</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-800/80">
+              {DS132_DS594_NORMATIVE_LIMITS.map((entry) => (
+                <tr key={entry.variable} className="hover:bg-slate-800/30">
+                  <td className="px-3.5 py-2.5 font-semibold text-white whitespace-nowrap">
+                    {entry.variable}
+                  </td>
+                  <td className="px-3.5 py-2.5 text-amber-300">{entry.ds594Limit}</td>
+                  <td className="px-3.5 py-2.5 text-slate-400">{entry.ds132Context}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      </div>
     </div>
   );
 };

@@ -36,7 +36,12 @@ import {
 import { ESP32GatewaySection } from './ESP32GatewaySection';
 import { DualReadingSensorCards } from './DualReadingSensorCards';
 import { InteractiveDeviceChartAndUsers } from './InteractiveDeviceChartAndUsers';
-import { isTabVisibleForUser, isSectionVisibleForUser } from '../services/firebase';
+import { BenchTelemetryPanel } from './BenchTelemetryPanel';
+import {
+  PHYSICAL_NODE_DEVICE_ID,
+  isTabVisibleForUser,
+  isSectionVisibleForUser,
+} from '../services/firebase';
 
 interface DashboardViewProps {
   variables?: TelemetryVariable[];
@@ -69,6 +74,7 @@ interface DashboardViewProps {
   usersList?: UserProfile[];
   onChangeUserModal?: () => void;
   platformConfig?: PlatformConfig;
+  isFirebaseConnected?: boolean;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -98,6 +104,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   usersList = [],
   onChangeUserModal,
   platformConfig,
+  isFirebaseConnected = false,
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isOperador = currentUser?.role === 'operador';
@@ -396,6 +403,30 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
 
         {/* ==============================================================
+            TELEMETRÍA DE BANCO ESP32 (NODO FÍSICO /diagnostico/esp32_p087)
+           ============================================================== */}
+        {(() => {
+          const benchDevice =
+            (activeDevice &&
+            (activeDevice.id === PHYSICAL_NODE_DEVICE_ID || activeDevice.isBenchTelemetry)
+              ? activeDevice
+              : devices.find(
+                  (d) => d.id === PHYSICAL_NODE_DEVICE_ID || d.isBenchTelemetry
+                )) || null;
+          if (!benchDevice || isOperatorUnassigned) return null;
+          return (
+            <div className="relative z-10 mb-8">
+              <BenchTelemetryPanel
+                device={benchDevice}
+                isFirebaseConnected={isFirebaseConnected}
+                timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
+                onNavigate={safeNavigate}
+              />
+            </div>
+          );
+        })()}
+
+        {/* ==============================================================
             GATEWAYS POR SECTOR Y CONTROL DE ALARMA
            ============================================================== */}
         {showGatewaySection && (appCfg?.showESP32Section ?? true) && (
@@ -466,7 +497,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <h3 className="text-sm font-bold text-white">ALERTAS INSTANTÁNEAS</h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Activación automática de sirena y baliza luminosa ante superación de umbrales normativos DS 132.
+                Señalización mediante Matriz LED MAX7219 (8×32), Audio I2S y Pantalla TFT ST7789 ante superación de umbrales.
               </p>
             </div>
 
@@ -517,7 +548,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <h3 className="text-sm font-bold text-white">PROPAGACIÓN MULTI-NODO</h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Despacho coordinado de alarmas y balizas desde cada Gateway hacia todos sus nodos subordinados.
+                Despacho coordinado de alertas y señalización de simulación desde cada Gateway hacia sus nodos subordinados.
               </p>
             </div>
 

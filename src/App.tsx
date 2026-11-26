@@ -1634,7 +1634,7 @@ export default function App({
       setAlerts(prev => prev.map(a => (!a.resolved ? { ...a, resolved: true, acknowledged: true } : a)));
       resolveActiveAlertsInRTDB(
         alertsRef.current.filter((a) => !a.resolved && a.id.startsWith('alt-')),
-        'Alarma y baliza apagadas desde consola de administración.',
+        'Alarma y señalización detenidas desde consola de administración.',
         currentUser.name || 'Administración'
       ).catch(() => {});
 
@@ -1651,7 +1651,7 @@ export default function App({
       } : d));
 
       showAlarmFeedback(
-        `Alarma y baliza apagadas y propagadas a ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        `Alarma y señalización (solo simulaciones) detenidas y propagadas a ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
         'success'
       );
     } catch (err: any) {
@@ -1730,7 +1730,7 @@ export default function App({
     const titleMap: Record<DrillType, string> = {
       gas_critico: '[SIMULACRO DS 132] Fuga Crítica de Monóxido de Carbono (CO > 50 ppm / 1250 ADC)',
       incendio_polvo: '[SIMULACRO DS 132] Principio de Incendio y Humo Denso (PM2.5 > 500 µg/m³)',
-      evacuacion_sirena: '[SIMULACRO DS 132] Evacuación Inmediata de Faena por Alarma Sonora y Baliza',
+      evacuacion_sirena: '[SIMULACRO DS 132] Evacuación Inmediata de Faena por Audio I2S y Matriz LED MAX7219',
     };
 
     const now = Date.now();
@@ -1746,7 +1746,7 @@ export default function App({
       sensorId: dev?.id || 'device_38A839E81F84',
       sensorCode: dev?.code || 'device_38A839E81F84',
       sectorName: dev?.sectorName || 'Mina Chuquicamata - Rampa Principal',
-      recordedValue: type === 'gas_critico' ? '1250 ADC (55.4 ppm)' : type === 'incendio_polvo' ? '650 µg/m³' : 'Sirena y Baliza Activas',
+      recordedValue: type === 'gas_critico' ? '1250 ADC (simulación)' : type === 'incendio_polvo' ? '650 µg/m³' : 'Audio I2S y Matriz LED Activos',
       safeLimit: type === 'gas_critico' ? '< 25.0 ppm' : '< 50 µg/m³',
       timestamp: new Date(now).toLocaleString('es-CL', {
         day: '2-digit',
@@ -1867,7 +1867,7 @@ export default function App({
       const propSet = new Set(propagationIds);
       setDevices((prev) => prev.map((d) => (propSet.has(d.id) ? { ...d, alarmaActiva: true } : d)));
       showAlarmFeedback(
-        `Alarma sonora y baliza luminosa activadas automáticamente en ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        `Señalización de simulación (Audio I2S / Matriz LED) activada en ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
         'success'
       );
     } catch (err: any) {
@@ -1877,11 +1877,11 @@ export default function App({
 
   const handleToggleLight = useCallback(async () => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
-      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden controlar actuadores de luz/baliza.', 'error');
+      showAlarmFeedback('Acceso denegado: Operadores y Supervisores no pueden controlar señalización LED de simulación.', 'error');
       return;
     }
     if (!activeTelemetryDeviceId) {
-      showAlarmFeedback('No hay dispositivo activo en esta empresa para controlar la baliza LED.', 'error');
+      showAlarmFeedback('No hay dispositivo activo en esta empresa para controlar la señalización LED.', 'error');
       return;
     }
     const next = !isLightActive;
@@ -2679,15 +2679,27 @@ export default function App({
   const activeAlerts = scopedAlerts.filter(a => !a.resolved);
 
   // Check if gas or dust in the active device is in critical threshold (Prompt Req 4)
-  // An emergency in terrain MUST ONLY trigger if the device is ONLINE and its channels are NOT in sensor fault.
+  // An emergency in terrain MUST ONLY trigger if the device is ONLINE, NOT bench telemetry,
+  // its channels are NOT in sensor fault, and ADC is NOT saturated (4095).
   const activeDevice = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
   const isDeviceOnline = Boolean(activeDevice?.gatewayOnline);
+  const isBenchDevice = Boolean(activeDevice?.isBenchTelemetry);
   const activeFaults = new Set(activeDevice?.faultFields || []);
   const rawGas = activeDevice?.rawCO !== undefined ? activeDevice.rawCO : activeDevice?.metrics?.co || 0;
   const rawDust = activeDevice?.rawPM25 !== undefined ? activeDevice.rawPM25 : activeDevice?.metrics?.polvoPM || 0;
 
-  const isGasCritical = isDeviceOnline && !activeFaults.has('CO') && rawGas >= platformConfig.metrics.emergencyGasThreshold;
-  const isDustCritical = isDeviceOnline && !activeFaults.has('PM2_5') && rawDust >= platformConfig.metrics.emergencyDustThreshold;
+  const isGasCritical =
+    isDeviceOnline &&
+    !isBenchDevice &&
+    !activeFaults.has('CO') &&
+    rawGas < 4095 &&
+    rawGas >= platformConfig.metrics.emergencyGasThreshold;
+  const isDustCritical =
+    isDeviceOnline &&
+    !isBenchDevice &&
+    !activeFaults.has('PM2_5') &&
+    rawDust < 4095 &&
+    rawDust >= platformConfig.metrics.emergencyDustThreshold;
   const isFieldEmergencyActive = (isGasCritical || isDustCritical || isAlarmActive || isDrillActive) && !dismissEmergencyBanner;
 
   const CONTROLLABLE_ORDER: ControllableTab[] = [
@@ -2856,7 +2868,7 @@ export default function App({
                     Entrenamiento DS 132: sirenas y lecturas forzadas temporalmente solo para validación operativa
                   </>
                 ) : (
-                  '¡ALERTA REAL EN TERRENO: Baliza estroboscópica y sirena acústica activadas en el nodo sensor!'
+                  '¡ALERTA ACTIVA EN TERRENO: Señalización Matriz LED MAX7219, Audio I2S y Pantalla TFT activados en el nodo!'
                 )}
               </span>
             </div>
@@ -2878,7 +2890,7 @@ export default function App({
                     isDrillActive ? 'bg-black text-amber-300 hover:bg-slate-900 border border-amber-400' : 'bg-white hover:bg-slate-100 text-red-700'
                   } text-xs font-black uppercase rounded shadow transition-colors whitespace-nowrap`}
                 >
-                  {isDrillActive ? 'Finalizar y Apagar Todo' : 'Apagar Alarma y Baliza'}
+                  {isDrillActive ? 'Finalizar y Apagar Todo' : 'Detener Alarma y Señalización'}
                 </button>
               ) : (
                 <span className="inline-flex items-center gap-1.5 px-2.5 py-1 rounded bg-black/50 border border-white/25 text-[11px] font-bold text-amber-200 whitespace-nowrap">
@@ -2967,6 +2979,7 @@ export default function App({
                 usersList={scopedUsers}
                 onChangeUserModal={() => setShowLoginModal(true)}
                 platformConfig={platformConfig}
+                isFirebaseConnected={isFirebaseConnected}
               />
             )}
 

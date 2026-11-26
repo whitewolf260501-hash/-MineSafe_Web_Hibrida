@@ -71,25 +71,28 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (!isOnline) {
     if (coVal === 4095) {
       coStatusColor = 'amarillo';
-      coFriendlyLabel = 'Sensor No Conectado (Pin Flotante 4095 ADC)';
+      coFriendlyLabel = 'Saturación ADC (4095) · Medición no válida (Desconectado)';
     } else {
       coStatusColor = 'amarillo';
-      coFriendlyLabel = 'Gateway Desconectado (En Espera de Señal)';
+      coFriendlyLabel = 'Dispositivo Desconectado (Sin datos vigentes)';
     }
   } else if (coVal === 4095) {
     coStatusColor = 'amarillo';
-    coFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
+    coFriendlyLabel = 'Saturación ADC (4095) · Medición no válida';
+  } else if (device.isBenchTelemetry) {
+    coStatusColor = 'verde';
+    coFriendlyLabel = 'Lectura de banco (prototipo académico, sin alerta operacional)';
   } else if (coVal >= 500) {
     coStatusColor = 'rojo';
-    coFriendlyLabel = '¡PELIGRO: Nivel Crítico! (Baliza y Alarma activadas)';
+    coFriendlyLabel = '¡PELIGRO: Nivel Crítico! (Matriz LED, Audio I2S y TFT activos)';
   } else if (coVal >= 350) {
     coStatusColor = 'amarillo';
-    coFriendlyLabel = 'Precaución: Presencia de gas';
+    coFriendlyLabel = 'Precaución: Presencia de gas (ADC raw)';
   }
 
-  // 2. Calidad de Aire / Polvo en suspensión (PM2.5) Evaluation
+  // 2. Calidad de Aire / Polvo en suspensión (Sensor óptico OPEN-SMART) Evaluation
   let pmStatusColor: 'verde' | 'amarillo' | 'rojo' = 'verde';
-  let pmFriendlyLabel = 'Baja densidad de partículas';
+  let pmFriendlyLabel = 'Baja densidad estimada de partículas';
 
   if (pmFault || pmVal === undefined || !Number.isFinite(pmVal)) {
     pmStatusColor = 'amarillo';
@@ -97,20 +100,23 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (!isOnline) {
     if (pmVal === 4095) {
       pmStatusColor = 'amarillo';
-      pmFriendlyLabel = 'Sensor No Conectado (Pin Flotante 4095 ADC)';
+      pmFriendlyLabel = 'Saturación ADC (4095) · Medición no válida (Desconectado)';
     } else {
       pmStatusColor = 'amarillo';
-      pmFriendlyLabel = 'Gateway Desconectado (Sin Transmisión)';
+      pmFriendlyLabel = 'Dispositivo Desconectado (Sin Transmisión)';
     }
   } else if (pmVal === 4095) {
     pmStatusColor = 'amarillo';
-    pmFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
+    pmFriendlyLabel = 'Saturación ADC (4095) · Medición no válida';
+  } else if (device.isBenchTelemetry) {
+    pmStatusColor = 'verde';
+    pmFriendlyLabel = 'Estimación óptica OPEN-SMART en banco (sin calibración oficial)';
   } else if (pmVal >= 150) {
     pmStatusColor = 'rojo';
     pmFriendlyLabel = '¡Atmósfera saturada / Peligro respiratorio!';
   } else if (pmVal >= 55) {
     pmStatusColor = 'amarillo';
-    pmFriendlyLabel = 'Polvo moderado';
+    pmFriendlyLabel = 'Polvo moderado (estimación)';
   }
 
   // 3. Confort Térmico (DHT11) Evaluation
@@ -282,8 +288,8 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
               </span>
               <span className="text-[10px] text-slate-400 block font-mono">
                 {pmFault || pmVal === undefined
-                  ? 'Revisar sensor óptico de polvo'
-                  : 'Sharp GP2Y1010 · Precaución 55 · Crítico 150 µg/m³'}
+                  ? 'Revisar sensor óptico de polvo OPEN-SMART'
+                  : 'Sensor óptico OPEN-SMART (estimación sin calibración oficial)'}
               </span>
             </div>
           </div>

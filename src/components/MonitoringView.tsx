@@ -30,7 +30,11 @@ import {
   PlatformConfig,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { FIREBASE_PROJECT_ID, isSectionVisibleForUser } from '../services/firebase';
+import {
+  FIREBASE_PROJECT_ID,
+  classifyCommunicationLink,
+  isSectionVisibleForUser,
+} from '../services/firebase';
 import { isAnyAdminRole, isGlobalMineSafeAdmin } from '../utils/accessControl';
 
 interface MonitoringViewProps {
@@ -564,15 +568,28 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
           const coDisplay =
             device.status === 'desconectado'
               ? '--'
+              : device.rawCO === 4095
+              ? '4095 (SAT)'
               : device.rawCO !== undefined
               ? `${device.rawCO} ADC`
-              : `${device.metrics.co} ppm`;
+              : `${device.metrics.co} ADC`;
           const pmDisplay =
             device.status === 'desconectado'
               ? '--'
+              : device.rawPM25 === 4095
+              ? '4095 (SAT)'
               : device.rawPM25 !== undefined
-              ? `${device.rawPM25} µg/m³`
-              : `${device.metrics.polvoPM} µg/m³`;
+              ? `${device.rawPM25} µg/m³ est.`
+              : `${device.metrics.polvoPM} µg/m³ est.`;
+          const linkMode = classifyCommunicationLink(device);
+          const linkLabel =
+            linkMode === 'wifi_directo'
+              ? 'Wi-Fi directo'
+              : linkMode === 'espnow_gateway'
+              ? 'ESP-NOW vía gateway'
+              : linkMode === 'desconectado'
+              ? 'Desconectado'
+              : 'Origen desconocido';
 
           return (
             <div
@@ -590,16 +607,27 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
               <div>
                 {/* Header: Category Badge & Status */}
                 <div className="flex items-center justify-between gap-2 mb-2">
-                  <span
-                    className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-0.5 rounded border ${
-                      isGateway
-                        ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
-                        : 'bg-indigo-950/70 text-indigo-300 border-indigo-800/60'
-                    }`}
-                  >
-                    {isGateway ? <Server className="w-3 h-3" /> : <Cpu className="w-3 h-3" />}
-                    {getDeviceCategoryLabel(device)}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`inline-flex items-center gap-1.5 text-[11px] font-bold px-2 py-0.5 rounded border ${
+                        isGateway
+                          ? 'bg-cyan-950/70 text-cyan-300 border-cyan-800/60'
+                          : 'bg-indigo-950/70 text-indigo-300 border-indigo-800/60'
+                      }`}
+                    >
+                      {isGateway ? <Server className="w-3 h-3" /> : <Cpu className="w-3 h-3" />}
+                      {getDeviceCategoryLabel(device)}
+                    </span>
+                    {device.isSimulated ? (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-purple-950/70 text-purple-300 border border-purple-700/60">
+                        Simulado
+                      </span>
+                    ) : device.isBenchTelemetry ? (
+                      <span className="text-[10px] font-semibold px-1.5 py-0.5 rounded bg-amber-950/70 text-amber-300 border border-amber-700/60">
+                        Banco físico
+                      </span>
+                    ) : null}
+                  </div>
                   <div>{getStatusBadge(device.status)}</div>
                 </div>
 
@@ -673,7 +701,7 @@ export const MonitoringView: React.FC<MonitoringViewProps> = ({
                     <div className="flex flex-wrap items-center justify-between gap-1 text-[10px] font-mono">
                       <span className="text-purple-300 font-bold truncate">ID: {device.id}</span>
                       <span className="text-slate-400">
-                        {device.via || 'WIFI_DIRECTO'}
+                        {linkLabel}
                         {device.localIp ? ` · ${device.localIp}` : ''}
                       </span>
                     </div>

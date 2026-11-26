@@ -36,7 +36,18 @@ import {
 import { ESP32GatewaySection } from './ESP32GatewaySection';
 import { DualReadingSensorCards } from './DualReadingSensorCards';
 import { InteractiveDeviceChartAndUsers } from './InteractiveDeviceChartAndUsers';
-import { isTabVisibleForUser, isSectionVisibleForUser } from '../services/firebase';
+import { BenchTelemetryPanel } from './BenchTelemetryPanel';
+import { ExperimentalBenchV2Panel } from './ExperimentalBenchV2Panel';
+import {
+  ExperimentalBenchV2State,
+  PHYSICAL_NODE_DEVICE_ID,
+  canAccessExperimentalBenchDevice,
+  createInitialExperimentalBenchV2State,
+  isExperimentalBenchDevice,
+  isSimulatedDevice,
+  isTabVisibleForUser,
+  isSectionVisibleForUser,
+} from '../services/firebase';
 
 interface DashboardViewProps {
   variables?: TelemetryVariable[];
@@ -69,6 +80,10 @@ interface DashboardViewProps {
   usersList?: UserProfile[];
   onChangeUserModal?: () => void;
   platformConfig?: PlatformConfig;
+  isFirebaseConnected?: boolean;
+  onReconnectTelemetry?: () => void;
+  experimentalBenchV2?: ExperimentalBenchV2State;
+  onUpdateExperimentalBenchV2?: (state: ExperimentalBenchV2State) => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -98,9 +113,18 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   usersList = [],
   onChangeUserModal,
   platformConfig,
+  isFirebaseConnected = false,
+  onReconnectTelemetry,
+  experimentalBenchV2,
+  onUpdateExperimentalBenchV2,
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isOperador = currentUser?.role === 'operador';
+  const canViewExperimentalBenchV2 = canAccessExperimentalBenchDevice(currentUser);
+  const operationalDevices = useMemo(
+    () => devices.filter((d) => !isExperimentalBenchDevice(d) && !isSimulatedDevice(d)),
+    [devices]
+  );
 
   const { activeDevice, isOperatorUnassigned } = useMemo(() => {
     if (isOperador && currentUser) {
@@ -125,7 +149,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       });
       const assignedCode = (currentUser.assignedDeviceCode || '').trim().toLowerCase();
       const crewIds = new Set(userCrews.map((c) => c.id));
-      const matched = devices.filter(
+      const matched = operationalDevices.filter(
         (d) =>
           (assignedCode &&
             ((d.code || '').trim().toLowerCase() === assignedCode ||
@@ -140,10 +164,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
       return { activeDevice: chosen, isOperatorUnassigned: false };
     }
     return {
-      activeDevice: devices.find((d) => d.id === activeTelemetryDeviceId) || devices[0],
+      activeDevice:
+        operationalDevices.find((d) => d.id === activeTelemetryDeviceId) || operationalDevices[0],
       isOperatorUnassigned: false,
     };
-  }, [isOperador, currentUser, crews, devices, activeTelemetryDeviceId]);
+  }, [isOperador, currentUser, crews, operationalDevices, activeTelemetryDeviceId]);
   const canSeeEquipos = isTabVisibleForUser('equipos', currentUser ?? null, platformConfig);
   const canSeeAlertas = isTabVisibleForUser('alertas', currentUser ?? null, platformConfig);
   const canSeeMonitoreo = isTabVisibleForUser('monitoreo', currentUser ?? null, platformConfig);
@@ -159,17 +184,17 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   const appCfg = platformConfig?.appearance;
   const metCfg = platformConfig?.metrics;
 
-  const onlineNodesCount = devices.filter((d) => d.status !== 'desconectado').length;
+  const onlineNodesCount = operationalDevices.filter((d) => d.status !== 'desconectado').length;
   const monitoredSectorsCount = useMemo(() => {
     const sectors = new Set<string>();
-    devices.forEach((d) => {
+    operationalDevices.forEach((d) => {
       if (d.sectorName?.trim()) sectors.add(d.sectorName.trim().toLowerCase());
     });
     currentSite.activeSectors.forEach((s) => {
       if (s.name?.trim()) sectors.add(s.name.trim().toLowerCase());
     });
     return sectors.size;
-  }, [devices, currentSite.activeSectors]);
+  }, [operationalDevices, currentSite.activeSectors]);
 
   const totalWorkersOnShift = useMemo(() => {
     const fromSectors = currentSite.activeSectors.reduce(
@@ -302,7 +327,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
               <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
                 <span className="block text-slate-400">Nodos Activos del Total</span>
                 <span className="text-base font-bold text-emerald-400 tabular-nums mt-0.5 block">
-                  {onlineNodesCount} / {devices.length} Nodos Online
+                  {onlineNodesCount} / {operationalDevices.length} Nodos Online
                 </span>
               </div>
               <div className="p-3.5 rounded-xl bg-slate-950/60 border border-slate-800/80">
@@ -367,8 +392,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
             <InteractiveDeviceChartAndUsers
               currentUser={currentUser}
               usersList={usersList}
-              devices={devices}
-              activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
+              devices={operationalDevices}
+              activeDeviceId={activeTelemetryDeviceId || operationalDevices[0]?.id}
               onSelectDevice={(id) => onSelectTelemetryDevice?.(id)}
               onChangeUserModal={onChangeUserModal}
               activeAlertCount={recent24hAlerts.length}
@@ -396,12 +421,55 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
         )}
 
         {/* ==============================================================
+            TELEMETRÍA DE BANCO ESP32 (NODO FÍSICO /diagnostico/esp32_p087)
+           ============================================================== */}
+        {(() => {
+          const benchDevice =
+            (activeDevice &&
+            (activeDevice.id === PHYSICAL_NODE_DEVICE_ID || activeDevice.isBenchTelemetry)
+              ? activeDevice
+              : operationalDevices.find(
+                  (d) => d.id === PHYSICAL_NODE_DEVICE_ID || d.isBenchTelemetry
+                )) || null;
+          if (!benchDevice || isOperatorUnassigned) return null;
+          return (
+            <div className="relative z-10 mb-8">
+              <BenchTelemetryPanel
+                device={benchDevice}
+                isFirebaseConnected={isFirebaseConnected}
+                timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
+                onNavigate={safeNavigate}
+                currentUser={currentUser}
+                onReconnectTelemetry={onReconnectTelemetry}
+              />
+            </div>
+          );
+        })()}
+
+        {/* ==============================================================
+            P094: BANCO EXPERIMENTAL V2 (/dispositivos/device_38A839E81F84_V2)
+            Exclusivo para roles autorizados (SuperAdmin / Admin MineSafe)
+           ============================================================== */}
+        {canViewExperimentalBenchV2 && (
+          <div className="relative z-10 mb-8">
+            <ExperimentalBenchV2Panel
+              state={experimentalBenchV2 || createInitialExperimentalBenchV2State(true)}
+              isFirebaseConnected={isFirebaseConnected}
+              timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
+              currentUser={currentUser}
+              onReconnectTelemetry={onReconnectTelemetry}
+              onUpdateState={onUpdateExperimentalBenchV2}
+            />
+          </div>
+        )}
+
+        {/* ==============================================================
             GATEWAYS POR SECTOR Y CONTROL DE ALARMA
            ============================================================== */}
         {showGatewaySection && (appCfg?.showESP32Section ?? true) && (
           <ESP32GatewaySection
-            devices={devices}
-            activeDeviceId={activeTelemetryDeviceId || devices[0]?.id}
+            devices={operationalDevices}
+            activeDeviceId={activeTelemetryDeviceId || operationalDevices[0]?.id}
             onSelectDevice={(id) => onSelectTelemetryDevice?.(id)}
             onResetPageLevels={onResetPageLevels}
             isAlarmActive={isAlarmActive}
@@ -466,7 +534,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <h3 className="text-sm font-bold text-white">ALERTAS INSTANTÁNEAS</h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Activación automática de sirena y baliza luminosa ante superación de umbrales normativos DS 132.
+                Señalización mediante Matriz LED MAX7219 (8×32), Audio I2S y Pantalla TFT ST7789 ante superación de umbrales.
               </p>
             </div>
 
@@ -517,7 +585,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 <h3 className="text-sm font-bold text-white">PROPAGACIÓN MULTI-NODO</h3>
               </div>
               <p className="text-xs text-slate-400 leading-relaxed">
-                Despacho coordinado de alarmas y balizas desde cada Gateway hacia todos sus nodos subordinados.
+                Despacho coordinado de alertas y señalización de simulación desde cada Gateway hacia sus nodos subordinados.
               </p>
             </div>
 

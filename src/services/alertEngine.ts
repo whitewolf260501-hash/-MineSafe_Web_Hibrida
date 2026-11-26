@@ -11,7 +11,7 @@ import {
   closeAlertLifecycleInRTDB,
   DEFAULT_GLOBAL_THRESHOLDS
 } from './firebase';
-import { DEFAULT_ORGANIZATION_ID } from '../utils/accessControl';
+import { DEFAULT_ORGANIZATION_ID, isSimulatedOrBenchDevice } from '../utils/accessControl';
 import { soundAlert } from './audioAlert';
 
 interface ActiveIncident {
@@ -93,7 +93,11 @@ class AlertEngine {
     const newEvents: AlertEventRecord[] = [];
     const recoveredEvents: AlertEventRecord[] = [];
 
-    if (device.status === 'desconectado' || device.signalStrength === 'sin_conexion') {
+    if (
+      isSimulatedOrBenchDevice(device) ||
+      device.status === 'desconectado' ||
+      device.signalStrength === 'sin_conexion'
+    ) {
       return {
         highestSeverity: 'normal',
         newEvents: [],
@@ -140,7 +144,7 @@ class AlertEngine {
         continue;
       }
 
-      // Evitar falsas alarmas de gas/polvo cuando el pin analógico está flotante (4095 ADC = falla física de sensor)
+      // Evitar falsas alarmas ante saturación del ADC de 12 bits (4095 = medición no válida, sin asumir desconexión física)
       if ((key === 'mq2' || key === 'pm25') && val === 4095) {
         continue;
       }

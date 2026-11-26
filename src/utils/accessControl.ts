@@ -1,4 +1,4 @@
-import {
+import type {
   CrewMember,
   DeviceAssignmentStatus,
   MiningCrew,
@@ -9,10 +9,66 @@ import {
   TelemetryVariable,
   UserProfile,
   UserRole,
-} from '../types';
+} from '../types/index.ts';
 
 export const DEFAULT_ORGANIZATION_ID = 'org-minesafe-principal';
 export const UNASSIGNED_DEVICE_ORG_ID = '__unassigned__';
+export const EXPERIMENTAL_BENCH_V2_DEVICE_ID = 'device_38A839E81F84_V2';
+export const MULTINODE_SIMULATED_ID_REGEX = /^device_SIM_(0[1-9]|10)$/i;
+
+export function isExperimentalBenchDeviceId(deviceId?: string | null): boolean {
+  const clean = (deviceId || '').trim();
+  return clean === EXPERIMENTAL_BENCH_V2_DEVICE_ID;
+}
+
+export function canAccessExperimentalBenchDevice(
+  user?: Pick<UserProfile, 'role' | 'status'> | null
+): boolean {
+  if (!user || user.status !== 'activo') return false;
+  return isGlobalMineSafeAdmin(user.role);
+}
+
+export function isMultiNodeSimulatedDeviceId(deviceId?: string | null): boolean {
+  const clean = (deviceId || '').trim();
+  return MULTINODE_SIMULATED_ID_REGEX.test(clean);
+}
+
+export function isSimulatedDevice(
+  device?:
+    | (Partial<Pick<SensorDevice, 'id' | 'isSimulated' | 'simulado' | 'modoBanco' | 'sourcePath'>> &
+        Partial<Pick<RegisteredDeviceConfig, 'modo_banco'>>)
+    | null
+): boolean {
+  if (!device) return false;
+  if (device.isSimulated === true || device.simulado === true) return true;
+  if (device.modoBanco === true || device.modo_banco === true) return true;
+  if (isMultiNodeSimulatedDeviceId(device.id)) return true;
+  if (
+    typeof device.sourcePath === 'string' &&
+    device.sourcePath.includes('diagnostico/nodos_simulados')
+  ) {
+    return true;
+  }
+  return false;
+}
+
+export function isSimulatedOrBenchDevice(
+  device?:
+    | (Partial<
+        Pick<
+          SensorDevice,
+          'id' | 'isSimulated' | 'simulado' | 'modoBanco' | 'isBenchTelemetry' | 'isExperimentalBench' | 'sourcePath'
+        >
+      > &
+        Partial<Pick<RegisteredDeviceConfig, 'modo_banco'>>)
+    | null
+): boolean {
+  if (!device) return false;
+  if (isSimulatedDevice(device)) return true;
+  if (device.isBenchTelemetry === true || device.isExperimentalBench === true) return true;
+  if (isExperimentalBenchDeviceId(device.id)) return true;
+  return false;
+}
 
 export function isUnassignedDeviceOrg(orgId?: string | null): boolean {
   const normalized = (orgId || '').trim();
@@ -308,6 +364,9 @@ export function isDeviceVisibleToUser(
   actingUser: Pick<UserProfile, 'id' | 'role' | 'organizationId' | 'assignedDeviceCode'> | null | undefined,
   effectiveOrgId: string
 ): boolean {
+  if (isExperimentalBenchDeviceId(device.id)) {
+    return false;
+  }
   if (isDeviceBlocked(device)) {
     return false;
   }

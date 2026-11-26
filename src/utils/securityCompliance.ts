@@ -5,8 +5,8 @@ import type {
   SecurityAuditSeverity,
   UserProfile,
   WorkerAssignment,
-} from '../types';
-import { isGlobalMineSafeAdmin, isAnyAdminRole, isOrgAuthorizedForUser } from './accessControl';
+} from '../types/index.ts';
+import { isGlobalMineSafeAdmin, isAnyAdminRole, isOrgAuthorizedForUser } from './accessControl.ts';
 
 export const CURRENT_LEGAL_CONSENT_VERSION = '2026.1';
 export const INACTIVITY_TIMEOUT_MS = 15 * 60 * 1000; // 15 minutos (ISO/IEC 27001)

@@ -54,6 +54,7 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   SensorDevice,
+  CommunicationLinkMode,
   UserProfile,
   DeviceRental,
   UserRole,
@@ -94,6 +95,7 @@ import {
 } from '../types';
 import {
   assertActiveSession,
+  canAccessExperimentalBenchDevice,
   canBlockOrDeleteIoTDevice,
   canBlockOrDeleteSite,
   canControlMineAlarm,
@@ -108,11 +110,17 @@ import {
   canRegisterAndAssignIoTDevices,
   DEFAULT_ORGANIZATION_ID,
   EmailProfileEntry,
+  EXPERIMENTAL_BENCH_V2_DEVICE_ID,
   findUserEmailConflictInOrg,
   isAnyAdminRole,
+  isExperimentalBenchDeviceId,
   isGlobalMineSafeAdmin,
+  isMultiNodeSimulatedDeviceId,
   isOrgAuthorizedForUser,
+  isSimulatedDevice,
+  isSimulatedOrBenchDevice,
   isUnassignedDeviceOrg,
+  MULTINODE_SIMULATED_ID_REGEX,
   resolveDeviceAssignmentStatus,
   selectBestLoginProfileForEmail,
   UNASSIGNED_DEVICE_ORG_ID,
@@ -239,26 +247,1126 @@ export function subscribeToRTDBConnectionState(
   return onValue(
     connectedRef,
     (snapshot) => {
-      callback(snapshot.val() === true);
+      const isConn = snapshot.val() === true;
+      updateBenchDiagnostics({ rtdbConnected: isConn });
+      callback(isConn);
     },
     () => {
+      updateBenchDiagnostics({ rtdbConnected: false });
       callback(false);
     }
   );
 }
 
 // -------------------------------------------------------------
+// P091 / P092 / P094 — CONSTANTES DE INTEGRACIÓN ESP32, V2 EXPERIMENTAL Y DIAGNÓSTICO
+// -------------------------------------------------------------
+export const APP_BUILD_VERSION = 'P094';
+export const APP_BUILD_LABEL = 'MineSafe Web P094';
+export const PHYSICAL_NODE_DEVICE_ID = 'device_38A839E81F84';
+export const SIMULATED_NODE_DEVICE_ID = 'device_9F4C2A7E1B08';
+export const GATEWAY_DEVICE_ID = 'gateway_ESP32_DEVKIT_V1';
+export const PHYSICAL_NODE_AUTH_EMAIL = 'esp32-nodo-fisico@minesafe.example';
+export const PHYSICAL_NODE_AUTH_UID = 'tJgRrlKRwPQOWCkdJiWA54B0JN33';
+export const BENCH_TELEMETRY_PATH = 'diagnostico/esp32_p087';
+export const BENCH_HISTORY_PATH = 'diagnostico/esp32_p087/historial';
+export const MULTINODE_SIMULATED_NODES_PATH = 'diagnostico/nodos_simulados';
+export const MULTINODE_GATEWAY_DIAG_PATH = 'diagnostico/gateway_ESP32_DEVKIT_V1';
+export {
+  EXPERIMENTAL_BENCH_V2_DEVICE_ID,
+  MULTINODE_SIMULATED_ID_REGEX,
+  isExperimentalBenchDeviceId,
+  canAccessExperimentalBenchDevice,
+  isMultiNodeSimulatedDeviceId,
+  isSimulatedDevice,
+  isSimulatedOrBenchDevice,
+};
+export const EXPERIMENTAL_BENCH_V2_PATH = `dispositivos/${EXPERIMENTAL_BENCH_V2_DEVICE_ID}`;
+export const EXPERIMENTAL_BENCH_V2_HISTORY_PATH = `dispositivos/${EXPERIMENTAL_BENCH_V2_DEVICE_ID}/historial`;
+export const DEFAULT_DEVICE_TIMEOUT_SECONDS = 20;
+export const DUST_SENSOR_MODEL_LABEL =
+  'Sensor óptico de polvo OPEN-SMART (estimación sin calibración oficial)';
+
+export function isExperimentalBenchDevice(
+  device?: Pick<SensorDevice, 'id' | 'isExperimentalBench'> | null
+): boolean {
+  if (!device) return false;
+  return device.isExperimentalBench === true || isExperimentalBenchDeviceId(device.id);
+}
+
+export function assertNotExperimentalBenchOperationalCommand(
+  deviceId: string | undefined | null,
+  operationName: string = 'comando operacional'
+): void {
+  if (isExperimentalBenchDeviceId(deviceId)) {
+    throw new Error(
+      `Operación bloqueada (${operationName}): ${EXPERIMENTAL_BENCH_V2_DEVICE_ID} es un equipo experimental de banco sin asignación y está excluido de alertas y comandos operacionales.`
+    );
+  }
+  if (isMultiNodeSimulatedDeviceId(deviceId)) {
+    throw new Error(
+      `Operación bloqueada (${operationName}): ${deviceId} es un dispositivo simulado (MultiNode V2 / modo banco) y no puede ejecutar comandos operacionales ni activar alarmas físicas.`
+    );
+  }
+}
+
+export function filterOutExperimentalBenchDeviceIds(ids?: string[]): string[] {
+  return Array.from(
+    new Set(
+      (ids || []).filter(
+        (id) =>
+          Boolean(id) &&
+          !isExperimentalBenchDeviceId(id) &&
+          !isMultiNodeSimulatedDeviceId(id)
+      )
+    )
+  );
+}
+
+// Sincronización con el reloj del servidor de Firebase RTDB (/.info/serverTimeOffset)
+// para evitar falsos "Desconectado" cuando el reloj del PC/navegador está desfasado.
+let rtdbServerTimeOffsetMs = 0;
+let serverTimeOffsetStarted = false;
+
+export function getRTDBServerTimeOffsetMs(): number {
+  return rtdbServerTimeOffsetMs;
+}
+
+export function getEstimatedServerNowMs(): number {
+  return Date.now() + rtdbServerTimeOffsetMs;
+}
+
+export function setRTDBServerTimeOffsetForTesting(offsetMs: number): void {
+  rtdbServerTimeOffsetMs = Number.isFinite(offsetMs) ? Math.round(offsetMs) : 0;
+  updateBenchDiagnostics({ serverTimeOffsetMs: rtdbServerTimeOffsetMs });
+}
+
+export function startServerTimeOffsetSync(): void {
+  if (serverTimeOffsetStarted) return;
+  serverTimeOffsetStarted = true;
+  try {
+    onValue(
+      ref(rtdb, '.info/serverTimeOffset'),
+      (snap) => {
+        const val = Number(snap.val());
+        rtdbServerTimeOffsetMs = Number.isFinite(val) ? Math.round(val) : 0;
+        updateBenchDiagnostics({ serverTimeOffsetMs: rtdbServerTimeOffsetMs });
+      },
+      () => {
+        // Mantener offset 0 si el cliente aún no conecta o está en pruebas offline
+      }
+    );
+  } catch {
+    // Entorno sin WebSocket RTDB activo
+  }
+}
+
+export interface BenchTelemetryDiagnostics {
+  buildVersion: string;
+  projectId: string;
+  rtdbUrl: string;
+  rtdbConnected: boolean;
+  serverTimeOffsetMs: number;
+  auth: {
+    authenticated: boolean;
+    uid: string | null;
+    email: string | null;
+    emailVerified: boolean;
+    providerId: string | null;
+    profileNodeExists: boolean | null;
+    profileIsActive: boolean | null;
+    profileRole: string | null;
+    profileIsSuperUser: boolean | null;
+    profileReadError: string | null;
+  };
+  devicesListener: {
+    status: 'idle' | 'listening' | 'ok' | 'error';
+    lastEventAt: number | null;
+    devicesCount: number;
+    physicalNodeExists: boolean;
+    physicalNodeRawTs: number;
+    physicalNodeRawPM25: number | null;
+    error: string | null;
+  };
+  benchListener: {
+    path: string;
+    status: 'idle' | 'listening' | 'ok' | 'empty' | 'error';
+    lastEventAt: number | null;
+    error: string | null;
+    errorCode: string | null;
+    normalizedServerTs: number;
+    rawPayload: {
+      CO?: unknown;
+      PM2_5?: unknown;
+      temperatura?: unknown;
+      humedad?: unknown;
+      last_update_server?: unknown;
+      origen?: unknown;
+      simulado?: unknown;
+      hasHistorial?: boolean;
+    } | null;
+  };
+  mergeDecision: {
+    applied: boolean;
+    reason: string;
+    existingPhysicalTs: number;
+    benchTs: number;
+    effectiveTs: number;
+    serverNowMs: number;
+    diffSeconds: number;
+    timeoutSeconds: number;
+    isOnline: boolean;
+  };
+  historyListener: {
+    path: string;
+    status: 'idle' | 'listening' | 'ok' | 'empty' | 'error';
+    benchPointsCount: number;
+    legacyPointsCount: number;
+    lastError: string | null;
+  };
+  lastProbeAt: number | null;
+}
+
+const createInitialBenchDiagnostics = (): BenchTelemetryDiagnostics => ({
+  buildVersion: APP_BUILD_VERSION,
+  projectId: minefaseConfig.projectId,
+  rtdbUrl: USER_RTDB_URL,
+  rtdbConnected: false,
+  serverTimeOffsetMs: 0,
+  auth: {
+    authenticated: false,
+    uid: null,
+    email: null,
+    emailVerified: false,
+    providerId: null,
+    profileNodeExists: null,
+    profileIsActive: null,
+    profileRole: null,
+    profileIsSuperUser: null,
+    profileReadError: null,
+  },
+  devicesListener: {
+    status: 'idle',
+    lastEventAt: null,
+    devicesCount: 0,
+    physicalNodeExists: false,
+    physicalNodeRawTs: 0,
+    physicalNodeRawPM25: null,
+    error: null,
+  },
+  benchListener: {
+    path: `/${BENCH_TELEMETRY_PATH}`,
+    status: 'idle',
+    lastEventAt: null,
+    error: null,
+    errorCode: null,
+    normalizedServerTs: 0,
+    rawPayload: null,
+  },
+  mergeDecision: {
+    applied: false,
+    reason: 'Sin eventos recibidos aún',
+    existingPhysicalTs: 0,
+    benchTs: 0,
+    effectiveTs: 0,
+    serverNowMs: Date.now(),
+    diffSeconds: 999999,
+    timeoutSeconds: DEFAULT_DEVICE_TIMEOUT_SECONDS,
+    isOnline: false,
+  },
+  historyListener: {
+    path: `/${BENCH_HISTORY_PATH}`,
+    status: 'idle',
+    benchPointsCount: 0,
+    legacyPointsCount: 0,
+    lastError: null,
+  },
+  lastProbeAt: null,
+});
+
+let benchDiagnosticsState: BenchTelemetryDiagnostics = createInitialBenchDiagnostics();
+const benchDiagnosticsSubscribers = new Set<(diag: BenchTelemetryDiagnostics) => void>();
+
+function notifyBenchDiagnostics(): void {
+  const snapshot = getBenchDiagnosticSnapshot();
+  benchDiagnosticsSubscribers.forEach((cb) => {
+    try {
+      cb(snapshot);
+    } catch {
+      // ignore subscriber callback error
+    }
+  });
+}
+
+function updateBenchDiagnostics(
+  patch: Partial<
+    Omit<
+      BenchTelemetryDiagnostics,
+      'auth' | 'devicesListener' | 'benchListener' | 'mergeDecision' | 'historyListener'
+    >
+  > & {
+    auth?: Partial<BenchTelemetryDiagnostics['auth']>;
+    devicesListener?: Partial<BenchTelemetryDiagnostics['devicesListener']>;
+    benchListener?: Partial<BenchTelemetryDiagnostics['benchListener']>;
+    mergeDecision?: Partial<BenchTelemetryDiagnostics['mergeDecision']>;
+    historyListener?: Partial<BenchTelemetryDiagnostics['historyListener']>;
+  }
+): void {
+  benchDiagnosticsState = {
+    ...benchDiagnosticsState,
+    ...patch,
+    auth: patch.auth ? { ...benchDiagnosticsState.auth, ...patch.auth } : benchDiagnosticsState.auth,
+    devicesListener: patch.devicesListener
+      ? { ...benchDiagnosticsState.devicesListener, ...patch.devicesListener }
+      : benchDiagnosticsState.devicesListener,
+    benchListener: patch.benchListener
+      ? { ...benchDiagnosticsState.benchListener, ...patch.benchListener }
+      : benchDiagnosticsState.benchListener,
+    mergeDecision: patch.mergeDecision
+      ? { ...benchDiagnosticsState.mergeDecision, ...patch.mergeDecision }
+      : benchDiagnosticsState.mergeDecision,
+    historyListener: patch.historyListener
+      ? { ...benchDiagnosticsState.historyListener, ...patch.historyListener }
+      : benchDiagnosticsState.historyListener,
+  };
+  notifyBenchDiagnostics();
+}
+
+export function syncAuthStateIntoBenchDiagnostics(fbUser?: FirebaseUser | null): void {
+  const active = fbUser !== undefined ? fbUser : auth.currentUser;
+  updateBenchDiagnostics({
+    auth: {
+      authenticated: Boolean(active),
+      uid: active?.uid || null,
+      email: active?.email || null,
+      emailVerified: Boolean(active?.emailVerified),
+      providerId: active?.providerData?.[0]?.providerId || active?.providerId || null,
+    },
+  });
+}
+
+export function getBenchDiagnosticSnapshot(): BenchTelemetryDiagnostics {
+  return {
+    ...benchDiagnosticsState,
+    auth: { ...benchDiagnosticsState.auth },
+    devicesListener: { ...benchDiagnosticsState.devicesListener },
+    benchListener: {
+      ...benchDiagnosticsState.benchListener,
+      rawPayload: benchDiagnosticsState.benchListener.rawPayload
+        ? { ...benchDiagnosticsState.benchListener.rawPayload }
+        : null,
+    },
+    mergeDecision: { ...benchDiagnosticsState.mergeDecision },
+    historyListener: { ...benchDiagnosticsState.historyListener },
+  };
+}
+
+export function subscribeToBenchDiagnostics(
+  callback: (diag: BenchTelemetryDiagnostics) => void
+): () => void {
+  syncAuthStateIntoBenchDiagnostics();
+  benchDiagnosticsSubscribers.add(callback);
+  callback(getBenchDiagnosticSnapshot());
+  return () => {
+    benchDiagnosticsSubscribers.delete(callback);
+  };
+}
+
+export function resetBenchDiagnosticsForTesting(): void {
+  benchDiagnosticsState = createInitialBenchDiagnostics();
+  rtdbServerTimeOffsetMs = 0;
+}
+
+export function recordBenchListenerErrorForDiagnostics(err: any): void {
+  const code = err?.code ? String(err.code) : null;
+  const message = err?.message ? String(err.message) : String(err || 'Error desconocido en RTDB');
+  updateBenchDiagnostics({
+    benchListener: {
+      status: 'error',
+      lastEventAt: Date.now(),
+      error: message,
+      errorCode: code,
+    },
+  });
+}
+
+/**
+ * Ejecuta una sonda diagnóstica exclusiva para SuperAdmin contra Firebase Auth y RTDB,
+ * exponiendo errores reales de permisos, verificación de correo y payloads sin debilitar reglas.
+ */
+export async function runSuperAdminBenchProbe(
+  actingUser?: UserProfile | null
+): Promise<BenchTelemetryDiagnostics> {
+  if (actingUser && actingUser.role !== 'superadmin') {
+    return getBenchDiagnosticSnapshot();
+  }
+  const fbUser = auth.currentUser;
+  syncAuthStateIntoBenchDiagnostics(fbUser);
+
+  if (fbUser?.uid) {
+    try {
+      const userSnap = await get(ref(rtdb, `usuarios/${fbUser.uid}`));
+      if (userSnap.exists()) {
+        const val = userSnap.val() || {};
+        updateBenchDiagnostics({
+          auth: {
+            profileNodeExists: true,
+            profileIsActive: val.isActive !== false,
+            profileRole: String(val.tipoUsuario || (val.isSuperUser ? 'superadmin' : 'sin_rol')),
+            profileIsSuperUser: val.isSuperUser === true,
+            profileReadError: null,
+          },
+        });
+      } else {
+        updateBenchDiagnostics({
+          auth: {
+            profileNodeExists: false,
+            profileIsActive: null,
+            profileRole: null,
+            profileIsSuperUser: null,
+            profileReadError: `No existe /usuarios/${fbUser.uid} en RTDB. Si email_verified es false, database.rules.json rechazará las lecturas.`,
+          },
+        });
+      }
+    } catch (err: any) {
+      updateBenchDiagnostics({
+        auth: {
+          profileNodeExists: null,
+          profileReadError: err?.message || String(err || 'Error leyendo /usuarios/{uid}'),
+        },
+      });
+    }
+  }
+
+  let probedPhysical: Record<string, any> | null = null;
+  try {
+    const devSnap = await get(ref(rtdb, `dispositivos/${PHYSICAL_NODE_DEVICE_ID}`));
+    probedPhysical = devSnap.exists() ? devSnap.val() || null : null;
+    const rawTs = normalizeServerTimestampMs(
+      probedPhysical?.last_update_server ??
+        probedPhysical?.timestamp_server ??
+        probedPhysical?.timestamp_unix
+    );
+    updateBenchDiagnostics({
+      devicesListener: {
+        status: 'ok',
+        lastEventAt: Date.now(),
+        physicalNodeExists: Boolean(probedPhysical),
+        physicalNodeRawTs: rawTs,
+        physicalNodeRawPM25:
+          typeof probedPhysical?.PM2_5 === 'number'
+            ? probedPhysical.PM2_5
+            : typeof probedPhysical?.pm25 === 'number'
+            ? probedPhysical.pm25
+            : null,
+        error: null,
+      },
+    });
+  } catch (err: any) {
+    updateBenchDiagnostics({
+      devicesListener: {
+        status: 'error',
+        lastEventAt: Date.now(),
+        error: err?.message || String(err || 'Error leyendo /dispositivos/device_38A839E81F84'),
+      },
+    });
+  }
+
+  let probedBench: Record<string, any> | null = null;
+  try {
+    const benchSnap = await get(ref(rtdb, BENCH_TELEMETRY_PATH));
+    probedBench = benchSnap.exists() ? benchSnap.val() || null : null;
+    const benchTs = normalizeServerTimestampMs(
+      probedBench?.last_update_server ??
+        probedBench?.timestamp_server ??
+        probedBench?.timestamp_unix
+    );
+    updateBenchDiagnostics({
+      benchListener: {
+        status: probedBench ? 'ok' : 'empty',
+        lastEventAt: Date.now(),
+        error: null,
+        errorCode: null,
+        normalizedServerTs: benchTs,
+        rawPayload: probedBench
+          ? {
+              CO: probedBench.CO ?? probedBench.co,
+              PM2_5: probedBench.PM2_5 ?? probedBench.pm25,
+              temperatura: probedBench.temperatura ?? probedBench.temp,
+              humedad: probedBench.humedad ?? probedBench.hum,
+              last_update_server: probedBench.last_update_server,
+              origen: probedBench.origen,
+              simulado: probedBench.simulado,
+              hasHistorial: Boolean(probedBench.historial && typeof probedBench.historial === 'object'),
+            }
+          : null,
+      },
+    });
+  } catch (err: any) {
+    recordBenchListenerErrorForDiagnostics(err);
+  }
+
+  try {
+    const histSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(10)));
+    const count = histSnap.exists() ? Object.keys(histSnap.val() || {}).length : 0;
+    updateBenchDiagnostics({
+      historyListener: {
+        status: count > 0 ? 'ok' : 'empty',
+        benchPointsCount: count,
+        lastError: null,
+      },
+    });
+  } catch (err: any) {
+    updateBenchDiagnostics({
+      historyListener: {
+        status: 'error',
+        lastError: err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`),
+      },
+    });
+  }
+
+  // Recalcular decisión de fusión con los payloads sondeados
+  mergeBenchTelemetryIntoPhysicalNode(
+    probedPhysical ? { [PHYSICAL_NODE_DEVICE_ID]: probedPhysical } : {},
+    probedBench,
+    true
+  );
+
+  updateBenchDiagnostics({ lastProbeAt: Date.now() });
+  return getBenchDiagnosticSnapshot();
+}
+
+export function normalizeServerTimestampMs(rawTs: unknown): number {
+  const num =
+    typeof rawTs === 'number'
+      ? rawTs
+      : typeof rawTs === 'string' && rawTs.trim() !== ''
+      ? Number(rawTs)
+      : NaN;
+  if (!Number.isFinite(num) || num <= 0) return 0;
+  // Epoch Unix en segundos (10 dígitos, >= año 2001)
+  if (num >= 1_000_000_000 && num < 100_000_000_000) {
+    return Math.round(num * 1000);
+  }
+  // Epoch Unix en milisegundos (>= 12 dígitos)
+  if (num >= 100_000_000_000) {
+    return Math.round(num);
+  }
+  return 0;
+}
+
+export interface DeviceConnectivityEvaluation {
+  isOnline: boolean;
+  isStale: boolean;
+  diffSeconds: number;
+  timeoutSeconds: number;
+}
+
+export function evaluateDeviceConnectivity(
+  serverTimeMs: number,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+  nowMs: number = getEstimatedServerNowMs()
+): DeviceConnectivityEvaluation {
+  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || DEFAULT_DEVICE_TIMEOUT_SECONDS);
+  if (!Number.isFinite(serverTimeMs) || serverTimeMs <= 0) {
+    return {
+      isOnline: false,
+      isStale: true,
+      diffSeconds: 999999,
+      timeoutSeconds: effectiveTimeout,
+    };
+  }
+  const deltaMs = nowMs - serverTimeMs;
+  const diffSeconds = Math.max(0, Math.floor(Math.abs(deltaMs) / 1000));
+  // Tolerar pequeño desfase NTP de hasta 60s hacia el futuro; expirar estrictamente tras timeoutSeconds.
+  const isOnline = deltaMs >= -60_000 && deltaMs <= effectiveTimeout * 1000;
+  return {
+    isOnline,
+    isStale: !isOnline,
+    diffSeconds,
+    timeoutSeconds: effectiveTimeout,
+  };
+}
+
+export function classifyCommunicationLink(
+  device: Pick<
+    SensorDevice,
+    'via' | 'viaPuente' | 'gatewayId' | 'saltosEspNow' | 'gatewayOnline' | 'status'
+  >,
+  isOnlineOverride?: boolean
+): CommunicationLinkMode {
+  const online =
+    typeof isOnlineOverride === 'boolean'
+      ? isOnlineOverride
+      : Boolean(device.gatewayOnline && device.status !== 'desconectado');
+  if (!online) {
+    return 'desconectado';
+  }
+  const viaStr = String(device.via || '').toUpperCase().trim();
+  const viaPuenteActive =
+    device.viaPuente === true ||
+    (typeof device.viaPuente === 'string' &&
+      device.viaPuente.trim() !== '' &&
+      device.viaPuente.trim().toLowerCase() !== 'false' &&
+      device.viaPuente.trim() !== '0');
+  const hasEspNowSignals =
+    viaPuenteActive ||
+    viaStr.includes('ESP_NOW') ||
+    viaStr.includes('ESPNOW') ||
+    viaStr.includes('GATEWAY') ||
+    viaStr.includes('PUENTE') ||
+    Boolean(device.gatewayId && String(device.gatewayId).trim() !== '') ||
+    (typeof device.saltosEspNow === 'number' && device.saltosEspNow > 0);
+  if (hasEspNowSignals) {
+    return 'espnow_gateway';
+  }
+  if (
+    viaStr.includes('WIFI') ||
+    viaStr.includes('DIRECT') ||
+    viaStr.includes('FIREBASE') ||
+    viaStr.includes('HTTP')
+  ) {
+    return 'wifi_directo';
+  }
+  return 'origen_desconocido';
+}
+
+export function hasBenchTelemetryFields(benchRaw: unknown): benchRaw is Record<string, any> {
+  if (!benchRaw || typeof benchRaw !== 'object') return false;
+  const obj = benchRaw as Record<string, any>;
+  return (
+    obj.CO !== undefined ||
+    obj.co !== undefined ||
+    obj.PM2_5 !== undefined ||
+    obj.pm25 !== undefined ||
+    obj.temperatura !== undefined ||
+    obj.temp !== undefined ||
+    obj.humedad !== undefined ||
+    obj.hum !== undefined ||
+    obj.last_update_server !== undefined ||
+    obj.timestamp_unix !== undefined ||
+    obj.origen !== undefined ||
+    obj.simulado !== undefined
+  );
+}
+
+/**
+ * Fusiona la telemetría en vivo de `/diagnostico/esp32_p087` sobre el nodo físico
+ * existente `device_38A839E81F84` sin duplicar dispositivos ni sobrescribir metadatos
+ * organizacionales, contratos, faena, sector ni asignaciones.
+ * Garantiza que lecturas antiguas o con reloj corrupto de `/dispositivos` nunca
+ * sobrescriban lecturas vigentes de `/diagnostico/esp32_p087`.
+ */
+export function mergeBenchTelemetryIntoPhysicalNode(
+  rawDevices: Record<string, any>,
+  benchRaw: Record<string, any> | null | undefined,
+  allowMaterializeIfMissing: boolean = false,
+  nowMs: number = getEstimatedServerNowMs(),
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS
+): Record<string, any> {
+  const merged: Record<string, any> = { ...(rawDevices || {}) };
+  // P094: Nunca fusionar ni arrastrar el equipo experimental V2 dentro del mapa operacional ni sobre el ID original.
+  if (Object.prototype.hasOwnProperty.call(merged, EXPERIMENTAL_BENCH_V2_DEVICE_ID)) {
+    delete merged[EXPERIMENTAL_BENCH_V2_DEVICE_ID];
+  }
+  const hasExistingPhysical = Object.prototype.hasOwnProperty.call(
+    merged,
+    PHYSICAL_NODE_DEVICE_ID
+  );
+  const existingPhysical = hasExistingPhysical
+    ? { ...(merged[PHYSICAL_NODE_DEVICE_ID] || {}) }
+    : {};
+  const existingTs = normalizeServerTimestampMs(
+    existingPhysical.last_update_server ??
+      existingPhysical.timestamp_server ??
+      existingPhysical.timestamp_unix
+  );
+
+  if (!hasBenchTelemetryFields(benchRaw)) {
+    const fallbackConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
+    updateBenchDiagnostics({
+      mergeDecision: {
+        applied: false,
+        reason: 'Sin payload de telemetría disponible en /diagnostico/esp32_p087',
+        existingPhysicalTs: existingTs,
+        benchTs: 0,
+        effectiveTs: existingTs,
+        serverNowMs: nowMs,
+        diffSeconds: fallbackConn.diffSeconds,
+        timeoutSeconds: fallbackConn.timeoutSeconds,
+        isOnline: fallbackConn.isOnline,
+      },
+    });
+    return merged;
+  }
+
+  if (!hasExistingPhysical && !allowMaterializeIfMissing) {
+    updateBenchDiagnostics({
+      mergeDecision: {
+        applied: false,
+        reason: 'Nodo device_38A839E81F84 fuera del alcance autorizado de esta organización',
+        existingPhysicalTs: 0,
+        benchTs: normalizeServerTimestampMs(
+          benchRaw.last_update_server ?? benchRaw.timestamp_server ?? benchRaw.timestamp_unix
+        ),
+        effectiveTs: 0,
+        serverNowMs: nowMs,
+        diffSeconds: 999999,
+        timeoutSeconds,
+        isOnline: false,
+      },
+    });
+    return merged;
+  }
+
+  const benchTs = normalizeServerTimestampMs(
+    benchRaw.last_update_server ?? benchRaw.timestamp_server ?? benchRaw.timestamp_unix
+  );
+
+  // Verificar si /dispositivos/device_38A839E81F84 tiene una marca temporal estrictamente más nueva
+  // y válida (no adelantada artificialmente al futuro por reloj local corrupto).
+  const existingIsValidNonFuture = existingTs > 0 && existingTs <= nowMs + 60_000;
+  const benchConn = evaluateDeviceConnectivity(benchTs, timeoutSeconds, nowMs);
+  const existingConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
+
+  if (
+    existingIsValidNonFuture &&
+    benchTs > 0 &&
+    existingTs > benchTs &&
+    (existingConn.isOnline || !benchConn.isOnline)
+  ) {
+    updateBenchDiagnostics({
+      mergeDecision: {
+        applied: false,
+        reason: `/dispositivos/${PHYSICAL_NODE_DEVICE_ID} posee una lectura más reciente y válida (${existingTs} > ${benchTs})`,
+        existingPhysicalTs: existingTs,
+        benchTs,
+        effectiveTs: existingTs,
+        serverNowMs: nowMs,
+        diffSeconds: existingConn.diffSeconds,
+        timeoutSeconds: existingConn.timeoutSeconds,
+        isOnline: existingConn.isOnline,
+      },
+    });
+    return merged;
+  }
+
+  const telemetryOverlay: Record<string, any> = {
+    ...existingPhysical,
+    _isBenchTelemetry: true,
+    _sourcePath: `/${BENCH_TELEMETRY_PATH}`,
+    _benchHistoryPath: `/${BENCH_HISTORY_PATH}`,
+  };
+
+  if (benchRaw.CO !== undefined || benchRaw.co !== undefined) {
+    telemetryOverlay.CO = benchRaw.CO !== undefined ? benchRaw.CO : benchRaw.co;
+  }
+  if (benchRaw.PM2_5 !== undefined || benchRaw.pm25 !== undefined) {
+    telemetryOverlay.PM2_5 = benchRaw.PM2_5 !== undefined ? benchRaw.PM2_5 : benchRaw.pm25;
+  }
+  if (benchRaw.temperatura !== undefined || benchRaw.temp !== undefined) {
+    telemetryOverlay.temperatura =
+      benchRaw.temperatura !== undefined ? benchRaw.temperatura : benchRaw.temp;
+  }
+  if (benchRaw.humedad !== undefined || benchRaw.hum !== undefined) {
+    telemetryOverlay.humedad =
+      benchRaw.humedad !== undefined ? benchRaw.humedad : benchRaw.hum;
+  }
+  if (benchRaw.simulado !== undefined) {
+    telemetryOverlay.simulado = Boolean(benchRaw.simulado);
+  } else if (telemetryOverlay.simulado === undefined) {
+    telemetryOverlay.simulado = false;
+  }
+  if (typeof benchRaw.origen === 'string' && benchRaw.origen.trim() !== '') {
+    telemetryOverlay.origen = benchRaw.origen.trim();
+  }
+  if (benchTs > 0) {
+    telemetryOverlay.last_update_server = benchTs;
+  } else if (benchRaw.last_update_server !== undefined) {
+    telemetryOverlay.last_update_server = benchRaw.last_update_server;
+  } else if (benchRaw.timestamp_unix !== undefined) {
+    telemetryOverlay.last_update_server = benchRaw.timestamp_unix;
+  }
+  if (benchRaw.via !== undefined) telemetryOverlay.via = benchRaw.via;
+  if (benchRaw.via_puente !== undefined) telemetryOverlay.via_puente = Boolean(benchRaw.via_puente);
+  if (benchRaw.gateway_id !== undefined) telemetryOverlay.gateway_id = benchRaw.gateway_id;
+  if (benchRaw.saltos_espnow !== undefined) telemetryOverlay.saltos_espnow = benchRaw.saltos_espnow;
+  if (benchRaw.msgId !== undefined) telemetryOverlay.msgId = benchRaw.msgId;
+  if (benchRaw.fecha !== undefined) telemetryOverlay.fecha = benchRaw.fecha;
+  if (benchRaw.hora !== undefined) telemetryOverlay.hora = benchRaw.hora;
+  if (benchRaw.fecha_hora !== undefined) telemetryOverlay.fecha_hora = benchRaw.fecha_hora;
+  if (benchRaw.timestamp_unix !== undefined) telemetryOverlay.timestamp_unix = benchRaw.timestamp_unix;
+
+  merged[PHYSICAL_NODE_DEVICE_ID] = telemetryOverlay;
+  updateBenchDiagnostics({
+    mergeDecision: {
+      applied: true,
+      reason:
+        existingTs > 0 && !existingIsValidNonFuture
+          ? 'Telemetría de banco aplicada (marca previa en /dispositivos descartada por desfase futuro)'
+          : `Telemetría de /${BENCH_TELEMETRY_PATH} fusionada sobre ${PHYSICAL_NODE_DEVICE_ID}`,
+      existingPhysicalTs: existingTs,
+      benchTs,
+      effectiveTs: benchTs || existingTs,
+      serverNowMs: nowMs,
+      diffSeconds: benchConn.diffSeconds,
+      timeoutSeconds: benchConn.timeoutSeconds,
+      isOnline: benchConn.isOnline,
+    },
+  });
+  return merged;
+}
+
+export function hasMultiNodePayload(raw: unknown): raw is Record<string, any> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return false;
+  const obj = raw as Record<string, any>;
+  return (
+    obj.CO !== undefined ||
+    obj.co !== undefined ||
+    obj.PM2_5 !== undefined ||
+    obj.pm25 !== undefined ||
+    obj.temperatura !== undefined ||
+    obj.temp !== undefined ||
+    obj.humedad !== undefined ||
+    obj.hum !== undefined ||
+    obj.last_update_server !== undefined ||
+    obj.timestamp_server !== undefined ||
+    obj.timestamp_unix !== undefined ||
+    obj.msgId !== undefined ||
+    obj.gateway_id !== undefined ||
+    obj.via_puente !== undefined ||
+    obj.simulado !== undefined ||
+    obj.modo_banco !== undefined ||
+    obj.historial !== undefined ||
+    obj.origen !== undefined ||
+    obj.via !== undefined ||
+    obj.nodos_activos !== undefined ||
+    obj.localIp !== undefined ||
+    obj.ip !== undefined ||
+    obj.estado !== undefined
+  );
+}
+
+export function extractEmbeddedDeviceHistory(
+  rawNode: any,
+  startMs: number = 0,
+  endMs: number = Number.MAX_SAFE_INTEGER,
+  source: TelemetryHistoryPoint['source'] = 'diagnostico_nodos_simulados'
+): TelemetryHistoryPoint[] {
+  if (!rawNode || typeof rawNode !== 'object') return [];
+  const hist = rawNode.historial;
+  if (!hist || typeof hist !== 'object') return [];
+  return mapTelemetrySnapshotRaw(hist, startMs, endMs, source);
+}
+
+export interface MergeMultiNodeOptions {
+  allowSimulatedDiscovery?: boolean;
+  allowedDeviceIds?: Set<string> | string[];
+  nowMs?: number;
+  timeoutSeconds?: number;
+}
+
+/**
+ * Fusiona los dispositivos detectados dinámicamente desde `/diagnostico/nodos_simulados`
+ * (`device_SIM_01`..`device_SIM_10`) y `/diagnostico/gateway_ESP32_DEVKIT_V1` con `/dispositivos`
+ * sin duplicar identificadores, sin inventar nodos ni valores y sin sobrescribir asignaciones
+ * ni el nodo físico operativo `device_38A839E81F84`.
+ */
+export function mergeMultiNodeSimulatedDevices(
+  rawDevices: Record<string, any>,
+  simulatedNodesRaw: Record<string, any> | null | undefined,
+  gatewayDiagRaw: Record<string, any> | null | undefined,
+  options?: MergeMultiNodeOptions
+): Record<string, any> {
+  const merged: Record<string, any> = { ...(rawDevices || {}) };
+  if (Object.prototype.hasOwnProperty.call(merged, EXPERIMENTAL_BENCH_V2_DEVICE_ID)) {
+    delete merged[EXPERIMENTAL_BENCH_V2_DEVICE_ID];
+  }
+
+  const allowDiscovery = options?.allowSimulatedDiscovery !== false;
+  const allowedSet = new Set<string>(
+    options?.allowedDeviceIds instanceof Set
+      ? Array.from(options.allowedDeviceIds)
+      : Array.isArray(options?.allowedDeviceIds)
+      ? options.allowedDeviceIds
+      : []
+  );
+  const nowMs = options?.nowMs ?? getEstimatedServerNowMs();
+  const timeoutSeconds = options?.timeoutSeconds ?? DEFAULT_DEVICE_TIMEOUT_SECONDS;
+
+  const hasValidGatewayDiag = hasMultiNodePayload(gatewayDiagRaw);
+
+  // 1. Fusionar /diagnostico/gateway_ESP32_DEVKIT_V1 sin duplicar el gateway ni pisar asignaciones
+  if (hasValidGatewayDiag) {
+    const canIncludeGateway =
+      allowDiscovery ||
+      Object.prototype.hasOwnProperty.call(merged, GATEWAY_DEVICE_ID) ||
+      allowedSet.has(GATEWAY_DEVICE_ID);
+
+    if (canIncludeGateway) {
+      const existingGw = merged[GATEWAY_DEVICE_ID] && typeof merged[GATEWAY_DEVICE_ID] === 'object'
+        ? { ...merged[GATEWAY_DEVICE_ID] }
+        : null;
+      const existingTs = normalizeServerTimestampMs(
+        existingGw?.last_update_server ?? existingGw?.timestamp_server ?? existingGw?.timestamp_unix
+      );
+      const diagTs = normalizeServerTimestampMs(
+        gatewayDiagRaw.last_update_server ??
+          gatewayDiagRaw.timestamp_server ??
+          gatewayDiagRaw.timestamp_unix
+      );
+      const existingValidNonFuture = existingTs > 0 && existingTs <= nowMs + 60_000;
+      const diagConn = evaluateDeviceConnectivity(diagTs, timeoutSeconds, nowMs);
+      const existingConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
+      const useDiagTelemetry =
+        !existingGw ||
+        !existingValidNonFuture ||
+        (diagTs > 0 && (diagTs >= existingTs || (diagConn.isOnline && !existingConn.isOnline)));
+
+      const mergedGw: Record<string, any> = {
+        ...(existingGw || {}),
+        deviceCategory: existingGw?.deviceCategory || 'gateway',
+        _sourcePath:
+          existingGw?._sourcePath ||
+          (existingGw ? `/dispositivos/${GATEWAY_DEVICE_ID}` : `/${MULTINODE_GATEWAY_DIAG_PATH}`),
+      };
+
+      if (!existingGw && !mergedGw.organizationId) {
+        mergedGw.organizationId = UNASSIGNED_DEVICE_ORG_ID;
+        mergedGw.assignmentStatus = 'en_inventario';
+      }
+
+      if (useDiagTelemetry) {
+        if (diagTs > 0) mergedGw.last_update_server = diagTs;
+        else if (gatewayDiagRaw.last_update_server !== undefined) {
+          mergedGw.last_update_server = gatewayDiagRaw.last_update_server;
+        }
+        if (gatewayDiagRaw.CO !== undefined || gatewayDiagRaw.co !== undefined) {
+          mergedGw.CO = gatewayDiagRaw.CO !== undefined ? gatewayDiagRaw.CO : gatewayDiagRaw.co;
+        }
+        if (gatewayDiagRaw.PM2_5 !== undefined || gatewayDiagRaw.pm25 !== undefined) {
+          mergedGw.PM2_5 =
+            gatewayDiagRaw.PM2_5 !== undefined ? gatewayDiagRaw.PM2_5 : gatewayDiagRaw.pm25;
+        }
+        if (gatewayDiagRaw.temperatura !== undefined || gatewayDiagRaw.temp !== undefined) {
+          mergedGw.temperatura =
+            gatewayDiagRaw.temperatura !== undefined
+              ? gatewayDiagRaw.temperatura
+              : gatewayDiagRaw.temp;
+        }
+        if (gatewayDiagRaw.humedad !== undefined || gatewayDiagRaw.hum !== undefined) {
+          mergedGw.humedad =
+            gatewayDiagRaw.humedad !== undefined ? gatewayDiagRaw.humedad : gatewayDiagRaw.hum;
+        }
+        if (gatewayDiagRaw.msgId !== undefined) mergedGw.msgId = gatewayDiagRaw.msgId;
+        if (gatewayDiagRaw.via !== undefined) mergedGw.via = gatewayDiagRaw.via;
+        if (gatewayDiagRaw.via_puente !== undefined) mergedGw.via_puente = gatewayDiagRaw.via_puente;
+        if (gatewayDiagRaw.origen !== undefined) mergedGw.origen = gatewayDiagRaw.origen;
+        if (gatewayDiagRaw.fecha !== undefined) mergedGw.fecha = gatewayDiagRaw.fecha;
+        if (gatewayDiagRaw.hora !== undefined) mergedGw.hora = gatewayDiagRaw.hora;
+        if (gatewayDiagRaw.fecha_hora !== undefined) mergedGw.fecha_hora = gatewayDiagRaw.fecha_hora;
+        if (gatewayDiagRaw.historial && typeof gatewayDiagRaw.historial === 'object') {
+          mergedGw.historial = {
+            ...(existingGw?.historial && typeof existingGw.historial === 'object'
+              ? existingGw.historial
+              : {}),
+            ...gatewayDiagRaw.historial,
+          };
+        }
+      }
+
+      if (gatewayDiagRaw.localIp !== undefined || gatewayDiagRaw.ip !== undefined) {
+        mergedGw.localIp = gatewayDiagRaw.localIp || gatewayDiagRaw.ip || mergedGw.localIp;
+      }
+      if (typeof gatewayDiagRaw.nodos_activos === 'number') {
+        mergedGw.nodos_activos = gatewayDiagRaw.nodos_activos;
+      }
+      if (gatewayDiagRaw.simulado !== undefined) {
+        mergedGw.simulado = Boolean(gatewayDiagRaw.simulado);
+      }
+      if (gatewayDiagRaw.modo_banco !== undefined) {
+        mergedGw.modo_banco = Boolean(gatewayDiagRaw.modo_banco);
+      }
+      if (!mergedGw.origen) {
+        mergedGw.origen = 'GATEWAY_ESP32_DIAGNOSTICO';
+      }
+
+      merged[GATEWAY_DEVICE_ID] = mergedGw;
+    }
+  }
+
+  // 2. Fusionar /diagnostico/nodos_simulados (device_SIM_01..device_SIM_10 o nodos virtuales reales en RTDB)
+  if (simulatedNodesRaw && typeof simulatedNodesRaw === 'object' && !Array.isArray(simulatedNodesRaw)) {
+    Object.entries(simulatedNodesRaw).forEach(([nodeId, rawNode]) => {
+      if (!nodeId || isExperimentalBenchDeviceId(nodeId) || nodeId === PHYSICAL_NODE_DEVICE_ID) {
+        return;
+      }
+      if (!hasMultiNodePayload(rawNode)) {
+        return;
+      }
+      const alreadyInMerged = Object.prototype.hasOwnProperty.call(merged, nodeId);
+      const canIncludeNode = allowDiscovery || alreadyInMerged || allowedSet.has(nodeId);
+      if (!canIncludeNode) {
+        return;
+      }
+
+      const existing = alreadyInMerged && merged[nodeId] && typeof merged[nodeId] === 'object'
+        ? { ...merged[nodeId] }
+        : null;
+
+      const existingTs = normalizeServerTimestampMs(
+        existing?.last_update_server ?? existing?.timestamp_server ?? existing?.timestamp_unix
+      );
+      const simTs = normalizeServerTimestampMs(
+        rawNode.last_update_server ?? rawNode.timestamp_server ?? rawNode.timestamp_unix
+      );
+      const existingValidNonFuture = existingTs > 0 && existingTs <= nowMs + 60_000;
+      const simConn = evaluateDeviceConnectivity(simTs, timeoutSeconds, nowMs);
+      const existingConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
+      const useSimTelemetry =
+        !existing ||
+        !existingValidNonFuture ||
+        (simTs > 0 && (simTs >= existingTs || (simConn.isOnline && !existingConn.isOnline)));
+
+      const combined: Record<string, any> = {
+        ...(existing || {}),
+        simulado: rawNode.simulado !== undefined ? Boolean(rawNode.simulado) : true,
+        modo_banco:
+          rawNode.modo_banco !== undefined
+            ? Boolean(rawNode.modo_banco)
+            : existing?.modo_banco !== undefined
+            ? Boolean(existing.modo_banco)
+            : true,
+        deviceCategory: existing?.deviceCategory || 'nodo',
+        _sourcePath: `/${MULTINODE_SIMULATED_NODES_PATH}/${nodeId}`,
+        _historyPath: `/${MULTINODE_SIMULATED_NODES_PATH}/${nodeId}/historial`,
+      };
+
+      // Nunca sobrescribir asignaciones existentes; solo inicializar en inventario si no tenía organización.
+      if (!combined.organizationId) {
+        combined.organizationId = UNASSIGNED_DEVICE_ORG_ID;
+      }
+      if (!combined.assignmentStatus && isUnassignedDeviceOrg(combined.organizationId)) {
+        combined.assignmentStatus = 'en_inventario';
+      }
+
+      if (useSimTelemetry) {
+        if (rawNode.CO !== undefined || rawNode.co !== undefined) {
+          combined.CO = rawNode.CO !== undefined ? rawNode.CO : rawNode.co;
+        }
+        if (rawNode.PM2_5 !== undefined || rawNode.pm25 !== undefined) {
+          combined.PM2_5 = rawNode.PM2_5 !== undefined ? rawNode.PM2_5 : rawNode.pm25;
+        }
+        if (rawNode.temperatura !== undefined || rawNode.temp !== undefined) {
+          combined.temperatura =
+            rawNode.temperatura !== undefined ? rawNode.temperatura : rawNode.temp;
+        }
+        if (rawNode.humedad !== undefined || rawNode.hum !== undefined) {
+          combined.humedad = rawNode.humedad !== undefined ? rawNode.humedad : rawNode.hum;
+        }
+        if (simTs > 0) {
+          combined.last_update_server = simTs;
+        } else if (rawNode.last_update_server !== undefined) {
+          combined.last_update_server = rawNode.last_update_server;
+        } else if (rawNode.timestamp_unix !== undefined) {
+          combined.last_update_server = rawNode.timestamp_unix;
+        }
+        if (rawNode.msgId !== undefined) combined.msgId = rawNode.msgId;
+        if (rawNode.gateway_id !== undefined) combined.gateway_id = rawNode.gateway_id;
+        if (rawNode.via_puente !== undefined) combined.via_puente = rawNode.via_puente;
+        if (rawNode.via !== undefined) combined.via = rawNode.via;
+        if (rawNode.saltos_espnow !== undefined) combined.saltos_espnow = rawNode.saltos_espnow;
+        if (rawNode.fecha !== undefined) combined.fecha = rawNode.fecha;
+        if (rawNode.hora !== undefined) combined.hora = rawNode.hora;
+        if (rawNode.fecha_hora !== undefined) combined.fecha_hora = rawNode.fecha_hora;
+        if (rawNode.timestamp_unix !== undefined) combined.timestamp_unix = rawNode.timestamp_unix;
+      }
+
+      if (!combined.gateway_id && hasValidGatewayDiag) {
+        combined.gateway_id = GATEWAY_DEVICE_ID;
+      }
+      if (!combined.parentGatewayId && typeof combined.gateway_id === 'string' && combined.gateway_id.trim()) {
+        combined.parentGatewayId = combined.gateway_id.trim();
+      }
+      if (typeof rawNode.origen === 'string' && rawNode.origen.trim() !== '') {
+        combined.origen = rawNode.origen.trim();
+      } else if (!combined.origen) {
+        combined.origen = 'ESP32_MULTINODE_V2_SIMULADO';
+      }
+
+      // Conservar historial embebido combinado (sin eliminar muestras al desconectarse)
+      if (rawNode.historial && typeof rawNode.historial === 'object') {
+        combined.historial = {
+          ...(existing?.historial && typeof existing.historial === 'object' ? existing.historial : {}),
+          ...rawNode.historial,
+        };
+      }
+
+      // Garantizar aislamiento de alarmas en dispositivos simulados
+      combined.alarma_activa = false;
+      combined.alarma = false;
+
+      merged[nodeId] = combined;
+    });
+  }
+
+  return merged;
+}
+
+export function buildCatalogRegistrationForDiscoveredDevice(
+  device: Pick<
+    SensorDevice,
+    | 'id'
+    | 'name'
+    | 'deviceCategory'
+    | 'gatewayId'
+    | 'parentGatewayId'
+    | 'localIp'
+    | 'isSimulated'
+    | 'simulado'
+    | 'modoBanco'
+    | 'isBenchTelemetry'
+    | 'sourcePath'
+    | 'telemetryOrigin'
+  >
+): RegisterIoTDeviceParams {
+  const isGateway =
+    device.deviceCategory === 'gateway' ||
+    device.deviceCategory === 'gateway_sensor' ||
+    device.id === GATEWAY_DEVICE_ID ||
+    /^gateway_/i.test(device.id);
+  const category: 'gateway' | 'nodo' = isGateway ? 'gateway' : 'nodo';
+  const simulated = isSimulatedDevice(device);
+  const modoBanco = simulated || device.modoBanco === true || device.isBenchTelemetry === true;
+
+  return {
+    id: device.id,
+    name: device.name || device.id,
+    category,
+    parentGatewayId: category === 'nodo' ? device.gatewayId || device.parentGatewayId : undefined,
+    localIp: device.localIp,
+    organizationId: UNASSIGNED_DEVICE_ORG_ID,
+    simulado: simulated ? true : undefined,
+    modo_banco: modoBanco ? true : undefined,
+    sourcePath: device.sourcePath,
+    telemetryOrigin: device.telemetryOrigin,
+    gatewayId: device.gatewayId || device.parentGatewayId,
+    allowAttachExistingRTDB: true,
+    note: simulated
+      ? `Registro autorizado de dispositivo simulado MultiNode V2 (${device.id}) en inventario global sin asignación.`
+      : `Registro autorizado de dispositivo detectado en Firebase RTDB (${device.id}) en inventario global.`,
+  };
+}
+
+// -------------------------------------------------------------
 // MAPPER UTILS FOR USER'S RTDB SCHEMA
 // -------------------------------------------------------------
-// Cache of local reception times per device node to safeguard against NTP clock skew
+// Cache of live update reception times (used strictly for legacy uptime-only packets without Unix epoch)
 const lastPacketArrivalMap: Record<string, number> = {};
 const lastPacketSignatureMap: Record<string, string> = {};
 
 export function recordDevicePacketArrival(key: string, data?: any) {
-  if (!data) {
-    if (!lastPacketArrivalMap[key]) {
-      lastPacketArrivalMap[key] = Date.now();
-    }
+  if (!data || typeof data !== 'object') {
     return;
   }
   const signature = JSON.stringify([
@@ -266,13 +1374,18 @@ export function recordDevicePacketArrival(key: string, data?: any) {
     data.PM2_5 ?? data.pm25 ?? null,
     data.temperatura ?? data.temp ?? null,
     data.humedad ?? data.hum ?? null,
-    data.last_update_server ?? data.timestamp_server ?? null,
+    data.last_update_server ?? data.timestamp_server ?? data.timestamp_unix ?? null,
     data.msgId ?? null,
     data.via_puente ?? null,
     data.alarma_activa ?? data.alarma ?? null,
     data.luz ?? null,
     data.estado_adquisicion ?? null,
   ]);
+  // En la primera lectura inicial solo memorizamos la firma sin fingir que llegó un paquete vivo.
+  if (lastPacketSignatureMap[key] === undefined) {
+    lastPacketSignatureMap[key] = signature;
+    return;
+  }
   if (lastPacketSignatureMap[key] !== signature) {
     lastPacketSignatureMap[key] = signature;
     lastPacketArrivalMap[key] = Date.now();
@@ -302,12 +1415,18 @@ function readStrictBoundedNum(
 export function mapRTDBDeviceToSensorDevice(
   key: string,
   data: any,
-  timeoutSeconds: number = 20
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+  nowMs: number = getEstimatedServerNowMs()
 ): SensorDevice {
+  const isExperimentalV2 = isExperimentalBenchDeviceId(key);
   const coVal = readStrictBoundedNum(data?.CO, data?.co, 0, 4095);
   const pmVal = readStrictBoundedNum(data?.PM2_5, data?.pm25, 0, 4095);
-  const tempVal = readStrictBoundedNum(data?.temperatura, data?.temp, -40, 100);
-  const humVal = readStrictBoundedNum(data?.humedad, data?.hum, 0, 100);
+  const parsedTempVal = readStrictBoundedNum(data?.temperatura, data?.temp, -40, 100);
+  const parsedHumVal = readStrictBoundedNum(data?.humedad, data?.hum, 0, 100);
+  // En equipo experimental V2, DHT ausente (null/NaN o par 0/0 sin sensor conectado) se clasifica estrictamente como N/D.
+  const dhtPairZeroAbsent = isExperimentalV2 && parsedTempVal === 0 && parsedHumVal === 0;
+  const tempVal = dhtPairZeroAbsent ? null : parsedTempVal;
+  const humVal = dhtPairZeroAbsent ? null : parsedHumVal;
 
   const faultFields: ('CO' | 'PM2_5' | 'temperatura' | 'humedad')[] = [];
   if (coVal === null) faultFields.push('CO');
@@ -316,47 +1435,142 @@ export function mapRTDBDeviceToSensorDevice(
   if (humVal === null) faultFields.push('humedad');
   const sensorFault = faultFields.length > 0;
 
-  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || 20);
-  const now = Date.now();
-  const lastArrival = lastPacketArrivalMap[key] || 0;
-  let serverTime = Number(data?.last_update_server) || Number(data?.timestamp_server) || 0;
-  // 10 dígitos Unix epoch (>= año 2001) -> convertir a milisegundos
-  if (serverTime >= 1000000000 && serverTime < 100000000000) {
-    serverTime = serverTime * 1000;
-  } else if (serverTime > 0 && serverTime < 1000000000) {
-    // El firmware envió millis() de uptime en vez de época Unix:
-    // usar la hora real de llegada del paquete RTDB para evitar fechas de 1970.
-    serverTime = lastArrival > 0 ? lastArrival : now;
+  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || DEFAULT_DEVICE_TIMEOUT_SECONDS);
+  const rawServerCandidate =
+    data?.last_update_server ?? data?.timestamp_server ?? data?.timestamp_unix ?? 0;
+  const rawServerNum = Number(rawServerCandidate) || 0;
+  let serverTime = normalizeServerTimestampMs(rawServerCandidate);
+  let isOnline = false;
+  let diffSeconds = 999999;
+
+  if (serverTime > 0) {
+    // Conectividad estricta basada en marca temporal de servidor (nunca marcar en línea solo por existir en RTDB).
+    const evalConn = evaluateDeviceConnectivity(serverTime, effectiveTimeout, nowMs);
+    isOnline = evalConn.isOnline;
+    diffSeconds = evalConn.diffSeconds;
+  } else if (rawServerNum > 0 && rawServerNum < 1_000_000_000) {
+    // Firmware heredado que envió millis() de uptime en lugar de época Unix:
+    // solo se considera en línea si se observó una actualización real tras la carga inicial.
+    const lastArrival = lastPacketArrivalMap[key] || 0;
+    if (lastArrival > 0) {
+      serverTime = lastArrival;
+      const evalConn = evaluateDeviceConnectivity(lastArrival, effectiveTimeout, nowMs);
+      isOnline = evalConn.isOnline;
+      diffSeconds = evalConn.diffSeconds;
+    }
   }
 
-  const diffSeconds = serverTime > 0 ? Math.floor(Math.abs(now - serverTime) / 1000) : 999999;
-  const arrivalDiff = lastArrival > 0 ? Math.floor((now - lastArrival) / 1000) : 999999;
+  const isMultiNodeSim =
+    isMultiNodeSimulatedDeviceId(key) ||
+    (typeof data?._sourcePath === 'string' &&
+      data._sourcePath.includes(MULTINODE_SIMULATED_NODES_PATH));
 
-  const isOnline = diffSeconds <= effectiveTimeout || arrivalDiff <= effectiveTimeout;
+  const telemetryOrigin =
+    typeof data?.origen === 'string' && data.origen.trim() !== ''
+      ? data.origen.trim()
+      : isExperimentalV2
+      ? 'EXPERIMENTAL_V2_BANCO'
+      : isMultiNodeSim
+      ? 'ESP32_MULTINODE_V2_SIMULADO'
+      : undefined;
+  const sourcePath = isExperimentalV2
+    ? `/${EXPERIMENTAL_BENCH_V2_PATH}`
+    : typeof data?._sourcePath === 'string' && data._sourcePath.trim() !== ''
+    ? data._sourcePath.trim()
+    : `/dispositivos/${key}`;
+  const isBenchTelemetry =
+    isExperimentalV2 ||
+    Boolean(data?._isBenchTelemetry) ||
+    sourcePath.includes(BENCH_TELEMETRY_PATH) ||
+    Boolean(telemetryOrigin && /p087|banco|diagnostico|experimental/i.test(telemetryOrigin));
+  const isSimulated =
+    data?.simulado === true ||
+    key === SIMULATED_NODE_DEVICE_ID ||
+    isMultiNodeSim ||
+    Boolean(telemetryOrigin && /simula/i.test(telemetryOrigin));
+  const modoBanco =
+    data?.modo_banco === true ||
+    isExperimentalV2 ||
+    (isMultiNodeSim && data?.modo_banco !== false);
+  const adcSaturated = coVal === 4095 || pmVal === 4095;
 
-  const alarmaActiva = Boolean(data?.alarma_activa);
-  const origenAlarma = data?.origen_alarma || '';
+  const isIsolatedFromOperationalAlarms =
+    isBenchTelemetry || isExperimentalV2 || isSimulated || modoBanco;
+  const alarmaActiva = isIsolatedFromOperationalAlarms ? false : Boolean(data?.alarma_activa);
+  const origenAlarma = isIsolatedFromOperationalAlarms ? '' : data?.origen_alarma || '';
   const descripcionMonitoreo = data?.descripcion_monitoreo || '';
 
   let status: AlertSeverity = 'normal';
   if (!isOnline) {
     status = 'desconectado';
-  } else if (alarmaActiva || (coVal !== null && coVal >= 500) || (pmVal !== null && pmVal >= 150)) {
+  } else if (isIsolatedFromOperationalAlarms) {
+    // Telemetría simulada / de banco / experimental separada de alertas operacionales mineras.
+    status = 'normal';
+  } else if (
+    alarmaActiva ||
+    (coVal !== null && coVal < 4095 && coVal >= 500) ||
+    (pmVal !== null && pmVal < 4095 && pmVal >= 150)
+  ) {
     status = 'critico';
-  } else if ((coVal !== null && coVal >= 350) || (pmVal !== null && pmVal >= 55)) {
+  } else if (
+    (coVal !== null && coVal < 4095 && coVal >= 350) ||
+    (pmVal !== null && pmVal < 4095 && pmVal >= 55)
+  ) {
     status = 'advertencia';
   }
+
+  const isDiscoveredDiagnosticGateway =
+    key === GATEWAY_DEVICE_ID &&
+    sourcePath.includes(MULTINODE_GATEWAY_DIAG_PATH) &&
+    !data?.organizationId;
+
+  const resolvedOrgId = isExperimentalV2
+    ? UNASSIGNED_DEVICE_ORG_ID
+    : data?.organizationId === UNASSIGNED_DEVICE_ORG_ID
+    ? UNASSIGNED_DEVICE_ORG_ID
+    : data?.organizationId
+    ? String(data.organizationId)
+    : isMultiNodeSim || isDiscoveredDiagnosticGateway
+    ? UNASSIGNED_DEVICE_ORG_ID
+    : DEFAULT_ORGANIZATION.id;
 
   let deviceName = data?.name || key;
   let siteName = data?.siteName || '';
   let crewName = data?.crewName || '';
-  let sectorName = data?.sectorName || 'Sector Operativo';
+  let sectorName =
+    data?.sectorName ||
+    (isUnassignedDeviceOrg(resolvedOrgId) ? 'En inventario' : 'Sector Operativo');
 
-  if (key === 'device_38A839E81F84') {
+  if (isExperimentalV2) {
+    deviceName = data?.name || 'Banco Experimental ESP32 V2 (Sin Asignación)';
+    siteName = '';
+    crewName = '';
+    sectorName = 'Sin asignar (Banco Experimental)';
+  } else if (isMultiNodeSim) {
+    const simSuffix = key.replace(/^device_/i, '');
+    deviceName = data?.name || `Nodo Simulado MultiNode (${simSuffix})`;
+    siteName = data?.siteName || '';
+    crewName = data?.crewName || '';
+    sectorName =
+      data?.sectorName ||
+      (isUnassignedDeviceOrg(resolvedOrgId) ? 'En inventario' : 'Pendiente de asignación');
+  } else if (key === PHYSICAL_NODE_DEVICE_ID) {
     deviceName = data?.name || 'Gateway Principal Mina Norte';
     siteName = data?.siteName || 'Faena Chuquicamata';
     crewName = data?.crewName || 'Cuadrilla Alfa';
     sectorName = data?.sectorName || 'Rampa Principal';
+  } else if (key === SIMULATED_NODE_DEVICE_ID) {
+    deviceName = data?.name || 'Nodo Simulado ESP32';
+    siteName = data?.siteName || 'Banco de Pruebas Simulado';
+    crewName = data?.crewName || 'Pruebas de Laboratorio';
+    sectorName = data?.sectorName || 'Entorno Simulado';
+  } else if (key === GATEWAY_DEVICE_ID) {
+    deviceName = data?.name || 'Gateway ESP32 DevKit V1';
+    siteName = isDiscoveredDiagnosticGateway ? '' : data?.siteName || 'Faena Chuquicamata';
+    crewName = isDiscoveredDiagnosticGateway ? '' : data?.crewName || 'Cuadrilla Alfa';
+    sectorName = isDiscoveredDiagnosticGateway
+      ? 'En inventario'
+      : data?.sectorName || 'Enlace ESP-NOW';
   } else if (key === 'device_A4CB2F124B00') {
     deviceName = data?.name || 'Gateway Sector San José';
     siteName = data?.siteName || 'Faena San José';
@@ -371,25 +1585,21 @@ export function mapRTDBDeviceToSensorDevice(
 
   const hasReportedBattery = typeof data?.bateria === 'number' && !Number.isNaN(data.bateria);
 
-  const resolvedOrgId =
-    data?.organizationId === UNASSIGNED_DEVICE_ORG_ID
-      ? UNASSIGNED_DEVICE_ORG_ID
-      : data?.organizationId || DEFAULT_ORGANIZATION.id;
-
-  const mappedAssignmentStatus: DeviceAssignmentStatus =
-    data?.assignmentStatus &&
-    ['en_inventario', 'asignado_empresa', 'asignado_faena', 'asignado_sector'].includes(
-      data.assignmentStatus
-    )
-      ? data.assignmentStatus
-      : resolveDeviceAssignmentStatus({
-          organizationId: resolvedOrgId,
-          siteId: data?.siteId || undefined,
-          siteName: siteName || undefined,
-          crewId: data?.crewId || undefined,
-          sectorId: data?.sectorId || undefined,
-          sectorName,
-        });
+  const mappedAssignmentStatus: DeviceAssignmentStatus = isExperimentalV2
+    ? 'en_inventario'
+    : data?.assignmentStatus &&
+      ['en_inventario', 'asignado_empresa', 'asignado_faena', 'asignado_sector'].includes(
+        data.assignmentStatus
+      )
+    ? data.assignmentStatus
+    : resolveDeviceAssignmentStatus({
+        organizationId: resolvedOrgId,
+        siteId: data?.siteId || undefined,
+        siteName: siteName || undefined,
+        crewId: data?.crewId || undefined,
+        sectorId: data?.sectorId || undefined,
+        sectorName,
+      });
 
   const historyList: DeviceAssignmentAuditEntry[] | undefined = Array.isArray(data?.assignmentHistory)
     ? data.assignmentHistory
@@ -397,18 +1607,49 @@ export function mapRTDBDeviceToSensorDevice(
     ? Object.values(data.assignmentHistory)
     : undefined;
 
+  const saltosEspNow =
+    typeof data?.saltos_espnow === 'number' && Number.isFinite(data.saltos_espnow)
+      ? data.saltos_espnow
+      : undefined;
+  const timestampUnix =
+    typeof data?.timestamp_unix === 'number' && Number.isFinite(data.timestamp_unix)
+      ? data.timestamp_unix
+      : undefined;
+  const viaPuenteVal: boolean | string | undefined =
+    typeof data?.via_puente === 'boolean'
+      ? data.via_puente
+      : typeof data?.via_puente === 'string' && data.via_puente.trim() !== ''
+      ? data.via_puente.trim()
+      : undefined;
+  const embeddedHistoryEntries =
+    data?.historial && typeof data.historial === 'object' ? Object.keys(data.historial).length : 0;
+  const resolvedCategory: DeviceCategory =
+    data?.deviceCategory ||
+    (isMultiNodeSim || key.startsWith('NODO') ? 'nodo' : 'gateway');
+  const resolvedGatewayId =
+    typeof data?.gateway_id === 'string' && data.gateway_id.trim() !== ''
+      ? data.gateway_id.trim()
+      : typeof data?.parentGatewayId === 'string' && data.parentGatewayId.trim() !== ''
+      ? data.parentGatewayId.trim()
+      : undefined;
+
   return {
     id: key,
     code: key,
     name: deviceName,
-    type: key.startsWith('NODO') || data?.deviceCategory === 'nodo' ? 'estacion_fija' : 'multigas_portatil',
+    type:
+      key.startsWith('NODO') || isMultiNodeSim || resolvedCategory === 'nodo'
+        ? 'estacion_fija'
+        : 'multigas_portatil',
     organizationId: resolvedOrgId,
-    organizationName: data?.organizationName || undefined,
-    siteId: data?.siteId || undefined,
-    siteName: siteName || undefined,
-    crewId: data?.crewId || undefined,
-    crewName: crewName || undefined,
-    sectorId: data?.sectorId || `sec-${key}`,
+    organizationName: isExperimentalV2
+      ? 'Sin asignación (Equipo Experimental de Banco)'
+      : data?.organizationName || undefined,
+    siteId: isExperimentalV2 ? undefined : data?.siteId || undefined,
+    siteName: isExperimentalV2 ? undefined : siteName || undefined,
+    crewId: isExperimentalV2 ? undefined : data?.crewId || undefined,
+    crewName: isExperimentalV2 ? undefined : crewName || undefined,
+    sectorId: isExperimentalV2 ? 'sec-experimental-bench-v2' : data?.sectorId || `sec-${key}`,
     sectorName: sectorName,
     batteryPct: hasReportedBattery ? Math.max(0, Math.min(100, Math.round(data.bateria))) : 0,
     batteryReported: hasReportedBattery,
@@ -431,11 +1672,43 @@ export function mapRTDBDeviceToSensorDevice(
     descripcionMonitoreo: descripcionMonitoreo,
     fecha: data?.fecha || '',
     hora: data?.hora || '',
+    fechaHora: typeof data?.fecha_hora === 'string' ? data.fecha_hora : undefined,
+    timestampUnix,
     via: data?.via || '',
-    localIp: data?.localIp || undefined,
-    deviceCategory: data?.deviceCategory || (key.startsWith('NODO') ? 'nodo' : 'gateway'),
-    parentGatewayId: data?.parentGatewayId || undefined,
-    registroAlarmas: data?.registro_alarmas,
+    viaPuente: viaPuenteVal,
+    gatewayId: resolvedGatewayId,
+    saltosEspNow,
+    msgId:
+      typeof data?.msgId === 'string' || typeof data?.msgId === 'number'
+        ? data.msgId
+        : undefined,
+    isSimulated,
+    simulado: isSimulated,
+    modoBanco,
+    telemetryOrigin,
+    isBenchTelemetry,
+    isExperimentalBench: isExperimentalV2,
+    sourcePath,
+    hasEmbeddedHistory: embeddedHistoryEntries > 0,
+    embeddedHistoryCount: embeddedHistoryEntries,
+    historyPath:
+      typeof data?._historyPath === 'string'
+        ? data._historyPath
+        : isMultiNodeSim
+        ? `/${MULTINODE_SIMULATED_NODES_PATH}/${key}/historial`
+        : `/dispositivos/${key}/historial`,
+    nodosActivos:
+      typeof data?.nodos_activos === 'number' && Number.isFinite(data.nodos_activos)
+        ? data.nodos_activos
+        : undefined,
+    adcSaturated,
+    dustSensorModel: DUST_SENSOR_MODEL_LABEL,
+    localIp: data?.localIp || data?.ip || undefined,
+    deviceCategory: resolvedCategory,
+    parentGatewayId: isExperimentalV2
+      ? undefined
+      : data?.parentGatewayId || (resolvedCategory === 'nodo' ? resolvedGatewayId : undefined),
+    registroAlarmas: isIsolatedFromOperationalAlarms ? undefined : data?.registro_alarmas,
     assignmentStatus: mappedAssignmentStatus,
     assignedBy: data?.assignedBy || undefined,
     assignedAt: typeof data?.assignedAt === 'number' ? data.assignedAt : undefined,
@@ -1207,6 +2480,7 @@ export function subscribeToFirebaseAuth(
   callback: (user: UserProfile | null, authError?: string | null) => void
 ): () => void {
   return onAuthStateChanged(auth, async (fbUser) => {
+    syncAuthStateIntoBenchDiagnostics(fbUser);
     if (isAccountRecreationInProgress) {
       return;
     }
@@ -1385,6 +2659,7 @@ export function mapRTDBContractToRental(key: string, data: any): DeviceRental {
 
 export interface RTDBSubscriptionScope {
   uid?: string;
+  authUid?: string;
   role?: UserRole;
   organizationId?: string;
   deviceIds?: string[];
@@ -1408,6 +2683,40 @@ export function subscribeToRTDBDevicesRaw(
   callback: (rawDevices: Record<string, any>) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
+  startServerTimeOffsetSync();
+  syncAuthStateIntoBenchDiagnostics();
+  updateBenchDiagnostics({
+    devicesListener: { status: 'listening', error: null },
+    benchListener: { status: 'listening', error: null, errorCode: null },
+  });
+
+  const recordBenchSnapshotForDiag = (val: Record<string, any> | null) => {
+    const benchTs = normalizeServerTimestampMs(
+      val?.last_update_server ?? val?.timestamp_server ?? val?.timestamp_unix
+    );
+    updateBenchDiagnostics({
+      benchListener: {
+        status: val ? 'ok' : 'empty',
+        lastEventAt: Date.now(),
+        error: null,
+        errorCode: null,
+        normalizedServerTs: benchTs,
+        rawPayload: val
+          ? {
+              CO: val.CO ?? val.co,
+              PM2_5: val.PM2_5 ?? val.pm25,
+              temperatura: val.temperatura ?? val.temp,
+              humedad: val.humedad ?? val.hum,
+              last_update_server: val.last_update_server,
+              origen: val.origen,
+              simulado: val.simulado,
+              hasHistorial: Boolean(val.historial && typeof val.historial === 'object'),
+            }
+          : null,
+      },
+    });
+  };
+
   if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
@@ -1416,9 +2725,15 @@ export function subscribeToRTDBDevicesRaw(
 
     let queryDevices: Record<string, any> = {};
     const explicitDevices: Record<string, any> = {};
+    const explicitSimulatedNodes: Record<string, any> = {};
+    let benchDiagData: Record<string, any> | null = null;
+    let gatewayDiagData: Record<string, any> | null = null;
+
     const emitScoped = () => {
       const merged: Record<string, any> = {};
       const assignIfMatches = (devId: string, val: any, isExplicitAuthorized: boolean) => {
+        // P094: El equipo experimental V2 se consume exclusivamente mediante su suscripción dedicada.
+        if (isExperimentalBenchDeviceId(devId)) return;
         if (!val || typeof val !== 'object') return;
         const explicitOrg = typeof val.organizationId === 'string' ? val.organizationId.trim() : '';
         const sharedOrgs: string[] = Array.isArray(val.sharedOrganizationIds) ? val.sharedOrganizationIds : [];
@@ -1438,7 +2753,47 @@ export function subscribeToRTDBDevicesRaw(
       };
       Object.entries(queryDevices).forEach(([k, v]) => assignIfMatches(k, v, false));
       Object.entries(explicitDevices).forEach(([k, v]) => assignIfMatches(k, v, true));
-      callback(merged);
+
+      const rawPhys = merged[PHYSICAL_NODE_DEVICE_ID];
+      updateBenchDiagnostics({
+        devicesListener: {
+          status: 'ok',
+          lastEventAt: Date.now(),
+          devicesCount: Object.keys(merged).length,
+          physicalNodeExists: Boolean(rawPhys),
+          physicalNodeRawTs: normalizeServerTimestampMs(
+            rawPhys?.last_update_server ?? rawPhys?.timestamp_server ?? rawPhys?.timestamp_unix
+          ),
+          physicalNodeRawPM25:
+            typeof rawPhys?.PM2_5 === 'number'
+              ? rawPhys.PM2_5
+              : typeof rawPhys?.pm25 === 'number'
+              ? rawPhys.pm25
+              : null,
+          error: null,
+        },
+      });
+
+      // Fusionar telemetría de /diagnostico/esp32_p087 únicamente si device_38A839E81F84
+      // pertenece al alcance autorizado de la organización/usuario actual (aislamiento estricto).
+      const afterBench = mergeBenchTelemetryIntoPhysicalNode(merged, benchDiagData, false);
+      const allowedScopedIds = new Set<string>([
+        ...Object.keys(afterBench),
+        ...Array.from(new Set((scope.deviceIds || []).filter(Boolean))),
+      ]);
+      const finalMerged = mergeMultiNodeSimulatedDevices(
+        afterBench,
+        explicitSimulatedNodes,
+        gatewayDiagData,
+        {
+          allowSimulatedDiscovery: false,
+          allowedDeviceIds: allowedScopedIds,
+        }
+      );
+      Object.keys(finalMerged).forEach((key) => {
+        recordDevicePacketArrival(key, finalMerged[key]);
+      });
+      callback(finalMerged);
     };
 
     const unsubs: Array<() => void> = [];
@@ -1454,10 +2809,14 @@ export function subscribeToRTDBDevicesRaw(
             emitScoped();
           },
           (fallbackErr) => {
+            const msg = fallbackErr?.message || String(fallbackErr || '');
             console.warn(
               `Error in fallback RTDB /dispositivos listener (${targetOrgId}):`,
-              fallbackErr?.message || fallbackErr
+              msg
             );
+            updateBenchDiagnostics({
+              devicesListener: { status: 'error', lastEventAt: Date.now(), error: msg },
+            });
           }
         )
       );
@@ -1474,6 +2833,9 @@ export function subscribeToRTDBDevicesRaw(
         (err) => {
           const msg = String(err?.message || err || '');
           console.warn(`Error subscribing to scoped RTDB /dispositivos (${targetOrgId}):`, msg);
+          updateBenchDiagnostics({
+            devicesListener: { status: 'error', lastEventAt: Date.now(), error: msg },
+          });
           if (/index/i.test(msg)) {
             attachIndexFallbackIfAllowed();
           } else {
@@ -1502,33 +2864,203 @@ export function subscribeToRTDBDevicesRaw(
           }
         )
       );
+
+      // Si el usuario/organización tiene asignado un nodo simulado MultiNode V2, escuchar /diagnostico/nodos_simulados/{devId}
+      if (isMultiNodeSimulatedDeviceId(devId)) {
+        unsubs.push(
+          onValue(
+            ref(rtdb, `${MULTINODE_SIMULATED_NODES_PATH}/${devId}`),
+            (snapshot) => {
+              if (snapshot.exists()) {
+                explicitSimulatedNodes[devId] = snapshot.val();
+              } else {
+                delete explicitSimulatedNodes[devId];
+              }
+              emitScoped();
+            },
+            () => {
+              // Silencioso si el rol/organización no tiene permiso sobre ese nodo simulado
+              delete explicitSimulatedNodes[devId];
+            }
+          )
+        );
+      }
     });
+
+    // Suscripción acotada al diagnóstico del gateway solo si el alcance incluye el gateway o nodos simulados
+    if (
+      uniqueIds.includes(GATEWAY_DEVICE_ID) ||
+      uniqueIds.some((id) => isMultiNodeSimulatedDeviceId(id))
+    ) {
+      unsubs.push(
+        onValue(
+          ref(rtdb, MULTINODE_GATEWAY_DIAG_PATH),
+          (snapshot) => {
+            gatewayDiagData = snapshot.exists() ? snapshot.val() || null : null;
+            emitScoped();
+          },
+          () => {
+            gatewayDiagData = null;
+          }
+        )
+      );
+    }
+
+    // Suscripción complementaria a /diagnostico/esp32_p087 (si las reglas RTDB lo autorizan)
+    unsubs.push(
+      onValue(
+        ref(rtdb, BENCH_TELEMETRY_PATH),
+        (snapshot) => {
+          benchDiagData = snapshot.exists() ? snapshot.val() || null : null;
+          recordBenchSnapshotForDiag(benchDiagData);
+          emitScoped();
+        },
+        (err) => {
+          // Usuarios de organizaciones sin acceso al nodo físico reciben permission_denied de forma esperada.
+          benchDiagData = null;
+          recordBenchListenerErrorForDiagnostics(err);
+        }
+      )
+    );
 
     return () => {
       unsubs.forEach((fn) => fn());
     };
   }
 
-  const devicesRef = buildOrgScopedQuery('dispositivos', scope);
-  const unsub = onValue(devicesRef, (snapshot) => {
-    if (snapshot.exists()) {
-      const incoming = snapshot.val() || {};
-      Object.keys(incoming).forEach((key) => {
-        recordDevicePacketArrival(key, incoming[key]);
+  let latestDevices: Record<string, any> = {};
+  let latestBenchDiag: Record<string, any> | null = null;
+  let latestSimulatedNodes: Record<string, any> | null = null;
+  let latestGatewayDiag: Record<string, any> | null = null;
+  let devicesLoaded = false;
+
+  const emitGlobal = () => {
+    const rawPhys = latestDevices[PHYSICAL_NODE_DEVICE_ID];
+    if (devicesLoaded) {
+      updateBenchDiagnostics({
+        devicesListener: {
+          status: 'ok',
+          lastEventAt: Date.now(),
+          devicesCount: Object.keys(latestDevices).length,
+          physicalNodeExists: Boolean(rawPhys),
+          physicalNodeRawTs: normalizeServerTimestampMs(
+            rawPhys?.last_update_server ?? rawPhys?.timestamp_server ?? rawPhys?.timestamp_unix
+          ),
+          physicalNodeRawPM25:
+            typeof rawPhys?.PM2_5 === 'number'
+              ? rawPhys.PM2_5
+              : typeof rawPhys?.pm25 === 'number'
+              ? rawPhys.pm25
+              : null,
+          error: null,
+        },
       });
-      callback(incoming);
-    } else {
-      callback({});
     }
-  }, (err) => {
-    console.warn('Error subscribing to RTDB /dispositivos:', err?.message || err);
-  });
-  return unsub;
+
+    // Para SuperAdmin / Admin MineSafe, permitir materializar/fusionar inmediatamente
+    // la telemetría viva de /diagnostico/esp32_p087 sobre device_38A839E81F84 y descubrir
+    // dinámicamente los nodos MultiNode V2 (/diagnostico/nodos_simulados + gateway_ESP32_DEVKIT_V1).
+    const afterBench = mergeBenchTelemetryIntoPhysicalNode(
+      latestDevices,
+      latestBenchDiag,
+      true
+    );
+    const finalMerged = mergeMultiNodeSimulatedDevices(
+      afterBench,
+      latestSimulatedNodes,
+      latestGatewayDiag,
+      { allowSimulatedDiscovery: true }
+    );
+    Object.keys(finalMerged).forEach((key) => {
+      recordDevicePacketArrival(key, finalMerged[key]);
+    });
+    callback(finalMerged);
+  };
+
+  const devicesRef = buildOrgScopedQuery('dispositivos', scope);
+  const unsubDevices = onValue(
+    devicesRef,
+    (snapshot) => {
+      devicesLoaded = true;
+      latestDevices = snapshot.exists() ? snapshot.val() || {} : {};
+      emitGlobal();
+    },
+    (err) => {
+      const msg = err?.message || String(err || 'Error leyendo /dispositivos');
+      console.warn('Error subscribing to RTDB /dispositivos:', msg);
+      updateBenchDiagnostics({
+        devicesListener: {
+          status: 'error',
+          lastEventAt: Date.now(),
+          error: msg,
+        },
+      });
+      // Emitir igualmente si ya existe telemetría viva en /diagnostico/*
+      if (latestBenchDiag || latestSimulatedNodes || latestGatewayDiag) {
+        emitGlobal();
+      }
+    }
+  );
+
+  const unsubBench = onValue(
+    ref(rtdb, BENCH_TELEMETRY_PATH),
+    (snapshot) => {
+      latestBenchDiag = snapshot.exists() ? snapshot.val() || null : null;
+      recordBenchSnapshotForDiag(latestBenchDiag);
+      emitGlobal();
+    },
+    (err) => {
+      const msg = err?.message || String(err || `Error leyendo /${BENCH_TELEMETRY_PATH}`);
+      console.warn(`Error subscribing to RTDB /${BENCH_TELEMETRY_PATH}:`, msg);
+      latestBenchDiag = null;
+      recordBenchListenerErrorForDiagnostics(err);
+      emitGlobal();
+    }
+  );
+
+  const unsubSimulatedNodes = onValue(
+    ref(rtdb, MULTINODE_SIMULATED_NODES_PATH),
+    (snapshot) => {
+      latestSimulatedNodes = snapshot.exists() ? snapshot.val() || null : null;
+      emitGlobal();
+    },
+    (err) => {
+      console.warn(
+        `Error subscribing to RTDB /${MULTINODE_SIMULATED_NODES_PATH}:`,
+        err?.message || err
+      );
+      latestSimulatedNodes = null;
+      emitGlobal();
+    }
+  );
+
+  const unsubGatewayDiag = onValue(
+    ref(rtdb, MULTINODE_GATEWAY_DIAG_PATH),
+    (snapshot) => {
+      latestGatewayDiag = snapshot.exists() ? snapshot.val() || null : null;
+      emitGlobal();
+    },
+    (err) => {
+      console.warn(
+        `Error subscribing to RTDB /${MULTINODE_GATEWAY_DIAG_PATH}:`,
+        err?.message || err
+      );
+      latestGatewayDiag = null;
+      emitGlobal();
+    }
+  );
+
+  return () => {
+    unsubDevices();
+    unsubBench();
+    unsubSimulatedNodes();
+    unsubGatewayDiag();
+  };
 }
 
 export function subscribeToRTDBDevices(
   callback: (devices: SensorDevice[]) => void,
-  timeoutSeconds: number = 20,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
   scope?: RTDBSubscriptionScope
 ): () => void {
   return subscribeToRTDBDevicesRaw((incoming) => {
@@ -1540,15 +3072,19 @@ export function subscribeToRTDBDevices(
 }
 
 export async function forceRefreshDevicesFromRTDB(
-  timeoutSeconds: number = 20,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
   scope?: RTDBSubscriptionScope
 ): Promise<{ raw: Record<string, any>; devices: SensorDevice[] }> {
+  const benchSnap = await get(ref(rtdb, BENCH_TELEMETRY_PATH)).catch(() => null);
+  const benchRaw = benchSnap && benchSnap.exists() ? benchSnap.val() : null;
+
   if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
         ? scope.organizationId
         : DEFAULT_ORGANIZATION_ID;
     const raw: Record<string, any> = {};
+    const scopedSimNodes: Record<string, any> = {};
 
     let scopedFailedForIndex = false;
     const scopedSnap = await get(buildOrgScopedQuery('dispositivos', scope)).catch((err) => {
@@ -1578,41 +3114,73 @@ export async function forceRefreshDevicesFromRTDB(
       }
     }
 
-    for (const id of Array.from(new Set((scope.deviceIds || []).filter(Boolean)))) {
-      if (raw[id]) continue;
-      const snap = await get(ref(rtdb, `dispositivos/${id}`)).catch(() => null);
-      if (snap && snap.exists()) {
-        const val = snap.val();
-        const explicitOrg = typeof val?.organizationId === 'string' ? val.organizationId.trim() : '';
-        if (!explicitOrg || explicitOrg === targetOrgId) {
-          raw[id] = val;
+    const explicitIds = Array.from(new Set((scope.deviceIds || []).filter(Boolean)));
+    for (const id of explicitIds) {
+      if (!raw[id]) {
+        const snap = await get(ref(rtdb, `dispositivos/${id}`)).catch(() => null);
+        if (snap && snap.exists()) {
+          const val = snap.val();
+          const explicitOrg = typeof val?.organizationId === 'string' ? val.organizationId.trim() : '';
+          if (!explicitOrg || explicitOrg === targetOrgId) {
+            raw[id] = val;
+          }
+        }
+      }
+      if (isMultiNodeSimulatedDeviceId(id)) {
+        const simSnap = await get(ref(rtdb, `${MULTINODE_SIMULATED_NODES_PATH}/${id}`)).catch(() => null);
+        if (simSnap && simSnap.exists()) {
+          scopedSimNodes[id] = simSnap.val();
         }
       }
     }
 
-    const devices = Object.keys(raw).map((id) => {
-      recordDevicePacketArrival(id, raw[id]);
-      return mapRTDBDeviceToSensorDevice(id, raw[id], timeoutSeconds);
+    let gwDiagRaw: Record<string, any> | null = null;
+    if (
+      explicitIds.includes(GATEWAY_DEVICE_ID) ||
+      explicitIds.some((id) => isMultiNodeSimulatedDeviceId(id))
+    ) {
+      const gwSnap = await get(ref(rtdb, MULTINODE_GATEWAY_DIAG_PATH)).catch(() => null);
+      gwDiagRaw = gwSnap && gwSnap.exists() ? gwSnap.val() : null;
+    }
+
+    const afterBench = mergeBenchTelemetryIntoPhysicalNode(raw, benchRaw, false);
+    const mergedRaw = mergeMultiNodeSimulatedDevices(afterBench, scopedSimNodes, gwDiagRaw, {
+      allowSimulatedDiscovery: false,
+      allowedDeviceIds: [...Object.keys(afterBench), ...explicitIds],
+      timeoutSeconds,
     });
-    return { raw, devices };
+    const devices = Object.keys(mergedRaw).map((id) => {
+      recordDevicePacketArrival(id, mergedRaw[id]);
+      return mapRTDBDeviceToSensorDevice(id, mergedRaw[id], timeoutSeconds);
+    });
+    return { raw: mergedRaw, devices };
   }
 
-  const snapshot = await get(ref(rtdb, 'dispositivos'));
-  if (!snapshot.exists()) {
-    return { raw: {}, devices: [] };
-  }
-  const incoming = snapshot.val() || {};
-  const devices = Object.keys(incoming).map((key) => {
-    recordDevicePacketArrival(key, incoming[key]);
-    return mapRTDBDeviceToSensorDevice(key, incoming[key], timeoutSeconds);
+  const [snapshot, simNodesSnap, gwDiagSnap] = await Promise.all([
+    get(ref(rtdb, 'dispositivos')).catch(() => null),
+    get(ref(rtdb, MULTINODE_SIMULATED_NODES_PATH)).catch(() => null),
+    get(ref(rtdb, MULTINODE_GATEWAY_DIAG_PATH)).catch(() => null),
+  ]);
+  const incoming = snapshot && snapshot.exists() ? snapshot.val() || {} : {};
+  const simNodesRaw = simNodesSnap && simNodesSnap.exists() ? simNodesSnap.val() : null;
+  const gwDiagRaw = gwDiagSnap && gwDiagSnap.exists() ? gwDiagSnap.val() : null;
+  const afterBench = mergeBenchTelemetryIntoPhysicalNode(incoming, benchRaw, true);
+  const mergedRaw = mergeMultiNodeSimulatedDevices(afterBench, simNodesRaw, gwDiagRaw, {
+    allowSimulatedDiscovery: true,
+    timeoutSeconds,
   });
-  return { raw: incoming, devices };
+  const devices = Object.keys(mergedRaw).map((key) => {
+    recordDevicePacketArrival(key, mergedRaw[key]);
+    return mapRTDBDeviceToSensorDevice(key, mergedRaw[key], timeoutSeconds);
+  });
+  return { raw: mergedRaw, devices };
 }
 
 export function extractAlarmAuditRecords(devices: SensorDevice[]): AlarmAuditRecord[] {
   const records: AlarmAuditRecord[] = [];
 
   devices.forEach((dev) => {
+    if (isExperimentalBenchDevice(dev) || isSimulatedDevice(dev)) return;
     if (dev.registroAlarmas && typeof dev.registroAlarmas === 'object') {
       Object.keys(dev.registroAlarmas).forEach((alarmKey) => {
         const item = dev.registroAlarmas![alarmKey];
@@ -2492,6 +4060,7 @@ export async function sendESP32Command(
   if (actingUser && !isAnyAdminRole(actingUser.role)) {
     throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede enviar comandos al hardware ESP32.');
   }
+  assertNotExperimentalBenchOperationalCommand(deviceId, 'sendESP32Command');
   try {
     const devRef = ref(rtdb, `dispositivos/${deviceId}`);
     const updates: any = {
@@ -2561,6 +4130,7 @@ export async function resetGatewayDataInRTDB(
 
   const orgScopeId = actingUser?.organizationId || DEFAULT_ORGANIZATION.id;
   const targetId = deviceId || 'device_38A839E81F84';
+  assertNotExperimentalBenchOperationalCommand(targetId, 'resetGatewayDataInRTDB');
   await update(ref(rtdb, `dispositivos/${targetId}`), resetPayload);
 
   if (targetId !== 'device_38A839E81F84' && orgScopeId === DEFAULT_ORGANIZATION.id) {
@@ -2612,7 +4182,7 @@ export async function toggleGatewayAlarmInRTDB(
     alarma: active,
     alarma_activa: active,
     buzzer: active,
-    // La baliza/luz se activa y apaga automáticamente en conjunto con la alarma
+    // Señalización visual LED (solo simulaciones / comandos web; baliza 12 V retirada del alcance)
     luz: active,
     iluminacion_led: active,
     origen_alarma: active ? 'ACTIVACION_MANUAL_WEB' : 'NINGUNO',
@@ -2620,7 +4190,10 @@ export async function toggleGatewayAlarmInRTDB(
   };
 
   const primaryId = deviceId || 'device_38A839E81F84';
-  const targetSet = new Set<string>([primaryId, ...(options?.targetDeviceIds || []).filter(Boolean)]);
+  assertNotExperimentalBenchOperationalCommand(primaryId, 'toggleGatewayAlarmInRTDB');
+  const targetSet = new Set<string>(
+    filterOutExperimentalBenchDeviceIds([primaryId, ...(options?.targetDeviceIds || [])])
+  );
 
   await Promise.all(
     Array.from(targetSet).map((id) =>
@@ -2651,6 +4224,7 @@ export async function shutdownAlarmCompletelyInRTDB(
     actingUser?.organizationId ||
     DEFAULT_ORGANIZATION.id;
   const primaryId = deviceId || 'device_38A839E81F84';
+  assertNotExperimentalBenchOperationalCommand(primaryId, 'shutdownAlarmCompletelyInRTDB');
   const actorLabel = actingUser?.name || auth.currentUser?.email || 'Administrador';
   const devPayload: Record<string, any> = {
     comando_web: 'APAGAR',
@@ -2662,7 +4236,7 @@ export async function shutdownAlarmCompletelyInRTDB(
     iluminacion_led: false,
     simulacro_activo: false,
     origen_alarma: 'NINGUNO',
-    descripcion_monitoreo: `Alarma y baliza apagadas por ${actorLabel}.`,
+    descripcion_monitoreo: `Alarma y señalización detenidas por ${actorLabel}.`,
     last_update_server: now,
   };
 
@@ -2672,7 +4246,9 @@ export async function shutdownAlarmCompletelyInRTDB(
     devPayload.estado_adquisicion = 'activo';
   }
 
-  const targetSet = new Set<string>([primaryId, ...(options?.targetDeviceIds || []).filter(Boolean)]);
+  const targetSet = new Set<string>(
+    filterOutExperimentalBenchDeviceIds([primaryId, ...(options?.targetDeviceIds || [])])
+  );
   await Promise.all(
     Array.from(targetSet).map((id) =>
       ensureValidDevicePayload(id, devPayload).catch((err) => {
@@ -2704,7 +4280,7 @@ export async function toggleGatewayLightInRTDB(
   actingUser?: UserProfile | null
 ): Promise<void> {
   if (actingUser && !isAnyAdminRole(actingUser.role)) {
-    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la baliza LED del nodo.');
+    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la señalización LED del nodo.');
   }
   const now = Date.now();
   const payload = {
@@ -2714,6 +4290,7 @@ export async function toggleGatewayLightInRTDB(
   };
 
   const targetId = deviceId || 'device_38A839E81F84';
+  assertNotExperimentalBenchOperationalCommand(targetId, 'toggleGatewayLightInRTDB');
   await ensureValidDevicePayload(targetId, payload);
 }
 
@@ -2726,10 +4303,11 @@ export async function broadcastDrillToRTDB(
   primaryDeviceId: string = 'device_38A839E81F84',
   organizationId: string = DEFAULT_ORGANIZATION.id
 ): Promise<void> {
+  assertNotExperimentalBenchOperationalCommand(primaryDeviceId, 'broadcastDrillToRTDB');
   try {
     const now = Date.now();
     const orgId = (organizationId && organizationId !== 'all' ? organizationId : DEFAULT_ORGANIZATION.id).trim();
-    const devIds = [primaryDeviceId || 'device_38A839E81F84'];
+    const devIds = filterOutExperimentalBenchDeviceIds([primaryDeviceId || 'device_38A839E81F84']);
 
     if (active) {
       const isGas = drillType === 'gas_critico';
@@ -3405,8 +4983,8 @@ export const DEFAULT_GLOBAL_THRESHOLDS: DeviceThresholdsConfig = {
     unidad: 'µg/m³',
     minVal: 0,
     maxVal: 4095,
-    label: 'Partículas PM2.5 (Sharp GP2Y1010)',
-    descripcion: 'Densidad estimada en µg/m³ por el firmware con conversión lineal genérica. Sin calibración gravimétrica oficial.'
+    label: 'Partículas PM2.5 (Sensor óptico OPEN-SMART — estimación sin calibración)',
+    descripcion: 'Estimación de polvo óptico mediante sensor OPEN-SMART sin calibración gravimétrica oficial. Uso referencial en prototipo académico.'
   },
   mq2: {
     activo: true,
@@ -5251,6 +6829,8 @@ export async function deleteCrewFromRTDB(
 const lastTelemetryWriteMap: Record<string, { ts: number; sig: string }> = {};
 
 export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise<void> {
+  // No duplicar historial operacional para telemetría de banco ni para el equipo experimental V2.
+  if (device.isBenchTelemetry || isExperimentalBenchDevice(device)) return;
   if (!device.gatewayOnline || device.status === 'desconectado') return;
   if (
     device.rawCO === undefined &&
@@ -5293,7 +6873,7 @@ export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise
 
 export function resolveTelemetryWindowMs(
   rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
-  nowMs: number = Date.now()
+  nowMs: number = getEstimatedServerNowMs()
 ): { startMs: number; endMs: number; limit: number } {
   if (typeof rangeOrOptions === 'number') {
     const hours = Math.max(0.25, rangeOrOptions);
@@ -5314,7 +6894,8 @@ export function resolveTelemetryWindowMs(
 export function mapTelemetrySnapshotRaw(
   raw: Record<string, any>,
   startMs: number,
-  endMs: number
+  endMs: number,
+  source?: TelemetryHistoryPoint['source']
 ): TelemetryHistoryPoint[] {
   const toFiniteOrNull = (v: unknown): number | null => {
     if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -5329,19 +6910,15 @@ export function mapTelemetrySnapshotRaw(
     .map((k) => {
       const item = raw[k];
       if (!item || typeof item !== 'object') return null;
-      const rawTs =
-        typeof item.timestamp === 'number'
-          ? item.timestamp
-          : typeof item.timestamp_server === 'number'
-          ? item.timestamp_server
-          : typeof item.serverTimestamp === 'number'
-          ? item.serverTimestamp
-          : Number(k);
-      // Normalize seconds-based timestamps to milliseconds if needed
-      const ts =
-        Number.isFinite(rawTs) && rawTs > 1_000_000_000 && rawTs < 10_000_000_000
-          ? rawTs * 1000
-          : rawTs;
+      const rawCandidate =
+        item.timestamp ??
+        item.last_update_server ??
+        item.timestamp_server ??
+        item.serverTimestamp ??
+        item.timestamp_unix ??
+        k;
+      const ts = normalizeServerTimestampMs(rawCandidate);
+      if (!ts) return null;
 
       const co = toFiniteOrNull(item.co ?? item.CO ?? item.mq2 ?? item.gas);
       const pm25 = toFiniteOrNull(item.pm25 ?? item.PM2_5 ?? item.polvo ?? item.dust);
@@ -5358,6 +6935,7 @@ export function mapTelemetrySnapshotRaw(
         pm25,
         temperatura,
         humedad,
+        ...(source ? { source } : {}),
         ...(typeof item.originTimestamp === 'number' ? { originTimestamp: item.originTimestamp } : {}),
         ...(typeof item.serverTimestamp === 'number' ? { serverTimestamp: item.serverTimestamp } : {}),
       } as TelemetryHistoryPoint;
@@ -5369,9 +6947,170 @@ export function mapTelemetrySnapshotRaw(
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
+/**
+ * Fusiona series históricas de distintas rutas (/historial_telemetria, /dispositivos/{id}/historial,
+ * /diagnostico/esp32_p087/historial) sin borrar ni sobrescribir muestras previas.
+ */
+export function mergeTelemetryHistorySeries(
+  ...seriesList: TelemetryHistoryPoint[][]
+): TelemetryHistoryPoint[] {
+  const map = new Map<number, TelemetryHistoryPoint>();
+  for (const series of seriesList) {
+    if (!Array.isArray(series)) continue;
+    for (const pt of series) {
+      if (!pt || !Number.isFinite(pt.timestamp)) continue;
+      if (!map.has(pt.timestamp)) {
+        map.set(pt.timestamp, pt);
+      }
+    }
+  }
+  return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
+}
+
 function isRTDBIndexMissingError(err: any): boolean {
   const msg = String(err?.message || err || '');
   return /index\s+not\s+defined|\.indexOn|add\s+"\.indexOn"/i.test(msg);
+}
+
+async function fetchBenchDiagnosticHistoryFromRTDB(
+  startMs: number,
+  endMs: number
+): Promise<TelemetryHistoryPoint[]> {
+  const benchEndMs = endMs + 60_000;
+  try {
+    const indexedQuery = query(
+      ref(rtdb, BENCH_HISTORY_PATH),
+      orderByChild('timestamp'),
+      startAt(startMs),
+      endAt(benchEndMs),
+      limitToLast(5000)
+    );
+    const snap = await get(indexedQuery);
+    if (snap.exists()) {
+      const mapped = mapTelemetrySnapshotRaw(snap.val() || {}, startMs, benchEndMs, 'diagnostico_p087');
+      if (mapped.length > 0) {
+        updateBenchDiagnostics({
+          historyListener: {
+            status: 'ok',
+            benchPointsCount: mapped.length,
+            lastError: null,
+          },
+        });
+        return mapped;
+      }
+    }
+    // Respaldo si las muestras usan timestamp en segundos (10 dígitos) o clave push sin índice ms
+    const tailSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(1000)));
+    if (tailSnap.exists()) {
+      const mappedTail = mapTelemetrySnapshotRaw(
+        tailSnap.val() || {},
+        startMs,
+        benchEndMs,
+        'diagnostico_p087'
+      );
+      updateBenchDiagnostics({
+        historyListener: {
+          status: mappedTail.length > 0 ? 'ok' : 'empty',
+          benchPointsCount: mappedTail.length,
+          lastError: null,
+        },
+      });
+      return mappedTail;
+    }
+    updateBenchDiagnostics({
+      historyListener: { status: 'empty', benchPointsCount: 0, lastError: null },
+    });
+    return [];
+  } catch (err: any) {
+    if (isRTDBIndexMissingError(err)) {
+      try {
+        const rawSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(1000)));
+        if (rawSnap.exists()) {
+          const mapped = mapTelemetrySnapshotRaw(
+            rawSnap.val() || {},
+            startMs,
+            endMs,
+            'diagnostico_p087'
+          );
+          updateBenchDiagnostics({
+            historyListener: {
+              status: mapped.length > 0 ? 'ok' : 'empty',
+              benchPointsCount: mapped.length,
+              lastError: null,
+            },
+          });
+          return mapped;
+        }
+      } catch (fallbackErr: any) {
+        const fbMsg = fallbackErr?.message || String(fallbackErr || '');
+        console.warn(`Fallback read on /${BENCH_HISTORY_PATH} failed:`, fbMsg);
+        updateBenchDiagnostics({
+          historyListener: { status: 'error', lastError: fbMsg },
+        });
+      }
+      return [];
+    }
+    const errMsg = err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`);
+    console.warn(`Read on /${BENCH_HISTORY_PATH} failed:`, errMsg);
+    updateBenchDiagnostics({
+      historyListener: { status: 'error', lastError: errMsg },
+    });
+    return [];
+  }
+}
+
+async function fetchMultiNodeSimulatedHistoryFromRTDB(
+  deviceId: string,
+  startMs: number,
+  endMs: number
+): Promise<TelemetryHistoryPoint[]> {
+  if (!deviceId) return [];
+  const histPath = `${MULTINODE_SIMULATED_NODES_PATH}/${deviceId}/historial`;
+  const effectiveEndMs = endMs + 60_000;
+  try {
+    const q = query(
+      ref(rtdb, histPath),
+      orderByChild('timestamp'),
+      startAt(startMs),
+      endAt(effectiveEndMs),
+      limitToLast(1000)
+    );
+    const snap = await get(q);
+    if (snap.exists()) {
+      const mapped = mapTelemetrySnapshotRaw(
+        snap.val() || {},
+        startMs,
+        effectiveEndMs,
+        'diagnostico_nodos_simulados'
+      );
+      if (mapped.length > 0) return mapped;
+    }
+    const tailSnap = await get(query(ref(rtdb, histPath), limitToLast(1000)));
+    if (tailSnap.exists()) {
+      return mapTelemetrySnapshotRaw(
+        tailSnap.val() || {},
+        startMs,
+        effectiveEndMs,
+        'diagnostico_nodos_simulados'
+      );
+    }
+    return [];
+  } catch {
+    try {
+      const rawSnap = await get(query(ref(rtdb, histPath), limitToLast(1000)));
+      if (rawSnap.exists()) {
+        return mapTelemetrySnapshotRaw(
+          rawSnap.val() || {},
+          startMs,
+          effectiveEndMs,
+          'diagnostico_nodos_simulados'
+        );
+      }
+    } catch {
+      // Silencioso si no existe historial o sin permiso
+    }
+    return [];
+  }
 }
 
 async function fetchUnindexedTelemetryFallbackFromRTDB(
@@ -5379,31 +7118,45 @@ async function fetchUnindexedTelemetryFallbackFromRTDB(
   startMs: number,
   endMs: number
 ): Promise<TelemetryHistoryPoint[]> {
-  const collected = new Map<number, TelemetryHistoryPoint>();
+  const series: TelemetryHistoryPoint[][] = [];
 
   try {
     const primarySnap = await get(ref(rtdb, `historial_telemetria/${deviceId}`));
     if (primarySnap.exists()) {
-      const pts = mapTelemetrySnapshotRaw(primarySnap.val() || {}, startMs, endMs);
-      pts.forEach((p) => collected.set(p.timestamp, p));
+      series.push(
+        mapTelemetrySnapshotRaw(primarySnap.val() || {}, startMs, endMs, 'historial_telemetria')
+      );
     }
   } catch (err) {
     console.warn('Fallback read on /historial_telemetria failed:', err);
   }
 
-  if (collected.size === 0) {
-    try {
-      const espSnap = await get(ref(rtdb, `dispositivos/${deviceId}/historial`));
-      if (espSnap.exists()) {
-        const pts = mapTelemetrySnapshotRaw(espSnap.val() || {}, startMs, endMs);
-        pts.forEach((p) => collected.set(p.timestamp, p));
-      }
-    } catch (err) {
-      console.warn('Secondary fallback read on /dispositivos/{id}/historial failed:', err);
+  try {
+    const espSnap = await get(ref(rtdb, `dispositivos/${deviceId}/historial`));
+    if (espSnap.exists()) {
+      series.push(
+        mapTelemetrySnapshotRaw(espSnap.val() || {}, startMs, endMs, 'dispositivos_historial')
+      );
+    }
+  } catch (err) {
+    console.warn('Secondary fallback read on /dispositivos/{id}/historial failed:', err);
+  }
+
+  if (deviceId === PHYSICAL_NODE_DEVICE_ID) {
+    const benchPts = await fetchBenchDiagnosticHistoryFromRTDB(startMs, endMs);
+    if (benchPts.length > 0) {
+      series.push(benchPts);
     }
   }
 
-  return Array.from(collected.values()).sort((a, b) => a.timestamp - b.timestamp);
+  if (isMultiNodeSimulatedDeviceId(deviceId)) {
+    const simPts = await fetchMultiNodeSimulatedHistoryFromRTDB(deviceId, startMs, endMs);
+    if (simPts.length > 0) {
+      series.push(simPts);
+    }
+  }
+
+  return mergeTelemetryHistorySeries(...series);
 }
 
 /**
@@ -5411,6 +7164,11 @@ async function fetchUnindexedTelemetryFallbackFromRTDB(
  * truncamiento silencioso en ventanas extensas de telemetría.
  * Si RTDB no tiene `.indexOn: "timestamp"` definido en reglas, hace fallback automático
  * a lectura directa sin índice + filtrado/ordenamiento en cliente.
+ * Para el nodo físico `device_38A839E81F84`, fusiona además `/diagnostico/esp32_p087/historial`
+ * preservando el historial legado sin sobrescribirlo.
+ * Para nodos simulados MultiNode V2 (`device_SIM_01`..`device_SIM_10`), lee su historial en
+ * `/diagnostico/nodos_simulados/{deviceId}/historial` (y `/dispositivos/{deviceId}/historial`)
+ * sin mezclarlo con mediciones operativas reales.
  */
 export async function fetchPaginatedTelemetryHistory(
   deviceId: string,
@@ -5425,7 +7183,35 @@ export async function fetchPaginatedTelemetryHistory(
   if (!deviceId) {
     return { points: [], pagesFetched: 0, truncated: false, error: null };
   }
+  // P094: El historial del equipo experimental V2 vive estrictamente separado en /dispositivos/device_38A839E81F84_V2/historial.
+  if (isExperimentalBenchDeviceId(deviceId) && !options?.fetchPage) {
+    const v2Result = await fetchExperimentalBenchV2History(rangeOrOptions);
+    return {
+      points: v2Result.points,
+      pagesFetched: v2Result.points.length > 0 ? 1 : 0,
+      truncated: false,
+      error: v2Result.error,
+    };
+  }
   const { startMs, endMs } = resolveTelemetryWindowMs(rangeOrOptions);
+  // MultiNode V2: leer historial aislado directamente desde /diagnostico/nodos_simulados/{id}/historial y /dispositivos/{id}/historial
+  if (isMultiNodeSimulatedDeviceId(deviceId) && !options?.fetchPage) {
+    const [simPts, devSnap] = await Promise.all([
+      fetchMultiNodeSimulatedHistoryFromRTDB(deviceId, startMs, endMs),
+      get(ref(rtdb, `dispositivos/${deviceId}/historial`)).catch(() => null),
+    ]);
+    const devPts =
+      devSnap && devSnap.exists()
+        ? mapTelemetrySnapshotRaw(devSnap.val() || {}, startMs, endMs, 'dispositivos_historial')
+        : [];
+    const mergedPts = mergeTelemetryHistorySeries(devPts, simPts);
+    return {
+      points: mergedPts,
+      pagesFetched: mergedPts.length > 0 ? 1 : 0,
+      truncated: false,
+      error: null,
+    };
+  }
   const pageSize = Math.max(50, options?.pageSize ?? 500);
   const maxPages = Math.max(1, options?.maxPages ?? 40);
 
@@ -5451,7 +7237,12 @@ export async function fetchPaginatedTelemetryHistory(
         if (!snap.exists()) {
           pagePoints = [];
         } else {
-          pagePoints = mapTelemetrySnapshotRaw(snap.val() || {}, cursorTs, endMs);
+          pagePoints = mapTelemetrySnapshotRaw(
+            snap.val() || {},
+            cursorTs,
+            endMs,
+            'historial_telemetria'
+          );
         }
       }
 
@@ -5479,10 +7270,24 @@ export async function fetchPaginatedTelemetryHistory(
       }
     }
 
-    // Si /historial_telemetria devolvió 0 muestras en modo real, revisar /dispositivos/{id}/historial
+    // Fusionar historial de /diagnostico/esp32_p087/historial para el nodo físico en modo real
+    if (!options?.fetchPage && deviceId === PHYSICAL_NODE_DEVICE_ID) {
+      const benchPoints = await fetchBenchDiagnosticHistoryFromRTDB(startMs, endMs);
+      benchPoints.forEach((pt) => {
+        if (!collectedMap.has(pt.timestamp)) {
+          collectedMap.set(pt.timestamp, pt);
+        }
+      });
+    }
+
+    // Si aún no hay muestras en modo real, revisar /dispositivos/{id}/historial
     if (collectedMap.size === 0 && !options?.fetchPage) {
       const espPoints = await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
-      espPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
+      espPoints.forEach((pt) => {
+        if (!collectedMap.has(pt.timestamp)) {
+          collectedMap.set(pt.timestamp, pt);
+        }
+      });
     }
 
     const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
@@ -5493,7 +7298,11 @@ export async function fetchPaginatedTelemetryHistory(
         const fallbackPoints = options?.fetchUnindexedFallback
           ? await options.fetchUnindexedFallback(startMs, endMs)
           : await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
-        fallbackPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
+        fallbackPoints.forEach((pt) => {
+          if (!collectedMap.has(pt.timestamp)) {
+            collectedMap.set(pt.timestamp, pt);
+          }
+        });
         const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
         return {
           points,
@@ -5531,30 +7340,95 @@ export function subscribeToTelemetryHistory(
     callback([], { error: null });
     return () => {};
   }
+  // P094: El historial de device_38A839E81F84_V2 nunca se mezcla con /historial_telemetria ni con /diagnostico/esp32_p087/historial.
+  if (isExperimentalBenchDeviceId(deviceId)) {
+    return subscribeToExperimentalBenchV2History(rangeOrOptions, callback);
+  }
   const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
-  let disposed = false;
-  let activeUnsub: (() => void) | null = null;
 
-  const attachFallbackListener = () => {
+  // MultiNode V2: suscribirse exclusivamente al historial del nodo simulado sin tocar /historial_telemetria real
+  if (isMultiNodeSimulatedDeviceId(deviceId)) {
+    let disposedSim = false;
+    let simPoints: TelemetryHistoryPoint[] = [];
+    let devPoints: TelemetryHistoryPoint[] = [];
+    const simEndMs = endMs + 60_000;
+    const emitSim = () => {
+      if (disposedSim) return;
+      const merged = mergeTelemetryHistorySeries(devPoints, simPoints);
+      const sliced = merged.length > limit ? merged.slice(-limit) : merged;
+      callback(sliced, { error: null });
+    };
+    const unsubSimHist = onValue(
+      query(ref(rtdb, `${MULTINODE_SIMULATED_NODES_PATH}/${deviceId}/historial`), limitToLast(Math.min(limit, 1000))),
+      (snap) => {
+        if (disposedSim) return;
+        simPoints = snap.exists()
+          ? mapTelemetrySnapshotRaw(snap.val() || {}, startMs, simEndMs, 'diagnostico_nodos_simulados')
+          : [];
+        emitSim();
+      },
+      () => {
+        if (disposedSim) return;
+        simPoints = [];
+        emitSim();
+      }
+    );
+    const unsubDevHist = onValue(
+      query(ref(rtdb, `dispositivos/${deviceId}/historial`), limitToLast(Math.min(limit, 1000))),
+      (snap) => {
+        if (disposedSim) return;
+        devPoints = snap.exists()
+          ? mapTelemetrySnapshotRaw(snap.val() || {}, startMs, simEndMs, 'dispositivos_historial')
+          : [];
+        emitSim();
+      },
+      () => {
+        if (disposedSim) return;
+        devPoints = [];
+        emitSim();
+      }
+    );
+    return () => {
+      disposedSim = true;
+      unsubSimHist();
+      unsubDevHist();
+    };
+  }
+
+  let disposed = false;
+  let primaryUnsub: (() => void) | null = null;
+  let benchUnsub: (() => void) | null = null;
+  let primaryPoints: TelemetryHistoryPoint[] = [];
+  let benchPoints: TelemetryHistoryPoint[] = [];
+  let primaryError: string | null = null;
+
+  const emitMerged = () => {
+    if (disposed) return;
+    const merged = mergeTelemetryHistorySeries(primaryPoints, benchPoints);
+    const sliced = merged.length > limit ? merged.slice(-limit) : merged;
+    // Si existen puntos del historial de banco, no bloquear la vista por un error secundario.
+    callback(sliced, { error: sliced.length > 0 ? null : primaryError });
+  };
+
+  const attachPrimaryFallbackListener = () => {
     if (disposed) return;
     const rawRef = ref(rtdb, `historial_telemetria/${deviceId}`);
-    activeUnsub = onValue(
+    primaryUnsub = onValue(
       rawRef,
       (snapshot) => {
         if (disposed) return;
-        if (!snapshot.exists()) {
-          callback([], { error: null });
-          return;
-        }
-        const points = mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs);
-        const sliced = points.length > limit ? points.slice(-limit) : points;
-        callback(sliced, { error: null });
+        primaryError = null;
+        primaryPoints = snapshot.exists()
+          ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs, 'historial_telemetria')
+          : [];
+        emitMerged();
       },
       (fallbackErr) => {
         if (disposed) return;
-        const msg = fallbackErr?.message || 'Error consultando historial de telemetría.';
-        console.warn('Error in fallback telemetry history subscription:', msg);
-        callback([], { error: msg });
+        primaryError = fallbackErr?.message || 'Error consultando historial de telemetría.';
+        console.warn('Error in fallback telemetry history subscription:', primaryError);
+        primaryPoints = [];
+        emitMerged();
       }
     );
   };
@@ -5566,18 +7440,723 @@ export function subscribeToTelemetryHistory(
     endAt(endMs),
     limitToLast(limit)
   );
-  activeUnsub = onValue(
+  primaryUnsub = onValue(
     histQuery,
     (snapshot) => {
       if (disposed) return;
-      if (!snapshot.exists()) {
-        callback([], { error: null });
-        return;
-      }
-      const points = mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs);
-      callback(points, { error: null });
+      primaryError = null;
+      primaryPoints = snapshot.exists()
+        ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs, 'historial_telemetria')
+        : [];
+      emitMerged();
     },
     (err) => {
+      if (disposed) return;
+      if (isRTDBIndexMissingError(err)) {
+        if (primaryUnsub) {
+          try {
+            primaryUnsub();
+          } catch {
+            // ignore
+          }
+          primaryUnsub = null;
+        }
+        attachPrimaryFallbackListener();
+        return;
+      }
+      primaryError = err?.message || 'Error consultando historial de telemetría.';
+      console.warn('Error subscribing to telemetry history:', primaryError);
+      primaryPoints = [];
+      emitMerged();
+    }
+  );
+
+  // Para el nodo físico device_38A839E81F84, suscribirse también a /diagnostico/esp32_p087/historial
+  if (deviceId === PHYSICAL_NODE_DEVICE_ID) {
+    const benchEndMs = endMs + 60_000;
+    updateBenchDiagnostics({
+      historyListener: { status: 'listening', lastError: null },
+    });
+    const attachBenchFallbackListener = () => {
+      if (disposed) return;
+      benchUnsub = onValue(
+        query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(Math.min(limit, 1000))),
+        (snapshot) => {
+          if (disposed) return;
+          benchPoints = snapshot.exists()
+            ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, benchEndMs, 'diagnostico_p087')
+            : [];
+          updateBenchDiagnostics({
+            historyListener: {
+              status: benchPoints.length > 0 ? 'ok' : 'empty',
+              benchPointsCount: benchPoints.length,
+              legacyPointsCount: primaryPoints.length,
+              lastError: null,
+            },
+          });
+          emitMerged();
+        },
+        (fallbackErr) => {
+          if (disposed) return;
+          const msg = fallbackErr?.message || String(fallbackErr || `Error leyendo /${BENCH_HISTORY_PATH}`);
+          updateBenchDiagnostics({
+            historyListener: { status: 'error', lastError: msg },
+          });
+          benchPoints = [];
+          emitMerged();
+        }
+      );
+    };
+
+    const benchQuery = query(
+      ref(rtdb, BENCH_HISTORY_PATH),
+      orderByChild('timestamp'),
+      startAt(startMs),
+      endAt(benchEndMs),
+      limitToLast(limit)
+    );
+    benchUnsub = onValue(
+      benchQuery,
+      (snapshot) => {
+        if (disposed) return;
+        const mapped = snapshot.exists()
+          ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, benchEndMs, 'diagnostico_p087')
+          : [];
+        if (mapped.length === 0 && !snapshot.exists()) {
+          // Si la consulta por índice ms devuelve vacío (p. ej. timestamp en segundos), cambiar a tail por clave
+          if (benchUnsub) {
+            try {
+              benchUnsub();
+            } catch {
+              // ignore
+            }
+            benchUnsub = null;
+          }
+          attachBenchFallbackListener();
+          return;
+        }
+        benchPoints = mapped;
+        updateBenchDiagnostics({
+          historyListener: {
+            status: benchPoints.length > 0 ? 'ok' : 'empty',
+            benchPointsCount: benchPoints.length,
+            legacyPointsCount: primaryPoints.length,
+            lastError: null,
+          },
+        });
+        emitMerged();
+      },
+      (err) => {
+        if (disposed) return;
+        if (isRTDBIndexMissingError(err)) {
+          if (benchUnsub) {
+            try {
+              benchUnsub();
+            } catch {
+              // ignore
+            }
+            benchUnsub = null;
+          }
+          attachBenchFallbackListener();
+          return;
+        }
+        const msg = err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`);
+        console.warn(`Error subscribing to /${BENCH_HISTORY_PATH}:`, msg);
+        updateBenchDiagnostics({
+          historyListener: { status: 'error', lastError: msg },
+        });
+        benchPoints = [];
+        emitMerged();
+      }
+    );
+  }
+
+  return () => {
+    disposed = true;
+    if (primaryUnsub) {
+      try {
+        primaryUnsub();
+      } catch {
+        // ignore
+      }
+      primaryUnsub = null;
+    }
+    if (benchUnsub) {
+      try {
+        benchUnsub();
+      } catch {
+        // ignore
+      }
+      benchUnsub = null;
+    }
+  };
+}
+
+/**
+ * ============================================================================
+ * P094 — EQUIPO EXPERIMENTAL DE BANCO SIN ASIGNACIÓN (device_38A839E81F84_V2)
+ * Rutas exclusivas:
+ *   - /dispositivos/device_38A839E81F84_V2
+ *   - /dispositivos/device_38A839E81F84_V2/historial
+ * Nunca se fusiona sobre device_38A839E81F84, nunca entra a alertas,
+ * indicadores operacionales ni comandos operacionales.
+ * ============================================================================
+ */
+export type ExperimentalBenchChannelStatus =
+  | 'desconectado'
+  | 'no_disponible'
+  | 'saturado_invalido'
+  | 'experimental_raw'
+  | 'estimado_no_calibrado'
+  | 'experimental_ambiental';
+
+export interface ExperimentalBenchChannelClassification {
+  status: ExperimentalBenchChannelStatus;
+  displayValue: string;
+  badge: string;
+  detail: string;
+  isValid: boolean;
+  certified: false;
+}
+
+export interface ExperimentalBenchClassification {
+  deviceId: string;
+  sourcePath: string;
+  historyPath: string;
+  assignmentState: 'sin_asignacion';
+  certifiedMeasurement: false;
+  operationalAlertsEnabled: false;
+  operationalCommandsAllowed: false;
+  connectivity: DeviceConnectivityEvaluation;
+  overallStatus: 'desconectado' | 'en_linea_con_observaciones' | 'en_linea_experimental';
+  overallLabel: string;
+  channels: {
+    mq2: ExperimentalBenchChannelClassification;
+    polvo: ExperimentalBenchChannelClassification;
+    temperatura: ExperimentalBenchChannelClassification;
+    humedad: ExperimentalBenchChannelClassification;
+  };
+}
+
+export function classifyExperimentalBenchReadings(
+  device: SensorDevice | null | undefined,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+  nowMs: number = getEstimatedServerNowMs()
+): ExperimentalBenchClassification {
+  const connectivity = evaluateDeviceConnectivity(
+    device?.lastUpdateServer || 0,
+    timeoutSeconds,
+    nowMs
+  );
+
+  const offlineChannel = (label: string): ExperimentalBenchChannelClassification => ({
+    status: 'desconectado',
+    displayValue: 'N/D',
+    badge: 'DESCONECTADO',
+    detail: `${label}: sin transmisión vigente dentro del timeout (${connectivity.timeoutSeconds}s).`,
+    isValid: false,
+    certified: false,
+  });
+
+  if (!device || !connectivity.isOnline) {
+    return {
+      deviceId: EXPERIMENTAL_BENCH_V2_DEVICE_ID,
+      sourcePath: `/${EXPERIMENTAL_BENCH_V2_PATH}`,
+      historyPath: `/${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`,
+      assignmentState: 'sin_asignacion',
+      certifiedMeasurement: false,
+      operationalAlertsEnabled: false,
+      operationalCommandsAllowed: false,
+      connectivity,
+      overallStatus: 'desconectado',
+      overallLabel: device?.lastUpdateServer
+        ? `Desconectado / señal expirada (hace ${connectivity.diffSeconds}s)`
+        : 'Desconectado · sin marca temporal de servidor',
+      channels: {
+        mq2: offlineChannel('MQ-2 (ADC 12 bits)'),
+        polvo: offlineChannel('Polvo óptico OPEN-SMART'),
+        temperatura: offlineChannel('Temperatura DHT'),
+        humedad: offlineChannel('Humedad DHT'),
+      },
+    };
+  }
+
+  const faultSet = new Set(device.faultFields || []);
+  const coVal =
+    !faultSet.has('CO') && typeof device.rawCO === 'number' && Number.isFinite(device.rawCO)
+      ? device.rawCO
+      : null;
+  const pmVal =
+    !faultSet.has('PM2_5') && typeof device.rawPM25 === 'number' && Number.isFinite(device.rawPM25)
+      ? device.rawPM25
+      : null;
+  const rawTempCandidate =
+    !faultSet.has('temperatura') &&
+    typeof device.rawTemp === 'number' &&
+    Number.isFinite(device.rawTemp)
+      ? device.rawTemp
+      : null;
+  const rawHumCandidate =
+    !faultSet.has('humedad') &&
+    typeof device.rawHum === 'number' &&
+    Number.isFinite(device.rawHum)
+      ? device.rawHum
+      : null;
+  const dhtZeroPair = rawTempCandidate === 0 && rawHumCandidate === 0;
+  const tempVal = dhtZeroPair ? null : rawTempCandidate;
+  const humVal = dhtZeroPair ? null : rawHumCandidate;
+
+  const mq2: ExperimentalBenchChannelClassification =
+    coVal === null
+      ? {
+          status: 'no_disponible',
+          displayValue: 'N/D',
+          badge: 'N/D · SIN LECTURA',
+          detail: 'MQ-2 sin dato numérico válido en el rango ADC 0–4095.',
+          isValid: false,
+          certified: false,
+        }
+      : coVal === 4095
+      ? {
+          status: 'saturado_invalido',
+          displayValue: '4095 (SAT)',
+          badge: 'NO VÁLIDO · SATURADO',
+          detail:
+            'MQ-2 saturado en tope de escala ADC 12 bits (4095). Medición NO válida; no equivale a CO en ppm ni dispara alarmas operacionales.',
+          isValid: false,
+          certified: false,
+        }
+      : {
+          status: 'experimental_raw',
+          displayValue: `${coVal} ADC`,
+          badge: 'RAW · SIN CALIBRAR',
+          detail:
+            'Señal analógica bruta ADC 12 bits (0–4094) en banco experimental. No representa ppm certificados de CO.',
+          isValid: true,
+          certified: false,
+        };
+
+  const polvo: ExperimentalBenchChannelClassification =
+    pmVal === null
+      ? {
+          status: 'no_disponible',
+          displayValue: 'N/D',
+          badge: 'N/D · SIN LECTURA',
+          detail: 'Sensor óptico OPEN-SMART sin dato numérico válido (0–4095).',
+          isValid: false,
+          certified: false,
+        }
+      : pmVal === 4095
+      ? {
+          status: 'saturado_invalido',
+          displayValue: '4095 (SAT)',
+          badge: 'NO VÁLIDO · SATURADO',
+          detail:
+            'Saturación ADC (4095) en sensor óptico OPEN-SMART. Lectura no válida y sin calibración oficial.',
+          isValid: false,
+          certified: false,
+        }
+      : {
+          status: 'estimado_no_calibrado',
+          displayValue: `${Number.isInteger(pmVal) ? pmVal : pmVal.toFixed(1)} µg/m³ est.`,
+          badge: 'ESTIMADO · NO CALIBRADO',
+          detail:
+            'Polvo estimado por sensor óptico OPEN-SMART en banco sin calibración gravimétrica ni certificación minera.',
+          isValid: true,
+          certified: false,
+        };
+
+  const temperatura: ExperimentalBenchChannelClassification =
+    tempVal === null
+      ? {
+          status: 'no_disponible',
+          displayValue: 'N/D',
+          badge: 'N/D · DHT AUSENTE',
+          detail: 'Sensor DHT ausente o sin lectura válida de temperatura (-40 °C a 100 °C).',
+          isValid: false,
+          certified: false,
+        }
+      : {
+          status: 'experimental_ambiental',
+          displayValue: `${tempVal.toFixed(1)} °C`,
+          badge: 'BANCO · NO CERTIFICADO',
+          detail: 'Lectura ambiental DHT en banco experimental (no calibrada ni certificada).',
+          isValid: true,
+          certified: false,
+        };
+
+  const humedad: ExperimentalBenchChannelClassification =
+    humVal === null
+      ? {
+          status: 'no_disponible',
+          displayValue: 'N/D',
+          badge: 'N/D · DHT AUSENTE',
+          detail: 'Sensor DHT ausente o sin lectura válida de humedad relativa (0% a 100%).',
+          isValid: false,
+          certified: false,
+        }
+      : {
+          status: 'experimental_ambiental',
+          displayValue: `${humVal.toFixed(0)} %`,
+          badge: 'BANCO · NO CERTIFICADO',
+          detail: 'Humedad relativa DHT en banco experimental (no calibrada ni certificada).',
+          isValid: true,
+          certified: false,
+        };
+
+  const hasObservations = [mq2, polvo, temperatura, humedad].some((ch) => !ch.isValid);
+
+  return {
+    deviceId: EXPERIMENTAL_BENCH_V2_DEVICE_ID,
+    sourcePath: `/${EXPERIMENTAL_BENCH_V2_PATH}`,
+    historyPath: `/${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`,
+    assignmentState: 'sin_asignacion',
+    certifiedMeasurement: false,
+    operationalAlertsEnabled: false,
+    operationalCommandsAllowed: false,
+    connectivity,
+    overallStatus: hasObservations ? 'en_linea_con_observaciones' : 'en_linea_experimental',
+    overallLabel: hasObservations
+      ? `En línea en banco (hace ${connectivity.diffSeconds}s) · con canales saturados o N/D`
+      : `En línea en banco (hace ${connectivity.diffSeconds}s) · lecturas experimentales no certificadas`,
+    channels: { mq2, polvo, temperatura, humedad },
+  };
+}
+
+export interface ExperimentalBenchV2State {
+  authorized: boolean;
+  status: 'idle' | 'listening' | 'ok' | 'empty' | 'denied' | 'error';
+  device: SensorDevice | null;
+  sourcePath: string;
+  historyPath: string;
+  normalizedServerTs: number;
+  lastEventAt: number | null;
+  error: string | null;
+  errorCode: string | null;
+  rawPayload: {
+    CO?: unknown;
+    PM2_5?: unknown;
+    temperatura?: unknown;
+    humedad?: unknown;
+    last_update_server?: unknown;
+    origen?: unknown;
+    simulado?: unknown;
+    via?: unknown;
+    hasHistorial?: boolean;
+  } | null;
+}
+
+export function createInitialExperimentalBenchV2State(
+  authorized: boolean = false
+): ExperimentalBenchV2State {
+  return {
+    authorized,
+    status: authorized ? 'idle' : 'denied',
+    device: null,
+    sourcePath: `/${EXPERIMENTAL_BENCH_V2_PATH}`,
+    historyPath: `/${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`,
+    normalizedServerTs: 0,
+    lastEventAt: null,
+    error: authorized
+      ? null
+      : 'Acceso denegado: la vista experimental de banco está restringida a roles autorizados (SuperAdmin / Admin MineSafe).',
+    errorCode: authorized ? null : 'UNAUTHORIZED_ROLE',
+    rawPayload: null,
+  };
+}
+
+function summarizeExperimentalV2RawPayload(
+  val: Record<string, any> | null
+): ExperimentalBenchV2State['rawPayload'] {
+  if (!val || typeof val !== 'object') return null;
+  return {
+    CO: val.CO ?? val.co,
+    PM2_5: val.PM2_5 ?? val.pm25,
+    temperatura: val.temperatura ?? val.temp,
+    humedad: val.humedad ?? val.hum,
+    last_update_server: val.last_update_server ?? val.timestamp_server ?? val.timestamp_unix,
+    origen: val.origen,
+    simulado: val.simulado,
+    via: val.via,
+    hasHistorial: Boolean(val.historial && typeof val.historial === 'object'),
+  };
+}
+
+export function subscribeToExperimentalBenchV2(
+  callback: (state: ExperimentalBenchV2State) => void,
+  actingUser?: Pick<UserProfile, 'role' | 'status'> | null,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS
+): () => void {
+  if (!canAccessExperimentalBenchDevice(actingUser)) {
+    callback(createInitialExperimentalBenchV2State(false));
+    return () => {};
+  }
+
+  startServerTimeOffsetSync();
+  callback({
+    ...createInitialExperimentalBenchV2State(true),
+    status: 'listening',
+  });
+
+  const nodeRef = ref(rtdb, EXPERIMENTAL_BENCH_V2_PATH);
+  return onValue(
+    nodeRef,
+    (snapshot) => {
+      if (!snapshot.exists()) {
+        callback({
+          ...createInitialExperimentalBenchV2State(true),
+          status: 'empty',
+          lastEventAt: Date.now(),
+        });
+        return;
+      }
+      const val = snapshot.val() || {};
+      const normalizedServerTs = normalizeServerTimestampMs(
+        val.last_update_server ?? val.timestamp_server ?? val.timestamp_unix
+      );
+      const mapped = mapRTDBDeviceToSensorDevice(
+        EXPERIMENTAL_BENCH_V2_DEVICE_ID,
+        val,
+        timeoutSeconds,
+        getEstimatedServerNowMs()
+      );
+      callback({
+        authorized: true,
+        status: 'ok',
+        device: mapped,
+        sourcePath: `/${EXPERIMENTAL_BENCH_V2_PATH}`,
+        historyPath: `/${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`,
+        normalizedServerTs,
+        lastEventAt: Date.now(),
+        error: null,
+        errorCode: null,
+        rawPayload: summarizeExperimentalV2RawPayload(val),
+      });
+    },
+    (err: any) => {
+      const code = err?.code ? String(err.code) : null;
+      const msg =
+        err?.message || String(err || `Error leyendo /${EXPERIMENTAL_BENCH_V2_PATH}`);
+      console.warn(`Error subscribing to RTDB /${EXPERIMENTAL_BENCH_V2_PATH}:`, msg);
+      callback({
+        ...createInitialExperimentalBenchV2State(true),
+        status: 'error',
+        lastEventAt: Date.now(),
+        error: msg,
+        errorCode: code,
+      });
+    }
+  );
+}
+
+export async function probeExperimentalBenchV2InRTDB(
+  actingUser?: Pick<UserProfile, 'role' | 'status'> | null,
+  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS
+): Promise<ExperimentalBenchV2State> {
+  if (!canAccessExperimentalBenchDevice(actingUser)) {
+    return createInitialExperimentalBenchV2State(false);
+  }
+  try {
+    const snap = await get(ref(rtdb, EXPERIMENTAL_BENCH_V2_PATH));
+    if (!snap.exists()) {
+      return {
+        ...createInitialExperimentalBenchV2State(true),
+        status: 'empty',
+        lastEventAt: Date.now(),
+      };
+    }
+    const val = snap.val() || {};
+    const normalizedServerTs = normalizeServerTimestampMs(
+      val.last_update_server ?? val.timestamp_server ?? val.timestamp_unix
+    );
+    const mapped = mapRTDBDeviceToSensorDevice(
+      EXPERIMENTAL_BENCH_V2_DEVICE_ID,
+      val,
+      timeoutSeconds,
+      getEstimatedServerNowMs()
+    );
+    return {
+      authorized: true,
+      status: 'ok',
+      device: mapped,
+      sourcePath: `/${EXPERIMENTAL_BENCH_V2_PATH}`,
+      historyPath: `/${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`,
+      normalizedServerTs,
+      lastEventAt: Date.now(),
+      error: null,
+      errorCode: null,
+      rawPayload: summarizeExperimentalV2RawPayload(val),
+    };
+  } catch (err: any) {
+    return {
+      ...createInitialExperimentalBenchV2State(true),
+      status: 'error',
+      lastEventAt: Date.now(),
+      error: err?.message || String(err || `Error leyendo /${EXPERIMENTAL_BENCH_V2_PATH}`),
+      errorCode: err?.code ? String(err.code) : null,
+    };
+  }
+}
+
+export async function fetchExperimentalBenchV2History(
+  rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
+  actingUser?: Pick<UserProfile, 'role' | 'status'> | null
+): Promise<{ points: TelemetryHistoryPoint[]; error: string | null }> {
+  if (actingUser !== undefined && !canAccessExperimentalBenchDevice(actingUser)) {
+    return {
+      points: [],
+      error:
+        'Acceso denegado: historial experimental restringido a roles autorizados (SuperAdmin / Admin MineSafe).',
+    };
+  }
+  const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
+  const v2EndMs = endMs + 60_000;
+  try {
+    const indexedQuery = query(
+      ref(rtdb, EXPERIMENTAL_BENCH_V2_HISTORY_PATH),
+      orderByChild('timestamp'),
+      startAt(startMs),
+      endAt(v2EndMs),
+      limitToLast(Math.min(limit, 5000))
+    );
+    const snap = await get(indexedQuery);
+    if (snap.exists()) {
+      const mapped = mapTelemetrySnapshotRaw(
+        snap.val() || {},
+        startMs,
+        v2EndMs,
+        'dispositivos_v2_historial'
+      );
+      if (mapped.length > 0) {
+        return { points: mapped, error: null };
+      }
+    }
+    const tailSnap = await get(
+      query(ref(rtdb, EXPERIMENTAL_BENCH_V2_HISTORY_PATH), limitToLast(Math.min(limit, 1000)))
+    );
+    if (tailSnap.exists()) {
+      const mappedTail = mapTelemetrySnapshotRaw(
+        tailSnap.val() || {},
+        startMs,
+        v2EndMs,
+        'dispositivos_v2_historial'
+      );
+      return { points: mappedTail, error: null };
+    }
+    return { points: [], error: null };
+  } catch (err: any) {
+    if (isRTDBIndexMissingError(err)) {
+      try {
+        const rawSnap = await get(
+          query(ref(rtdb, EXPERIMENTAL_BENCH_V2_HISTORY_PATH), limitToLast(Math.min(limit, 1000)))
+        );
+        if (rawSnap.exists()) {
+          return {
+            points: mapTelemetrySnapshotRaw(
+              rawSnap.val() || {},
+              startMs,
+              v2EndMs,
+              'dispositivos_v2_historial'
+            ),
+            error: null,
+          };
+        }
+        return { points: [], error: null };
+      } catch (fbErr: any) {
+        return {
+          points: [],
+          error:
+            fbErr?.message ||
+            String(fbErr || `Error leyendo /${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`),
+        };
+      }
+    }
+    return {
+      points: [],
+      error: err?.message || String(err || `Error leyendo /${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`),
+    };
+  }
+}
+
+export function subscribeToExperimentalBenchV2History(
+  rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
+  callback: (points: TelemetryHistoryPoint[], meta?: { error?: string | null }) => void,
+  actingUser?: Pick<UserProfile, 'role' | 'status'> | null
+): () => void {
+  if (actingUser !== undefined && !canAccessExperimentalBenchDevice(actingUser)) {
+    callback([], {
+      error:
+        'Acceso denegado: historial experimental restringido a roles autorizados (SuperAdmin / Admin MineSafe).',
+    });
+    return () => {};
+  }
+
+  const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
+  const v2EndMs = endMs + 60_000;
+  let disposed = false;
+  let activeUnsub: (() => void) | null = null;
+
+  const attachFallbackTail = () => {
+    if (disposed) return;
+    activeUnsub = onValue(
+      query(ref(rtdb, EXPERIMENTAL_BENCH_V2_HISTORY_PATH), limitToLast(Math.min(limit, 1000))),
+      (snapshot) => {
+        if (disposed) return;
+        const pts = snapshot.exists()
+          ? mapTelemetrySnapshotRaw(
+              snapshot.val() || {},
+              startMs,
+              v2EndMs,
+              'dispositivos_v2_historial'
+            )
+          : [];
+        callback(pts, { error: null });
+      },
+      (fallbackErr: any) => {
+        if (disposed) return;
+        const msg =
+          fallbackErr?.message ||
+          String(fallbackErr || `Error leyendo /${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`);
+        callback([], { error: msg });
+      }
+    );
+  };
+
+  const indexedQuery = query(
+    ref(rtdb, EXPERIMENTAL_BENCH_V2_HISTORY_PATH),
+    orderByChild('timestamp'),
+    startAt(startMs),
+    endAt(v2EndMs),
+    limitToLast(limit)
+  );
+
+  activeUnsub = onValue(
+    indexedQuery,
+    (snapshot) => {
+      if (disposed) return;
+      const mapped = snapshot.exists()
+        ? mapTelemetrySnapshotRaw(
+            snapshot.val() || {},
+            startMs,
+            v2EndMs,
+            'dispositivos_v2_historial'
+          )
+        : [];
+      if (mapped.length === 0 && !snapshot.exists()) {
+        if (activeUnsub) {
+          try {
+            activeUnsub();
+          } catch {
+            // ignore
+          }
+          activeUnsub = null;
+        }
+        attachFallbackTail();
+        return;
+      }
+      callback(mapped, { error: null });
+    },
+    (err: any) => {
       if (disposed) return;
       if (isRTDBIndexMissingError(err)) {
         if (activeUnsub) {
@@ -5588,11 +8167,11 @@ export function subscribeToTelemetryHistory(
           }
           activeUnsub = null;
         }
-        attachFallbackListener();
+        attachFallbackTail();
         return;
       }
-      const msg = err?.message || 'Error consultando historial de telemetría.';
-      console.warn('Error subscribing to telemetry history:', msg);
+      const msg =
+        err?.message || String(err || `Error leyendo /${EXPERIMENTAL_BENCH_V2_HISTORY_PATH}`);
       callback([], { error: msg });
     }
   );
@@ -5759,13 +8338,14 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
   const orgId = isUnassignedDeviceOrg(raw?.organizationId)
     ? UNASSIGNED_DEVICE_ORG_ID
     : String(raw.organizationId);
+  const isMultiNodeSim = isMultiNodeSimulatedDeviceId(raw?.id || key);
   const category: DeviceCategory =
     raw?.category === 'gateway' ||
     raw?.category === 'nodo' ||
     raw?.category === 'sensor' ||
     raw?.category === 'gateway_sensor'
       ? raw.category
-      : key.startsWith('NODO')
+      : isMultiNodeSim || key.startsWith('NODO')
       ? 'nodo'
       : 'gateway';
   const history: DeviceAssignmentAuditEntry[] = Array.isArray(raw?.assignmentHistory)
@@ -5781,6 +8361,8 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
     ? Array.from(new Set(raw.sharedOrganizationIds.map((x: any) => String(x || '').trim()).filter(Boolean)))
     : undefined;
   const isBlocked = raw?.blocked === true || raw?.enabled === false || raw?.active === false;
+  const isSim = raw?.simulado === true || isMultiNodeSim;
+  const isModoBanco = raw?.modo_banco === true || (isMultiNodeSim && raw?.modo_banco !== false);
 
   const base: RegisteredDeviceConfig = {
     id: raw?.id || key,
@@ -5796,7 +8378,7 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
     sectorName: isUnassignedDeviceOrg(orgId)
       ? 'En inventario'
       : raw?.sectorName || 'Pendiente de asignación',
-    parentGatewayId: raw?.parentGatewayId || undefined,
+    parentGatewayId: raw?.parentGatewayId || raw?.gatewayId || undefined,
     localIp: raw?.localIp || undefined,
     enabled: !isBlocked,
     active: !isBlocked,
@@ -5811,6 +8393,11 @@ function normalizeCatalogRecord(raw: any, key: string): RegisteredDeviceConfig {
     assignedBy: raw?.assignedBy || undefined,
     assignedAt: typeof raw?.assignedAt === 'number' ? raw.assignedAt : undefined,
     assignmentHistory: history,
+    simulado: isSim ? true : undefined,
+    modo_banco: isModoBanco ? true : undefined,
+    sourcePath: typeof raw?.sourcePath === 'string' ? raw.sourcePath : undefined,
+    telemetryOrigin: typeof raw?.telemetryOrigin === 'string' ? raw.telemetryOrigin : undefined,
+    gatewayId: typeof raw?.gatewayId === 'string' ? raw.gatewayId : raw?.parentGatewayId || undefined,
   };
   base.assignmentStatus = resolveDeviceAssignmentStatus(base);
   return base;
@@ -5948,6 +8535,11 @@ export interface RegisterIoTDeviceParams {
   note?: string;
   isEdit?: boolean;
   allowAttachExistingRTDB?: boolean;
+  simulado?: boolean;
+  modo_banco?: boolean;
+  sourcePath?: string;
+  telemetryOrigin?: string;
+  gatewayId?: string;
 }
 
 export async function registerIoTDeviceInRTDB(
@@ -6054,6 +8646,15 @@ export async function registerIoTDeviceInRTDB(
     ? false
     : existingCatalog?.sharedWithAllAssignedUsers ?? existingLegacy?.sharedWithAllAssignedUsers ?? false;
 
+  const isSimulatedRec =
+    params.simulado === true ||
+    existingCatalog?.simulado === true ||
+    isMultiNodeSimulatedDeviceId(cleanId);
+  const isModoBancoRec =
+    params.modo_banco === true ||
+    existingCatalog?.modo_banco === true ||
+    isSimulatedRec;
+
   const record: RegisteredDeviceConfig = {
     id: cleanId,
     name: cleanName,
@@ -6066,7 +8667,10 @@ export async function registerIoTDeviceInRTDB(
     crewName: normalizedCrewName,
     sectorId: normalizedSectorId,
     sectorName: normalizedSectorName,
-    parentGatewayId: cleanCategory === 'nodo' ? params.parentGatewayId?.trim() || undefined : undefined,
+    parentGatewayId:
+      cleanCategory === 'nodo'
+        ? params.parentGatewayId?.trim() || params.gatewayId?.trim() || undefined
+        : undefined,
     localIp: params.localIp?.trim() || existingCatalog?.localIp || existingLegacy?.localIp || undefined,
     enabled: !existingBlocked,
     active: !existingBlocked,
@@ -6081,6 +8685,15 @@ export async function registerIoTDeviceInRTDB(
     assignedBy: actingUser!.name,
     assignedAt: now,
     assignmentHistory: nextHistory,
+    simulado: isSimulatedRec ? true : undefined,
+    modo_banco: isModoBancoRec ? true : undefined,
+    sourcePath: params.sourcePath || existingCatalog?.sourcePath || undefined,
+    telemetryOrigin: params.telemetryOrigin || existingCatalog?.telemetryOrigin || undefined,
+    gatewayId:
+      params.gatewayId?.trim() ||
+      params.parentGatewayId?.trim() ||
+      existingCatalog?.gatewayId ||
+      undefined,
   };
 
   await set(catalogRef, JSON.parse(JSON.stringify(record)));
@@ -6102,11 +8715,15 @@ export async function registerIoTDeviceInRTDB(
     assignedBy: record.assignedBy || null,
     assignedAt: record.assignedAt || now,
     assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+    ...(isSimulatedRec ? { simulado: true } : {}),
+    ...(isModoBancoRec ? { modo_banco: true } : {}),
   };
 
   if (devSnap && devSnap.exists()) {
     await update(devRef, rtdbMetadata);
-  } else {
+  } else if (!isSimulatedRec) {
+    // Solo inicializar placeholder en /dispositivos para equipos físicos; los simulados conservan
+    // su telemetría exclusivamente en /diagnostico/nodos_simulados sin inventar ceros en /dispositivos.
     await set(devRef, {
       ...rtdbMetadata,
       CO: 0,
@@ -6178,6 +8795,11 @@ export async function assignOrTransferIoTDeviceInRTDB(
             siteId: params.fallbackDevice?.siteId,
             siteName: params.fallbackDevice?.siteName,
             localIp: params.fallbackDevice?.localIp,
+            simulado: params.fallbackDevice?.simulado,
+            modo_banco: params.fallbackDevice?.modo_banco,
+            sourcePath: params.fallbackDevice?.sourcePath,
+            telemetryOrigin: params.fallbackDevice?.telemetryOrigin,
+            gatewayId: params.fallbackDevice?.gatewayId,
             createdAt: params.fallbackDevice?.createdAt || Date.now(),
           },
           cleanId
@@ -6272,6 +8894,7 @@ export async function assignOrTransferIoTDeviceInRTDB(
 
   await set(catalogRef, JSON.parse(JSON.stringify(updated)));
 
+  const isSimulatedTarget = isSimulatedDevice(updated);
   const rtdbUpdate = {
     name: updated.name,
     organizationId: updated.organizationId,
@@ -6290,11 +8913,13 @@ export async function assignOrTransferIoTDeviceInRTDB(
     assignedBy: updated.assignedBy || null,
     assignedAt: now,
     assignmentHistory: JSON.parse(JSON.stringify(nextHistory)),
+    ...(updated.simulado ? { simulado: true } : {}),
+    ...(updated.modo_banco ? { modo_banco: true } : {}),
   };
 
   if (devSnap && devSnap.exists()) {
     await update(devRef, rtdbUpdate);
-  } else {
+  } else if (!isSimulatedTarget) {
     await set(devRef, {
       ...rtdbUpdate,
       CO: 0,

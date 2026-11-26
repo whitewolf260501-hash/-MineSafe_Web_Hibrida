@@ -36,7 +36,7 @@ import {
 } from 'lucide-react';
 import { NavigationTab, Organization, PlatformConfig, UserProfile } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import { APP_BUILD_VERSION, isTabVisibleForUser } from '../services/firebase';
+import { isTabVisibleForUser } from '../services/firebase';
 import {
   canControlMineAlarm,
   DEFAULT_ORGANIZATION_ID,
@@ -261,12 +261,6 @@ export const Navbar: React.FC<NavbarProps> = ({
               <span className="text-lg font-bold tracking-tight text-white flex items-center gap-1.5 whitespace-nowrap">
                 Mine<span className="text-cyan-400">Safe</span>
                 <span className="text-[10px] uppercase tracking-wider px-1.5 py-0.5 rounded bg-cyan-950/70 text-cyan-300 border border-cyan-700/50 font-medium">IoT</span>
-                <span
-                  title={`Versión compilada ${APP_BUILD_VERSION}`}
-                  className="text-[10px] font-mono uppercase tracking-wider px-1.5 py-0.5 rounded bg-slate-900 text-emerald-300 border border-emerald-700/60 font-bold"
-                >
-                  {APP_BUILD_VERSION}
-                </span>
               </span>
             </button>
 

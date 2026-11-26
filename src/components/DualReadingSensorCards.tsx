@@ -52,12 +52,6 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   const pmVal = !pmFault
     ? (typeof device?.rawPM25 === 'number' ? device.rawPM25 : device.metrics.polvoPM)
     : undefined;
-  const pmFormatted =
-    pmVal !== undefined && Number.isFinite(pmVal)
-      ? Number.isInteger(pmVal)
-        ? pmVal
-        : Number(pmVal.toFixed(1))
-      : undefined;
   const tempVal = !tempFault
     ? (typeof device?.rawTemp === 'number' ? device.rawTemp : device.metrics.temperatura)
     : undefined;
@@ -77,28 +71,25 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (!isOnline) {
     if (coVal === 4095) {
       coStatusColor = 'amarillo';
-      coFriendlyLabel = 'Saturación ADC (4095) · Medición no válida (Desconectado)';
+      coFriendlyLabel = 'Sensor No Conectado (Pin Flotante 4095 ADC)';
     } else {
       coStatusColor = 'amarillo';
-      coFriendlyLabel = 'Dispositivo Desconectado (Sin datos vigentes)';
+      coFriendlyLabel = 'Gateway Desconectado (En Espera de Señal)';
     }
   } else if (coVal === 4095) {
     coStatusColor = 'amarillo';
-    coFriendlyLabel = 'Saturación ADC (4095) · Medición no válida';
-  } else if (device.isBenchTelemetry) {
-    coStatusColor = 'verde';
-    coFriendlyLabel = 'Lectura de banco (prototipo académico, sin alerta operacional)';
+    coFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
   } else if (coVal >= 500) {
     coStatusColor = 'rojo';
-    coFriendlyLabel = '¡PELIGRO: Nivel Crítico! (Matriz LED, Audio I2S y TFT activos)';
+    coFriendlyLabel = '¡PELIGRO: Nivel Crítico! (Baliza y Alarma activadas)';
   } else if (coVal >= 350) {
     coStatusColor = 'amarillo';
-    coFriendlyLabel = 'Precaución: Presencia de gas (ADC raw)';
+    coFriendlyLabel = 'Precaución: Presencia de gas';
   }
 
-  // 2. Calidad de Aire / Polvo en suspensión (Sensor óptico OPEN-SMART) Evaluation
+  // 2. Calidad de Aire / Polvo en suspensión (PM2.5) Evaluation
   let pmStatusColor: 'verde' | 'amarillo' | 'rojo' = 'verde';
-  let pmFriendlyLabel = 'Baja densidad estimada de partículas';
+  let pmFriendlyLabel = 'Baja densidad de partículas';
 
   if (pmFault || pmVal === undefined || !Number.isFinite(pmVal)) {
     pmStatusColor = 'amarillo';
@@ -106,23 +97,20 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
   } else if (!isOnline) {
     if (pmVal === 4095) {
       pmStatusColor = 'amarillo';
-      pmFriendlyLabel = 'Saturación ADC (4095) · Medición no válida (Desconectado)';
+      pmFriendlyLabel = 'Sensor No Conectado (Pin Flotante 4095 ADC)';
     } else {
       pmStatusColor = 'amarillo';
-      pmFriendlyLabel = 'Dispositivo Desconectado (Sin Transmisión)';
+      pmFriendlyLabel = 'Gateway Desconectado (Sin Transmisión)';
     }
   } else if (pmVal === 4095) {
     pmStatusColor = 'amarillo';
-    pmFriendlyLabel = 'Saturación ADC (4095) · Medición no válida';
-  } else if (device.isBenchTelemetry) {
-    pmStatusColor = 'verde';
-    pmFriendlyLabel = 'Estimación óptica OPEN-SMART en banco (sin calibración oficial)';
+    pmFriendlyLabel = 'Pin al Aire / Sensor Desconectado (4095 ADC)';
   } else if (pmVal >= 150) {
     pmStatusColor = 'rojo';
     pmFriendlyLabel = '¡Atmósfera saturada / Peligro respiratorio!';
   } else if (pmVal >= 55) {
     pmStatusColor = 'amarillo';
-    pmFriendlyLabel = 'Polvo moderado (estimación)';
+    pmFriendlyLabel = 'Polvo moderado';
   }
 
   // 3. Confort Térmico (DHT11) Evaluation
@@ -174,12 +162,6 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
               ? `Dispositivo: ${device.name} (${device.id})`
               : `${device.sectorName || 'Sector Principal'} · ${device.name}`}
           </span>
-          {device.isBenchTelemetry && (
-            <span className="text-[11px] font-mono text-amber-200 bg-amber-950/70 px-2.5 py-1 rounded-lg border border-amber-700/60">
-              Fuente: {device.sourcePath || '/diagnostico/esp32_p087'}
-              {device.telemetryOrigin ? ` · ${device.telemetryOrigin}` : ''}
-            </span>
-          )}
           {effectiveShowBatteryAirflow && (
             <span className="text-[11px] font-mono text-slate-300 bg-slate-900 px-2.5 py-1 rounded-lg border border-slate-700">
               {batteryDisplay}
@@ -296,12 +278,12 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
             <span className="text-[11px]">Dato Técnico:</span>
             <div className="text-right">
               <span className="font-mono font-bold text-white text-sm">
-                {pmFault || pmFormatted === undefined ? 'Sin lectura válida (null/NaN)' : `Densidad PM2.5: ${pmFormatted} µg/m³`}
+                {pmFault || pmVal === undefined ? 'Sin lectura válida (null/NaN)' : `Densidad PM2.5: ${pmVal} µg/m³`}
               </span>
               <span className="text-[10px] text-slate-400 block font-mono">
-                {pmFault || pmFormatted === undefined
-                  ? 'Revisar sensor óptico de polvo OPEN-SMART'
-                  : 'Sensor óptico OPEN-SMART (estimación sin calibración oficial)'}
+                {pmFault || pmVal === undefined
+                  ? 'Revisar sensor óptico de polvo'
+                  : 'Sharp GP2Y1010 · Precaución 55 · Crítico 150 µg/m³'}
               </span>
             </div>
           </div>
@@ -414,73 +396,21 @@ export const DualReadingSensorCards: React.FC<DualReadingSensorCardsProps> = ({
                   title: 'GASES / CO (MQ-2 ADC)',
                   value: !isOnline || coFault ? '--' : (coVal ?? gasVar?.value ?? '--'),
                   unit: 'ADC',
-                  trendLabel: !isOnline
-                    ? 'Sin señal'
-                    : coVal === 4095
-                    ? 'Saturación ADC'
-                    : device.isBenchTelemetry
-                    ? 'Banco (raw)'
-                    : (coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica'
-                    ? 'Alza Crítica'
-                    : 'Estable',
-                  isAlertTrend:
-                    isOnline &&
-                    coVal !== 4095 &&
-                    !device.isBenchTelemetry &&
-                    ((coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica'),
-                  statusLabel: !isOnline
-                    ? 'Offline'
-                    : coVal === 4095
-                    ? 'No válida (SAT)'
-                    : device.isBenchTelemetry
-                    ? 'Banco (raw)'
-                    : gasVar?.statusLabel ||
-                      (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico'),
-                  statusTone: !isOnline
-                    ? 'desconectado'
-                    : coVal === 4095
-                    ? 'advertencia'
-                    : device.isBenchTelemetry
-                    ? 'normal'
-                    : gasVar?.status ||
-                      (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
+                  trendLabel: !isOnline ? 'Sin señal' : ((coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((coVal ?? 0) >= 350 || gasVar?.trend === 'alza critica'),
+                  statusLabel: !isOnline ? 'Offline' : (gasVar?.statusLabel || (coStatusColor === 'verde' ? 'Seguro' : coStatusColor === 'amarillo' ? 'Preventivo' : 'Crítico')),
+                  statusTone: !isOnline ? 'desconectado' : (gasVar?.status || (coStatusColor === 'rojo' ? 'critico' : coStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
                   icon: <CloudRain className="w-4 h-4 text-cyan-400" />,
                 },
                 {
                   id: 'pm25',
                   title: 'MATERIAL PARTICULADO (PM2.5)',
-                  value: !isOnline || pmFault ? '--' : (pmFormatted ?? pmVar?.value ?? '--'),
+                  value: !isOnline || pmFault ? '--' : (pmVal ?? pmVar?.value ?? '--'),
                   unit: 'µg/m³',
-                  trendLabel: !isOnline
-                    ? 'Sin señal'
-                    : pmVal === 4095
-                    ? 'Saturación ADC'
-                    : device.isBenchTelemetry
-                    ? 'Banco OPEN-SMART'
-                    : (pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica'
-                    ? 'Alza Crítica'
-                    : 'Estable',
-                  isAlertTrend:
-                    isOnline &&
-                    pmVal !== 4095 &&
-                    !device.isBenchTelemetry &&
-                    ((pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica'),
-                  statusLabel: !isOnline
-                    ? 'Offline'
-                    : pmVal === 4095
-                    ? 'No válida (SAT)'
-                    : device.isBenchTelemetry
-                    ? 'Banco (sin cal.)'
-                    : pmVar?.statusLabel ||
-                      (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico'),
-                  statusTone: !isOnline
-                    ? 'desconectado'
-                    : pmVal === 4095
-                    ? 'advertencia'
-                    : device.isBenchTelemetry
-                    ? 'normal'
-                    : pmVar?.status ||
-                      (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal'),
+                  trendLabel: !isOnline ? 'Sin señal' : ((pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica' ? 'Alza Crítica' : 'Estable'),
+                  isAlertTrend: isOnline && ((pmVal ?? 0) >= 55 || pmVar?.trend === 'alza critica'),
+                  statusLabel: !isOnline ? 'Offline' : (pmVar?.statusLabel || (pmStatusColor === 'verde' ? 'Adecuado' : pmStatusColor === 'amarillo' ? 'Moderado' : 'Crítico')),
+                  statusTone: !isOnline ? 'desconectado' : (pmVar?.status || (pmStatusColor === 'rojo' ? 'critico' : pmStatusColor === 'amarillo' ? 'advertencia' : 'normal')),
                   icon: <Sun className="w-4 h-4 text-cyan-400" />,
                 },
               ]

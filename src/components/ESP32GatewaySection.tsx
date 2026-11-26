@@ -23,8 +23,6 @@ import {
   toggleGatewayAlarmInRTDB,
   resetGatewayDataInRTDB,
   toggleGatewayLightInRTDB,
-  evaluateDeviceConnectivity,
-  classifyCommunicationLink,
 } from '../services/firebase';
 import { soundAlert } from '../services/audioAlert';
 import { canControlMineAlarm } from '../utils/accessControl';
@@ -104,8 +102,8 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
   const isDeviceOnline = (dev: SensorDevice): boolean => {
     const serverTime = dev.lastUpdateServer || 0;
-    if (serverTime <= 0) return false;
-    return evaluateDeviceConnectivity(serverTime, effectiveTimeout, nowTimestamp).isOnline;
+    const diffSeconds = serverTime > 0 ? Math.floor(Math.abs(nowTimestamp - serverTime) / 1000) : 999;
+    return Boolean(dev.gatewayOnline) || (serverTime > 0 && diffSeconds <= effectiveTimeout) || dev.status !== 'desconectado';
   };
 
   const formatRelativeSync = (timestamp: number): string => {
@@ -228,8 +226,8 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
 
       showNotification(
         nextActive
-          ? `Alarma y señalización de simulación (Audio I2S / Matriz LED) activadas en ${nodesLabel} (${group.sectorLabel}).`
-          : `Alarma y señalización detenidas en ${nodesLabel} (${group.sectorLabel}).`
+          ? `Alarma sonora y baliza luminosa activadas automáticamente en ${nodesLabel} (${group.sectorLabel}).`
+          : `Alarma y baliza luminosa apagadas en ${nodesLabel} (${group.sectorLabel}).`
       );
     } catch (err: any) {
       showNotification(err?.message || 'No se pudo enviar la instrucción de alarma al Gateway.');
@@ -267,8 +265,8 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
         await onToggleLight();
         showNotification(
           !isLightActive
-            ? 'Señalización LED de simulación encendida desde control SuperAdmin.'
-            : 'Señalización LED de simulación apagada desde control SuperAdmin.'
+            ? 'Luz / Baliza manual encendida desde control SuperAdmin.'
+            : 'Luz / Baliza manual apagada desde control SuperAdmin.'
         );
       } else if (gwId) {
         const nextLight = !isLightActive;
@@ -351,7 +349,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
               )}
             </div>
             <p className="text-xs text-slate-400 mt-0.5">
-              Vista consolidada de enlaces por sector. Señalización física del prototipo: Matriz LED MAX7219, Audio I2S y TFT ST7789 (controles remotos aplican solo a simulaciones).
+              Vista consolidada de enlaces por sector. La baliza luminosa se activa y apaga automáticamente junto con la alarma.
             </p>
           </div>
         </div>
@@ -479,7 +477,7 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                       )}
                     </div>
 
-                    {/* Technical Hardware Identifiers (ESP32 ID, Link Mode, Bench/Simulated) */}
+                    {/* Technical Hardware Identifiers (ESP32 ID, IP & Via) */}
                     {canShowHwControls && (
                       <div className="mt-2 flex flex-wrap items-center gap-1.5 font-mono text-[10px]">
                         <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-purple-950/60 border border-purple-800/60 text-purple-200">
@@ -491,31 +489,9 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                             IP: {group.gateway.localIp}
                           </span>
                         )}
-                        {(() => {
-                          const mode = classifyCommunicationLink(group.gateway, group.isOnline);
-                          const modeLabel =
-                            mode === 'wifi_directo'
-                              ? 'Wi-Fi directo'
-                              : mode === 'espnow_gateway'
-                              ? 'ESP-NOW vía gateway'
-                              : mode === 'desconectado'
-                              ? 'Desconectado'
-                              : 'Origen desconocido';
-                          return (
-                            <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-cyan-300">
-                              {modeLabel}
-                            </span>
-                          );
-                        })()}
-                        {group.gateway.isSimulated ? (
-                          <span className="px-2 py-0.5 rounded bg-purple-950/60 border border-purple-700/60 text-purple-200">
-                            Simulado
-                          </span>
-                        ) : group.gateway.isBenchTelemetry ? (
-                          <span className="px-2 py-0.5 rounded bg-amber-950/60 border border-amber-700/60 text-amber-200">
-                            Banco físico
-                          </span>
-                        ) : null}
+                        <span className="px-2 py-0.5 rounded bg-slate-900 border border-slate-700 text-cyan-300">
+                          {group.gateway.via || 'WIFI_DIRECTO'}
+                        </span>
                       </div>
                     )}
                   </div>
@@ -552,14 +528,14 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                     </span>
                   </div>
                   <div className="col-span-2 sm:col-span-1 bg-slate-900/70 rounded-lg px-2.5 py-2 border border-slate-800/70">
-                    <span className="text-slate-400 block text-[10px]">Audio I2S / Matriz LED</span>
+                    <span className="text-slate-400 block text-[10px]">Baliza y sirena</span>
                     <span
                       className={`font-bold inline-flex items-center gap-1 ${
                         group.isAlarmActive ? 'text-rose-300' : 'text-emerald-300'
                       }`}
                     >
                       <Lightbulb className="w-3 h-3" />
-                      {group.isAlarmActive ? 'Simulación activa' : 'En reposo'}
+                      {group.isAlarmActive ? 'Activas (auto)' : 'En reposo'}
                     </span>
                   </div>
                 </div>
@@ -606,12 +582,12 @@ export const ESP32GatewaySection: React.FC<ESP32GatewaySectionProps> = ({
                         {group.isAlarmActive ? (
                           <>
                             <BellRing className="w-3.5 h-3.5 animate-bounce" />
-                            <span>{isBusy ? 'Enviando...' : 'Detener Alarma'}</span>
+                            <span>{isBusy ? 'Enviando...' : 'Apagar Alarma y Baliza'}</span>
                           </>
                         ) : (
                           <>
                             <BellOff className="w-3.5 h-3.5" />
-                            <span>{isBusy ? 'Enviando...' : 'Simular Alarma'}</span>
+                            <span>{isBusy ? 'Enviando...' : 'Activar Alarma'}</span>
                           </>
                         )}
                       </button>

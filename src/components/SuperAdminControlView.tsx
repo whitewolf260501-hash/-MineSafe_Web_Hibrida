@@ -3122,8 +3122,8 @@ export const SuperAdminControlView: React.FC<SuperAdminControlViewProps> = ({
                 },
                 {
                   key: 'allowHardwareControlsForNonSuperAdmin',
-                  title: 'Controles Rápidos de Simulación (LED / Alarma / Reset) en Barra Superior',
-                  desc: 'Permite que Admin y Operador vean los botones rápidos de señalización de simulación en el Navbar.',
+                  title: 'Controles Rápidos de Hardware (Luz / Alarma / Reset) en Barra Superior',
+                  desc: 'Permite que Admin y Operador vean los botones rápidos de baliza/sirena en el Navbar.',
                 },
                 {
                   key: 'allowEmergencyButtonForOperador',

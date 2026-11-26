@@ -186,7 +186,7 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
     {
       id: 'falsa_alarma_sensor',
       label: 'Falsa Alarma / Falla Técnica de Sensor',
-      sublabel: 'Saturación ADC (4095 — medición no válida), ruido eléctrico, falla de cableado o sensor descalibrado.',
+      sublabel: 'Pin flotante (4095 ADC), desconexión de cable, ruido eléctrico o saturación momentánea.',
       icon: <Cpu className="w-5 h-5 text-cyan-400" />,
       colorClasses: 'border-slate-800 hover:border-cyan-700/60',
       activeClasses: 'border-cyan-500 bg-cyan-950/70 text-cyan-100 ring-1 ring-cyan-500',
@@ -328,7 +328,7 @@ export const AlertResolutionModal: React.FC<AlertResolutionModalProps> = ({
                   : resolutionType === 'simulacro'
                   ? 'Describa el objetivo del simulacro, tiempos de evacuación registrados y comportamiento de cuadrillas (mín. 15 caracteres)...'
                   : resolutionType === 'falsa_alarma_sensor'
-                  ? 'Indique si se trató de saturación ADC (4095 — medición no válida), ruido eléctrico o suciedad en cámara óptica (mín. 15 caracteres)...'
+                  ? 'Indique si fue pin flotante 4095 ADC, desprendimiento de conector o suciedad en cámara óptica (mín. 15 caracteres)...'
                   : 'Describa los trabajos de mantenimiento realizados y verificación de parámetros basales (mín. 15 caracteres)...'
               }
               className="w-full bg-slate-950 border border-slate-700 rounded-xl p-3 text-xs text-white placeholder-slate-500 focus:outline-none focus:border-cyan-500 focus:ring-1 focus:ring-cyan-500 transition-colors"

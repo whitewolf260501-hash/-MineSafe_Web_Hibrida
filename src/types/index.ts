@@ -23,20 +23,7 @@ export interface TelemetryHistoryPoint {
   humedad: number | null;
   originTimestamp?: number;
   serverTimestamp?: number;
-  source?:
-    | 'historial_telemetria'
-    | 'dispositivos_historial'
-    | 'diagnostico_p087'
-    | 'cloud_function'
-    | 'collector_api'
-    | 'web_client';
 }
-
-export type CommunicationLinkMode =
-  | 'wifi_directo'
-  | 'espnow_gateway'
-  | 'desconectado'
-  | 'origen_desconocido';
 
 export interface TelemetryHistoryPageResult {
   points: TelemetryHistoryPoint[];
@@ -119,19 +106,7 @@ export interface SensorDevice {
   descripcionMonitoreo?: string;
   fecha?: string;
   hora?: string;
-  fechaHora?: string;
-  timestampUnix?: number;
   via?: string;
-  viaPuente?: boolean | string;
-  gatewayId?: string;
-  saltosEspNow?: number;
-  msgId?: string | number;
-  isSimulated?: boolean;
-  telemetryOrigin?: string;
-  isBenchTelemetry?: boolean;
-  sourcePath?: string;
-  adcSaturated?: boolean;
-  dustSensorModel?: string;
   localIp?: string;
   deviceCategory?: DeviceCategory;
   parentGatewayId?: string;

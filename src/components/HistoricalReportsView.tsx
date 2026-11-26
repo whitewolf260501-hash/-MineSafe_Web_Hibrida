@@ -21,12 +21,7 @@ import {
   PlatformConfig,
 } from '../types';
 import { soundAlert } from '../services/audioAlert';
-import {
-  BENCH_HISTORY_PATH,
-  PHYSICAL_NODE_DEVICE_ID,
-  isSectionVisibleForUser,
-  logSecurityAuditEventInRTDB,
-} from '../services/firebase';
+import { isSectionVisibleForUser, logSecurityAuditEventInRTDB } from '../services/firebase';
 import { getTodayIsoDate, validateDateRange } from '../utils/dateRange';
 import {
   DS132_DS594_NORMATIVE_LIMITS,
@@ -764,14 +759,7 @@ export const HistoricalReportsView: React.FC<HistoricalReportsViewProps> = ({
               <span className="font-mono break-all text-slate-300">
                 /historial_telemetria/{activeDeviceId || 'sin_dispositivo'}
               </span>
-              {activeDeviceId === PHYSICAL_NODE_DEVICE_ID && (
-                <>
-                  {' '}
-                  +{' '}
-                  <span className="font-mono break-all text-cyan-300">/{BENCH_HISTORY_PATH}</span>
-                </>
-              )}
-              ) y auditoría de eventos. Polvo óptico: sensor OPEN-SMART (estimación sin calibración oficial).
+              ) y auditoría de eventos.
             </p>
           </div>
 

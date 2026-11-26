@@ -54,7 +54,6 @@ import {
 import firebaseConfig from '../../firebase-applet-config.json';
 import {
   SensorDevice,
-  CommunicationLinkMode,
   UserProfile,
   DeviceRental,
   UserRole,
@@ -240,726 +239,26 @@ export function subscribeToRTDBConnectionState(
   return onValue(
     connectedRef,
     (snapshot) => {
-      const isConn = snapshot.val() === true;
-      updateBenchDiagnostics({ rtdbConnected: isConn });
-      callback(isConn);
+      callback(snapshot.val() === true);
     },
     () => {
-      updateBenchDiagnostics({ rtdbConnected: false });
       callback(false);
     }
   );
 }
 
 // -------------------------------------------------------------
-// P091 / P092 — CONSTANTES DE INTEGRACIÓN ESP32, VERSIÓN Y DIAGNÓSTICO
-// -------------------------------------------------------------
-export const APP_BUILD_VERSION = 'P092';
-export const APP_BUILD_LABEL = 'MineSafe Web P092';
-export const PHYSICAL_NODE_DEVICE_ID = 'device_38A839E81F84';
-export const SIMULATED_NODE_DEVICE_ID = 'device_9F4C2A7E1B08';
-export const GATEWAY_DEVICE_ID = 'gateway_ESP32_DEVKIT_V1';
-export const PHYSICAL_NODE_AUTH_EMAIL = 'esp32-nodo-fisico@minesafe.example';
-export const PHYSICAL_NODE_AUTH_UID = 'tJgRrlKRwPQOWCkdJiWA54B0JN33';
-export const BENCH_TELEMETRY_PATH = 'diagnostico/esp32_p087';
-export const BENCH_HISTORY_PATH = 'diagnostico/esp32_p087/historial';
-export const DEFAULT_DEVICE_TIMEOUT_SECONDS = 20;
-export const DUST_SENSOR_MODEL_LABEL =
-  'Sensor óptico de polvo OPEN-SMART (estimación sin calibración oficial)';
-
-// Sincronización con el reloj del servidor de Firebase RTDB (/.info/serverTimeOffset)
-// para evitar falsos "Desconectado" cuando el reloj del PC/navegador está desfasado.
-let rtdbServerTimeOffsetMs = 0;
-let serverTimeOffsetStarted = false;
-
-export function getRTDBServerTimeOffsetMs(): number {
-  return rtdbServerTimeOffsetMs;
-}
-
-export function getEstimatedServerNowMs(): number {
-  return Date.now() + rtdbServerTimeOffsetMs;
-}
-
-export function setRTDBServerTimeOffsetForTesting(offsetMs: number): void {
-  rtdbServerTimeOffsetMs = Number.isFinite(offsetMs) ? Math.round(offsetMs) : 0;
-  updateBenchDiagnostics({ serverTimeOffsetMs: rtdbServerTimeOffsetMs });
-}
-
-export function startServerTimeOffsetSync(): void {
-  if (serverTimeOffsetStarted) return;
-  serverTimeOffsetStarted = true;
-  try {
-    onValue(
-      ref(rtdb, '.info/serverTimeOffset'),
-      (snap) => {
-        const val = Number(snap.val());
-        rtdbServerTimeOffsetMs = Number.isFinite(val) ? Math.round(val) : 0;
-        updateBenchDiagnostics({ serverTimeOffsetMs: rtdbServerTimeOffsetMs });
-      },
-      () => {
-        // Mantener offset 0 si el cliente aún no conecta o está en pruebas offline
-      }
-    );
-  } catch {
-    // Entorno sin WebSocket RTDB activo
-  }
-}
-
-export interface BenchTelemetryDiagnostics {
-  buildVersion: string;
-  projectId: string;
-  rtdbUrl: string;
-  rtdbConnected: boolean;
-  serverTimeOffsetMs: number;
-  auth: {
-    authenticated: boolean;
-    uid: string | null;
-    email: string | null;
-    emailVerified: boolean;
-    providerId: string | null;
-    profileNodeExists: boolean | null;
-    profileIsActive: boolean | null;
-    profileRole: string | null;
-    profileIsSuperUser: boolean | null;
-    profileReadError: string | null;
-  };
-  devicesListener: {
-    status: 'idle' | 'listening' | 'ok' | 'error';
-    lastEventAt: number | null;
-    devicesCount: number;
-    physicalNodeExists: boolean;
-    physicalNodeRawTs: number;
-    physicalNodeRawPM25: number | null;
-    error: string | null;
-  };
-  benchListener: {
-    path: string;
-    status: 'idle' | 'listening' | 'ok' | 'empty' | 'error';
-    lastEventAt: number | null;
-    error: string | null;
-    errorCode: string | null;
-    normalizedServerTs: number;
-    rawPayload: {
-      CO?: unknown;
-      PM2_5?: unknown;
-      temperatura?: unknown;
-      humedad?: unknown;
-      last_update_server?: unknown;
-      origen?: unknown;
-      simulado?: unknown;
-      hasHistorial?: boolean;
-    } | null;
-  };
-  mergeDecision: {
-    applied: boolean;
-    reason: string;
-    existingPhysicalTs: number;
-    benchTs: number;
-    effectiveTs: number;
-    serverNowMs: number;
-    diffSeconds: number;
-    timeoutSeconds: number;
-    isOnline: boolean;
-  };
-  historyListener: {
-    path: string;
-    status: 'idle' | 'listening' | 'ok' | 'empty' | 'error';
-    benchPointsCount: number;
-    legacyPointsCount: number;
-    lastError: string | null;
-  };
-  lastProbeAt: number | null;
-}
-
-const createInitialBenchDiagnostics = (): BenchTelemetryDiagnostics => ({
-  buildVersion: APP_BUILD_VERSION,
-  projectId: minefaseConfig.projectId,
-  rtdbUrl: USER_RTDB_URL,
-  rtdbConnected: false,
-  serverTimeOffsetMs: 0,
-  auth: {
-    authenticated: false,
-    uid: null,
-    email: null,
-    emailVerified: false,
-    providerId: null,
-    profileNodeExists: null,
-    profileIsActive: null,
-    profileRole: null,
-    profileIsSuperUser: null,
-    profileReadError: null,
-  },
-  devicesListener: {
-    status: 'idle',
-    lastEventAt: null,
-    devicesCount: 0,
-    physicalNodeExists: false,
-    physicalNodeRawTs: 0,
-    physicalNodeRawPM25: null,
-    error: null,
-  },
-  benchListener: {
-    path: `/${BENCH_TELEMETRY_PATH}`,
-    status: 'idle',
-    lastEventAt: null,
-    error: null,
-    errorCode: null,
-    normalizedServerTs: 0,
-    rawPayload: null,
-  },
-  mergeDecision: {
-    applied: false,
-    reason: 'Sin eventos recibidos aún',
-    existingPhysicalTs: 0,
-    benchTs: 0,
-    effectiveTs: 0,
-    serverNowMs: Date.now(),
-    diffSeconds: 999999,
-    timeoutSeconds: DEFAULT_DEVICE_TIMEOUT_SECONDS,
-    isOnline: false,
-  },
-  historyListener: {
-    path: `/${BENCH_HISTORY_PATH}`,
-    status: 'idle',
-    benchPointsCount: 0,
-    legacyPointsCount: 0,
-    lastError: null,
-  },
-  lastProbeAt: null,
-});
-
-let benchDiagnosticsState: BenchTelemetryDiagnostics = createInitialBenchDiagnostics();
-const benchDiagnosticsSubscribers = new Set<(diag: BenchTelemetryDiagnostics) => void>();
-
-function notifyBenchDiagnostics(): void {
-  const snapshot = getBenchDiagnosticSnapshot();
-  benchDiagnosticsSubscribers.forEach((cb) => {
-    try {
-      cb(snapshot);
-    } catch {
-      // ignore subscriber callback error
-    }
-  });
-}
-
-function updateBenchDiagnostics(
-  patch: Partial<
-    Omit<
-      BenchTelemetryDiagnostics,
-      'auth' | 'devicesListener' | 'benchListener' | 'mergeDecision' | 'historyListener'
-    >
-  > & {
-    auth?: Partial<BenchTelemetryDiagnostics['auth']>;
-    devicesListener?: Partial<BenchTelemetryDiagnostics['devicesListener']>;
-    benchListener?: Partial<BenchTelemetryDiagnostics['benchListener']>;
-    mergeDecision?: Partial<BenchTelemetryDiagnostics['mergeDecision']>;
-    historyListener?: Partial<BenchTelemetryDiagnostics['historyListener']>;
-  }
-): void {
-  benchDiagnosticsState = {
-    ...benchDiagnosticsState,
-    ...patch,
-    auth: patch.auth ? { ...benchDiagnosticsState.auth, ...patch.auth } : benchDiagnosticsState.auth,
-    devicesListener: patch.devicesListener
-      ? { ...benchDiagnosticsState.devicesListener, ...patch.devicesListener }
-      : benchDiagnosticsState.devicesListener,
-    benchListener: patch.benchListener
-      ? { ...benchDiagnosticsState.benchListener, ...patch.benchListener }
-      : benchDiagnosticsState.benchListener,
-    mergeDecision: patch.mergeDecision
-      ? { ...benchDiagnosticsState.mergeDecision, ...patch.mergeDecision }
-      : benchDiagnosticsState.mergeDecision,
-    historyListener: patch.historyListener
-      ? { ...benchDiagnosticsState.historyListener, ...patch.historyListener }
-      : benchDiagnosticsState.historyListener,
-  };
-  notifyBenchDiagnostics();
-}
-
-export function syncAuthStateIntoBenchDiagnostics(fbUser?: FirebaseUser | null): void {
-  const active = fbUser !== undefined ? fbUser : auth.currentUser;
-  updateBenchDiagnostics({
-    auth: {
-      authenticated: Boolean(active),
-      uid: active?.uid || null,
-      email: active?.email || null,
-      emailVerified: Boolean(active?.emailVerified),
-      providerId: active?.providerData?.[0]?.providerId || active?.providerId || null,
-    },
-  });
-}
-
-export function getBenchDiagnosticSnapshot(): BenchTelemetryDiagnostics {
-  return {
-    ...benchDiagnosticsState,
-    auth: { ...benchDiagnosticsState.auth },
-    devicesListener: { ...benchDiagnosticsState.devicesListener },
-    benchListener: {
-      ...benchDiagnosticsState.benchListener,
-      rawPayload: benchDiagnosticsState.benchListener.rawPayload
-        ? { ...benchDiagnosticsState.benchListener.rawPayload }
-        : null,
-    },
-    mergeDecision: { ...benchDiagnosticsState.mergeDecision },
-    historyListener: { ...benchDiagnosticsState.historyListener },
-  };
-}
-
-export function subscribeToBenchDiagnostics(
-  callback: (diag: BenchTelemetryDiagnostics) => void
-): () => void {
-  syncAuthStateIntoBenchDiagnostics();
-  benchDiagnosticsSubscribers.add(callback);
-  callback(getBenchDiagnosticSnapshot());
-  return () => {
-    benchDiagnosticsSubscribers.delete(callback);
-  };
-}
-
-export function resetBenchDiagnosticsForTesting(): void {
-  benchDiagnosticsState = createInitialBenchDiagnostics();
-  rtdbServerTimeOffsetMs = 0;
-}
-
-export function recordBenchListenerErrorForDiagnostics(err: any): void {
-  const code = err?.code ? String(err.code) : null;
-  const message = err?.message ? String(err.message) : String(err || 'Error desconocido en RTDB');
-  updateBenchDiagnostics({
-    benchListener: {
-      status: 'error',
-      lastEventAt: Date.now(),
-      error: message,
-      errorCode: code,
-    },
-  });
-}
-
-/**
- * Ejecuta una sonda diagnóstica exclusiva para SuperAdmin contra Firebase Auth y RTDB,
- * exponiendo errores reales de permisos, verificación de correo y payloads sin debilitar reglas.
- */
-export async function runSuperAdminBenchProbe(
-  actingUser?: UserProfile | null
-): Promise<BenchTelemetryDiagnostics> {
-  if (actingUser && actingUser.role !== 'superadmin') {
-    return getBenchDiagnosticSnapshot();
-  }
-  const fbUser = auth.currentUser;
-  syncAuthStateIntoBenchDiagnostics(fbUser);
-
-  if (fbUser?.uid) {
-    try {
-      const userSnap = await get(ref(rtdb, `usuarios/${fbUser.uid}`));
-      if (userSnap.exists()) {
-        const val = userSnap.val() || {};
-        updateBenchDiagnostics({
-          auth: {
-            profileNodeExists: true,
-            profileIsActive: val.isActive !== false,
-            profileRole: String(val.tipoUsuario || (val.isSuperUser ? 'superadmin' : 'sin_rol')),
-            profileIsSuperUser: val.isSuperUser === true,
-            profileReadError: null,
-          },
-        });
-      } else {
-        updateBenchDiagnostics({
-          auth: {
-            profileNodeExists: false,
-            profileIsActive: null,
-            profileRole: null,
-            profileIsSuperUser: null,
-            profileReadError: `No existe /usuarios/${fbUser.uid} en RTDB. Si email_verified es false, database.rules.json rechazará las lecturas.`,
-          },
-        });
-      }
-    } catch (err: any) {
-      updateBenchDiagnostics({
-        auth: {
-          profileNodeExists: null,
-          profileReadError: err?.message || String(err || 'Error leyendo /usuarios/{uid}'),
-        },
-      });
-    }
-  }
-
-  let probedPhysical: Record<string, any> | null = null;
-  try {
-    const devSnap = await get(ref(rtdb, `dispositivos/${PHYSICAL_NODE_DEVICE_ID}`));
-    probedPhysical = devSnap.exists() ? devSnap.val() || null : null;
-    const rawTs = normalizeServerTimestampMs(
-      probedPhysical?.last_update_server ??
-        probedPhysical?.timestamp_server ??
-        probedPhysical?.timestamp_unix
-    );
-    updateBenchDiagnostics({
-      devicesListener: {
-        status: 'ok',
-        lastEventAt: Date.now(),
-        physicalNodeExists: Boolean(probedPhysical),
-        physicalNodeRawTs: rawTs,
-        physicalNodeRawPM25:
-          typeof probedPhysical?.PM2_5 === 'number'
-            ? probedPhysical.PM2_5
-            : typeof probedPhysical?.pm25 === 'number'
-            ? probedPhysical.pm25
-            : null,
-        error: null,
-      },
-    });
-  } catch (err: any) {
-    updateBenchDiagnostics({
-      devicesListener: {
-        status: 'error',
-        lastEventAt: Date.now(),
-        error: err?.message || String(err || 'Error leyendo /dispositivos/device_38A839E81F84'),
-      },
-    });
-  }
-
-  let probedBench: Record<string, any> | null = null;
-  try {
-    const benchSnap = await get(ref(rtdb, BENCH_TELEMETRY_PATH));
-    probedBench = benchSnap.exists() ? benchSnap.val() || null : null;
-    const benchTs = normalizeServerTimestampMs(
-      probedBench?.last_update_server ??
-        probedBench?.timestamp_server ??
-        probedBench?.timestamp_unix
-    );
-    updateBenchDiagnostics({
-      benchListener: {
-        status: probedBench ? 'ok' : 'empty',
-        lastEventAt: Date.now(),
-        error: null,
-        errorCode: null,
-        normalizedServerTs: benchTs,
-        rawPayload: probedBench
-          ? {
-              CO: probedBench.CO ?? probedBench.co,
-              PM2_5: probedBench.PM2_5 ?? probedBench.pm25,
-              temperatura: probedBench.temperatura ?? probedBench.temp,
-              humedad: probedBench.humedad ?? probedBench.hum,
-              last_update_server: probedBench.last_update_server,
-              origen: probedBench.origen,
-              simulado: probedBench.simulado,
-              hasHistorial: Boolean(probedBench.historial && typeof probedBench.historial === 'object'),
-            }
-          : null,
-      },
-    });
-  } catch (err: any) {
-    recordBenchListenerErrorForDiagnostics(err);
-  }
-
-  try {
-    const histSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(10)));
-    const count = histSnap.exists() ? Object.keys(histSnap.val() || {}).length : 0;
-    updateBenchDiagnostics({
-      historyListener: {
-        status: count > 0 ? 'ok' : 'empty',
-        benchPointsCount: count,
-        lastError: null,
-      },
-    });
-  } catch (err: any) {
-    updateBenchDiagnostics({
-      historyListener: {
-        status: 'error',
-        lastError: err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`),
-      },
-    });
-  }
-
-  // Recalcular decisión de fusión con los payloads sondeados
-  mergeBenchTelemetryIntoPhysicalNode(
-    probedPhysical ? { [PHYSICAL_NODE_DEVICE_ID]: probedPhysical } : {},
-    probedBench,
-    true
-  );
-
-  updateBenchDiagnostics({ lastProbeAt: Date.now() });
-  return getBenchDiagnosticSnapshot();
-}
-
-export function normalizeServerTimestampMs(rawTs: unknown): number {
-  const num =
-    typeof rawTs === 'number'
-      ? rawTs
-      : typeof rawTs === 'string' && rawTs.trim() !== ''
-      ? Number(rawTs)
-      : NaN;
-  if (!Number.isFinite(num) || num <= 0) return 0;
-  // Epoch Unix en segundos (10 dígitos, >= año 2001)
-  if (num >= 1_000_000_000 && num < 100_000_000_000) {
-    return Math.round(num * 1000);
-  }
-  // Epoch Unix en milisegundos (>= 12 dígitos)
-  if (num >= 100_000_000_000) {
-    return Math.round(num);
-  }
-  return 0;
-}
-
-export interface DeviceConnectivityEvaluation {
-  isOnline: boolean;
-  isStale: boolean;
-  diffSeconds: number;
-  timeoutSeconds: number;
-}
-
-export function evaluateDeviceConnectivity(
-  serverTimeMs: number,
-  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
-  nowMs: number = getEstimatedServerNowMs()
-): DeviceConnectivityEvaluation {
-  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || DEFAULT_DEVICE_TIMEOUT_SECONDS);
-  if (!Number.isFinite(serverTimeMs) || serverTimeMs <= 0) {
-    return {
-      isOnline: false,
-      isStale: true,
-      diffSeconds: 999999,
-      timeoutSeconds: effectiveTimeout,
-    };
-  }
-  const deltaMs = nowMs - serverTimeMs;
-  const diffSeconds = Math.max(0, Math.floor(Math.abs(deltaMs) / 1000));
-  // Tolerar pequeño desfase NTP de hasta 60s hacia el futuro; expirar estrictamente tras timeoutSeconds.
-  const isOnline = deltaMs >= -60_000 && deltaMs <= effectiveTimeout * 1000;
-  return {
-    isOnline,
-    isStale: !isOnline,
-    diffSeconds,
-    timeoutSeconds: effectiveTimeout,
-  };
-}
-
-export function classifyCommunicationLink(
-  device: Pick<
-    SensorDevice,
-    'via' | 'viaPuente' | 'gatewayId' | 'saltosEspNow' | 'gatewayOnline' | 'status'
-  >,
-  isOnlineOverride?: boolean
-): CommunicationLinkMode {
-  const online =
-    typeof isOnlineOverride === 'boolean'
-      ? isOnlineOverride
-      : Boolean(device.gatewayOnline && device.status !== 'desconectado');
-  if (!online) {
-    return 'desconectado';
-  }
-  const viaStr = String(device.via || '').toUpperCase().trim();
-  const hasEspNowSignals =
-    device.viaPuente === true ||
-    viaStr.includes('ESP_NOW') ||
-    viaStr.includes('ESPNOW') ||
-    viaStr.includes('GATEWAY') ||
-    viaStr.includes('PUENTE') ||
-    Boolean(device.gatewayId && String(device.gatewayId).trim() !== '') ||
-    (typeof device.saltosEspNow === 'number' && device.saltosEspNow > 0);
-  if (hasEspNowSignals) {
-    return 'espnow_gateway';
-  }
-  if (
-    viaStr.includes('WIFI') ||
-    viaStr.includes('DIRECT') ||
-    viaStr.includes('FIREBASE') ||
-    viaStr.includes('HTTP')
-  ) {
-    return 'wifi_directo';
-  }
-  return 'origen_desconocido';
-}
-
-export function hasBenchTelemetryFields(benchRaw: unknown): benchRaw is Record<string, any> {
-  if (!benchRaw || typeof benchRaw !== 'object') return false;
-  const obj = benchRaw as Record<string, any>;
-  return (
-    obj.CO !== undefined ||
-    obj.co !== undefined ||
-    obj.PM2_5 !== undefined ||
-    obj.pm25 !== undefined ||
-    obj.temperatura !== undefined ||
-    obj.temp !== undefined ||
-    obj.humedad !== undefined ||
-    obj.hum !== undefined ||
-    obj.last_update_server !== undefined ||
-    obj.timestamp_unix !== undefined ||
-    obj.origen !== undefined ||
-    obj.simulado !== undefined
-  );
-}
-
-/**
- * Fusiona la telemetría en vivo de `/diagnostico/esp32_p087` sobre el nodo físico
- * existente `device_38A839E81F84` sin duplicar dispositivos ni sobrescribir metadatos
- * organizacionales, contratos, faena, sector ni asignaciones.
- * Garantiza que lecturas antiguas o con reloj corrupto de `/dispositivos` nunca
- * sobrescriban lecturas vigentes de `/diagnostico/esp32_p087`.
- */
-export function mergeBenchTelemetryIntoPhysicalNode(
-  rawDevices: Record<string, any>,
-  benchRaw: Record<string, any> | null | undefined,
-  allowMaterializeIfMissing: boolean = false,
-  nowMs: number = getEstimatedServerNowMs(),
-  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS
-): Record<string, any> {
-  const merged: Record<string, any> = { ...(rawDevices || {}) };
-  const hasExistingPhysical = Object.prototype.hasOwnProperty.call(
-    merged,
-    PHYSICAL_NODE_DEVICE_ID
-  );
-  const existingPhysical = hasExistingPhysical
-    ? { ...(merged[PHYSICAL_NODE_DEVICE_ID] || {}) }
-    : {};
-  const existingTs = normalizeServerTimestampMs(
-    existingPhysical.last_update_server ??
-      existingPhysical.timestamp_server ??
-      existingPhysical.timestamp_unix
-  );
-
-  if (!hasBenchTelemetryFields(benchRaw)) {
-    const fallbackConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
-    updateBenchDiagnostics({
-      mergeDecision: {
-        applied: false,
-        reason: 'Sin payload de telemetría disponible en /diagnostico/esp32_p087',
-        existingPhysicalTs: existingTs,
-        benchTs: 0,
-        effectiveTs: existingTs,
-        serverNowMs: nowMs,
-        diffSeconds: fallbackConn.diffSeconds,
-        timeoutSeconds: fallbackConn.timeoutSeconds,
-        isOnline: fallbackConn.isOnline,
-      },
-    });
-    return merged;
-  }
-
-  if (!hasExistingPhysical && !allowMaterializeIfMissing) {
-    updateBenchDiagnostics({
-      mergeDecision: {
-        applied: false,
-        reason: 'Nodo device_38A839E81F84 fuera del alcance autorizado de esta organización',
-        existingPhysicalTs: 0,
-        benchTs: normalizeServerTimestampMs(
-          benchRaw.last_update_server ?? benchRaw.timestamp_server ?? benchRaw.timestamp_unix
-        ),
-        effectiveTs: 0,
-        serverNowMs: nowMs,
-        diffSeconds: 999999,
-        timeoutSeconds,
-        isOnline: false,
-      },
-    });
-    return merged;
-  }
-
-  const benchTs = normalizeServerTimestampMs(
-    benchRaw.last_update_server ?? benchRaw.timestamp_server ?? benchRaw.timestamp_unix
-  );
-
-  // Verificar si /dispositivos/device_38A839E81F84 tiene una marca temporal estrictamente más nueva
-  // y válida (no adelantada artificialmente al futuro por reloj local corrupto).
-  const existingIsValidNonFuture = existingTs > 0 && existingTs <= nowMs + 60_000;
-  const benchConn = evaluateDeviceConnectivity(benchTs, timeoutSeconds, nowMs);
-  const existingConn = evaluateDeviceConnectivity(existingTs, timeoutSeconds, nowMs);
-
-  if (
-    existingIsValidNonFuture &&
-    benchTs > 0 &&
-    existingTs > benchTs &&
-    (existingConn.isOnline || !benchConn.isOnline)
-  ) {
-    updateBenchDiagnostics({
-      mergeDecision: {
-        applied: false,
-        reason: `/dispositivos/${PHYSICAL_NODE_DEVICE_ID} posee una lectura más reciente y válida (${existingTs} > ${benchTs})`,
-        existingPhysicalTs: existingTs,
-        benchTs,
-        effectiveTs: existingTs,
-        serverNowMs: nowMs,
-        diffSeconds: existingConn.diffSeconds,
-        timeoutSeconds: existingConn.timeoutSeconds,
-        isOnline: existingConn.isOnline,
-      },
-    });
-    return merged;
-  }
-
-  const telemetryOverlay: Record<string, any> = {
-    ...existingPhysical,
-    _isBenchTelemetry: true,
-    _sourcePath: `/${BENCH_TELEMETRY_PATH}`,
-    _benchHistoryPath: `/${BENCH_HISTORY_PATH}`,
-  };
-
-  if (benchRaw.CO !== undefined || benchRaw.co !== undefined) {
-    telemetryOverlay.CO = benchRaw.CO !== undefined ? benchRaw.CO : benchRaw.co;
-  }
-  if (benchRaw.PM2_5 !== undefined || benchRaw.pm25 !== undefined) {
-    telemetryOverlay.PM2_5 = benchRaw.PM2_5 !== undefined ? benchRaw.PM2_5 : benchRaw.pm25;
-  }
-  if (benchRaw.temperatura !== undefined || benchRaw.temp !== undefined) {
-    telemetryOverlay.temperatura =
-      benchRaw.temperatura !== undefined ? benchRaw.temperatura : benchRaw.temp;
-  }
-  if (benchRaw.humedad !== undefined || benchRaw.hum !== undefined) {
-    telemetryOverlay.humedad =
-      benchRaw.humedad !== undefined ? benchRaw.humedad : benchRaw.hum;
-  }
-  if (benchRaw.simulado !== undefined) {
-    telemetryOverlay.simulado = Boolean(benchRaw.simulado);
-  } else if (telemetryOverlay.simulado === undefined) {
-    telemetryOverlay.simulado = false;
-  }
-  if (typeof benchRaw.origen === 'string' && benchRaw.origen.trim() !== '') {
-    telemetryOverlay.origen = benchRaw.origen.trim();
-  }
-  if (benchTs > 0) {
-    telemetryOverlay.last_update_server = benchTs;
-  } else if (benchRaw.last_update_server !== undefined) {
-    telemetryOverlay.last_update_server = benchRaw.last_update_server;
-  } else if (benchRaw.timestamp_unix !== undefined) {
-    telemetryOverlay.last_update_server = benchRaw.timestamp_unix;
-  }
-  if (benchRaw.via !== undefined) telemetryOverlay.via = benchRaw.via;
-  if (benchRaw.via_puente !== undefined) telemetryOverlay.via_puente = Boolean(benchRaw.via_puente);
-  if (benchRaw.gateway_id !== undefined) telemetryOverlay.gateway_id = benchRaw.gateway_id;
-  if (benchRaw.saltos_espnow !== undefined) telemetryOverlay.saltos_espnow = benchRaw.saltos_espnow;
-  if (benchRaw.msgId !== undefined) telemetryOverlay.msgId = benchRaw.msgId;
-  if (benchRaw.fecha !== undefined) telemetryOverlay.fecha = benchRaw.fecha;
-  if (benchRaw.hora !== undefined) telemetryOverlay.hora = benchRaw.hora;
-  if (benchRaw.fecha_hora !== undefined) telemetryOverlay.fecha_hora = benchRaw.fecha_hora;
-  if (benchRaw.timestamp_unix !== undefined) telemetryOverlay.timestamp_unix = benchRaw.timestamp_unix;
-
-  merged[PHYSICAL_NODE_DEVICE_ID] = telemetryOverlay;
-  updateBenchDiagnostics({
-    mergeDecision: {
-      applied: true,
-      reason:
-        existingTs > 0 && !existingIsValidNonFuture
-          ? 'Telemetría de banco aplicada (marca previa en /dispositivos descartada por desfase futuro)'
-          : `Telemetría de /${BENCH_TELEMETRY_PATH} fusionada sobre ${PHYSICAL_NODE_DEVICE_ID}`,
-      existingPhysicalTs: existingTs,
-      benchTs,
-      effectiveTs: benchTs || existingTs,
-      serverNowMs: nowMs,
-      diffSeconds: benchConn.diffSeconds,
-      timeoutSeconds: benchConn.timeoutSeconds,
-      isOnline: benchConn.isOnline,
-    },
-  });
-  return merged;
-}
-
-// -------------------------------------------------------------
 // MAPPER UTILS FOR USER'S RTDB SCHEMA
 // -------------------------------------------------------------
-// Cache of live update reception times (used strictly for legacy uptime-only packets without Unix epoch)
+// Cache of local reception times per device node to safeguard against NTP clock skew
 const lastPacketArrivalMap: Record<string, number> = {};
 const lastPacketSignatureMap: Record<string, string> = {};
 
 export function recordDevicePacketArrival(key: string, data?: any) {
-  if (!data || typeof data !== 'object') {
+  if (!data) {
+    if (!lastPacketArrivalMap[key]) {
+      lastPacketArrivalMap[key] = Date.now();
+    }
     return;
   }
   const signature = JSON.stringify([
@@ -967,18 +266,13 @@ export function recordDevicePacketArrival(key: string, data?: any) {
     data.PM2_5 ?? data.pm25 ?? null,
     data.temperatura ?? data.temp ?? null,
     data.humedad ?? data.hum ?? null,
-    data.last_update_server ?? data.timestamp_server ?? data.timestamp_unix ?? null,
+    data.last_update_server ?? data.timestamp_server ?? null,
     data.msgId ?? null,
     data.via_puente ?? null,
     data.alarma_activa ?? data.alarma ?? null,
     data.luz ?? null,
     data.estado_adquisicion ?? null,
   ]);
-  // En la primera lectura inicial solo memorizamos la firma sin fingir que llegó un paquete vivo.
-  if (lastPacketSignatureMap[key] === undefined) {
-    lastPacketSignatureMap[key] = signature;
-    return;
-  }
   if (lastPacketSignatureMap[key] !== signature) {
     lastPacketSignatureMap[key] = signature;
     lastPacketArrivalMap[key] = Date.now();
@@ -1008,8 +302,7 @@ function readStrictBoundedNum(
 export function mapRTDBDeviceToSensorDevice(
   key: string,
   data: any,
-  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
-  nowMs: number = getEstimatedServerNowMs()
+  timeoutSeconds: number = 20
 ): SensorDevice {
   const coVal = readStrictBoundedNum(data?.CO, data?.co, 0, 4095);
   const pmVal = readStrictBoundedNum(data?.PM2_5, data?.pm25, 0, 4095);
@@ -1023,67 +316,34 @@ export function mapRTDBDeviceToSensorDevice(
   if (humVal === null) faultFields.push('humedad');
   const sensorFault = faultFields.length > 0;
 
-  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || DEFAULT_DEVICE_TIMEOUT_SECONDS);
-  const rawServerCandidate =
-    data?.last_update_server ?? data?.timestamp_server ?? data?.timestamp_unix ?? 0;
-  const rawServerNum = Number(rawServerCandidate) || 0;
-  let serverTime = normalizeServerTimestampMs(rawServerCandidate);
-  let isOnline = false;
-  let diffSeconds = 999999;
-
-  if (serverTime > 0) {
-    // Conectividad estricta basada en marca temporal de servidor (nunca marcar en línea solo por existir en RTDB).
-    const evalConn = evaluateDeviceConnectivity(serverTime, effectiveTimeout, nowMs);
-    isOnline = evalConn.isOnline;
-    diffSeconds = evalConn.diffSeconds;
-  } else if (rawServerNum > 0 && rawServerNum < 1_000_000_000) {
-    // Firmware heredado que envió millis() de uptime en lugar de época Unix:
-    // solo se considera en línea si se observó una actualización real tras la carga inicial.
-    const lastArrival = lastPacketArrivalMap[key] || 0;
-    if (lastArrival > 0) {
-      serverTime = lastArrival;
-      const evalConn = evaluateDeviceConnectivity(lastArrival, effectiveTimeout, nowMs);
-      isOnline = evalConn.isOnline;
-      diffSeconds = evalConn.diffSeconds;
-    }
+  const effectiveTimeout = Math.max(5, Number(timeoutSeconds) || 20);
+  const now = Date.now();
+  const lastArrival = lastPacketArrivalMap[key] || 0;
+  let serverTime = Number(data?.last_update_server) || Number(data?.timestamp_server) || 0;
+  // 10 dígitos Unix epoch (>= año 2001) -> convertir a milisegundos
+  if (serverTime >= 1000000000 && serverTime < 100000000000) {
+    serverTime = serverTime * 1000;
+  } else if (serverTime > 0 && serverTime < 1000000000) {
+    // El firmware envió millis() de uptime en vez de época Unix:
+    // usar la hora real de llegada del paquete RTDB para evitar fechas de 1970.
+    serverTime = lastArrival > 0 ? lastArrival : now;
   }
 
-  const telemetryOrigin =
-    typeof data?.origen === 'string' && data.origen.trim() !== '' ? data.origen.trim() : undefined;
-  const sourcePath =
-    typeof data?._sourcePath === 'string' && data._sourcePath.trim() !== ''
-      ? data._sourcePath.trim()
-      : `/dispositivos/${key}`;
-  const isBenchTelemetry =
-    Boolean(data?._isBenchTelemetry) ||
-    sourcePath.includes(BENCH_TELEMETRY_PATH) ||
-    Boolean(telemetryOrigin && /p087|banco|diagnostico/i.test(telemetryOrigin));
-  const isSimulated =
-    data?.simulado === true ||
-    key === SIMULATED_NODE_DEVICE_ID ||
-    Boolean(telemetryOrigin && /simula/i.test(telemetryOrigin));
-  const adcSaturated = coVal === 4095 || pmVal === 4095;
+  const diffSeconds = serverTime > 0 ? Math.floor(Math.abs(now - serverTime) / 1000) : 999999;
+  const arrivalDiff = lastArrival > 0 ? Math.floor((now - lastArrival) / 1000) : 999999;
 
-  const alarmaActiva = isBenchTelemetry ? false : Boolean(data?.alarma_activa);
+  const isOnline = diffSeconds <= effectiveTimeout || arrivalDiff <= effectiveTimeout;
+
+  const alarmaActiva = Boolean(data?.alarma_activa);
   const origenAlarma = data?.origen_alarma || '';
   const descripcionMonitoreo = data?.descripcion_monitoreo || '';
 
   let status: AlertSeverity = 'normal';
   if (!isOnline) {
     status = 'desconectado';
-  } else if (isBenchTelemetry) {
-    // Telemetría de banco / prototipo académico separada de alertas operacionales mineras.
-    status = 'normal';
-  } else if (
-    alarmaActiva ||
-    (coVal !== null && coVal < 4095 && coVal >= 500) ||
-    (pmVal !== null && pmVal < 4095 && pmVal >= 150)
-  ) {
+  } else if (alarmaActiva || (coVal !== null && coVal >= 500) || (pmVal !== null && pmVal >= 150)) {
     status = 'critico';
-  } else if (
-    (coVal !== null && coVal < 4095 && coVal >= 350) ||
-    (pmVal !== null && pmVal < 4095 && pmVal >= 55)
-  ) {
+  } else if ((coVal !== null && coVal >= 350) || (pmVal !== null && pmVal >= 55)) {
     status = 'advertencia';
   }
 
@@ -1092,21 +352,11 @@ export function mapRTDBDeviceToSensorDevice(
   let crewName = data?.crewName || '';
   let sectorName = data?.sectorName || 'Sector Operativo';
 
-  if (key === PHYSICAL_NODE_DEVICE_ID) {
+  if (key === 'device_38A839E81F84') {
     deviceName = data?.name || 'Gateway Principal Mina Norte';
     siteName = data?.siteName || 'Faena Chuquicamata';
     crewName = data?.crewName || 'Cuadrilla Alfa';
     sectorName = data?.sectorName || 'Rampa Principal';
-  } else if (key === SIMULATED_NODE_DEVICE_ID) {
-    deviceName = data?.name || 'Nodo Simulado ESP32';
-    siteName = data?.siteName || 'Banco de Pruebas Simulado';
-    crewName = data?.crewName || 'Pruebas de Laboratorio';
-    sectorName = data?.sectorName || 'Entorno Simulado';
-  } else if (key === GATEWAY_DEVICE_ID) {
-    deviceName = data?.name || 'Gateway ESP32 DevKit V1';
-    siteName = data?.siteName || 'Faena Chuquicamata';
-    crewName = data?.crewName || 'Cuadrilla Alfa';
-    sectorName = data?.sectorName || 'Enlace ESP-NOW';
   } else if (key === 'device_A4CB2F124B00') {
     deviceName = data?.name || 'Gateway Sector San José';
     siteName = data?.siteName || 'Faena San José';
@@ -1147,15 +397,6 @@ export function mapRTDBDeviceToSensorDevice(
     ? Object.values(data.assignmentHistory)
     : undefined;
 
-  const saltosEspNow =
-    typeof data?.saltos_espnow === 'number' && Number.isFinite(data.saltos_espnow)
-      ? data.saltos_espnow
-      : undefined;
-  const timestampUnix =
-    typeof data?.timestamp_unix === 'number' && Number.isFinite(data.timestamp_unix)
-      ? data.timestamp_unix
-      : undefined;
-
   return {
     id: key,
     code: key,
@@ -1190,22 +431,7 @@ export function mapRTDBDeviceToSensorDevice(
     descripcionMonitoreo: descripcionMonitoreo,
     fecha: data?.fecha || '',
     hora: data?.hora || '',
-    fechaHora: typeof data?.fecha_hora === 'string' ? data.fecha_hora : undefined,
-    timestampUnix,
     via: data?.via || '',
-    viaPuente: data?.via_puente === true ? true : data?.via_puente === false ? false : undefined,
-    gatewayId: typeof data?.gateway_id === 'string' && data.gateway_id.trim() !== '' ? data.gateway_id.trim() : undefined,
-    saltosEspNow,
-    msgId:
-      typeof data?.msgId === 'string' || typeof data?.msgId === 'number'
-        ? data.msgId
-        : undefined,
-    isSimulated,
-    telemetryOrigin,
-    isBenchTelemetry,
-    sourcePath,
-    adcSaturated,
-    dustSensorModel: DUST_SENSOR_MODEL_LABEL,
     localIp: data?.localIp || undefined,
     deviceCategory: data?.deviceCategory || (key.startsWith('NODO') ? 'nodo' : 'gateway'),
     parentGatewayId: data?.parentGatewayId || undefined,
@@ -1981,7 +1207,6 @@ export function subscribeToFirebaseAuth(
   callback: (user: UserProfile | null, authError?: string | null) => void
 ): () => void {
   return onAuthStateChanged(auth, async (fbUser) => {
-    syncAuthStateIntoBenchDiagnostics(fbUser);
     if (isAccountRecreationInProgress) {
       return;
     }
@@ -2160,7 +1385,6 @@ export function mapRTDBContractToRental(key: string, data: any): DeviceRental {
 
 export interface RTDBSubscriptionScope {
   uid?: string;
-  authUid?: string;
   role?: UserRole;
   organizationId?: string;
   deviceIds?: string[];
@@ -2184,40 +1408,6 @@ export function subscribeToRTDBDevicesRaw(
   callback: (rawDevices: Record<string, any>) => void,
   scope?: RTDBSubscriptionScope
 ): () => void {
-  startServerTimeOffsetSync();
-  syncAuthStateIntoBenchDiagnostics();
-  updateBenchDiagnostics({
-    devicesListener: { status: 'listening', error: null },
-    benchListener: { status: 'listening', error: null, errorCode: null },
-  });
-
-  const recordBenchSnapshotForDiag = (val: Record<string, any> | null) => {
-    const benchTs = normalizeServerTimestampMs(
-      val?.last_update_server ?? val?.timestamp_server ?? val?.timestamp_unix
-    );
-    updateBenchDiagnostics({
-      benchListener: {
-        status: val ? 'ok' : 'empty',
-        lastEventAt: Date.now(),
-        error: null,
-        errorCode: null,
-        normalizedServerTs: benchTs,
-        rawPayload: val
-          ? {
-              CO: val.CO ?? val.co,
-              PM2_5: val.PM2_5 ?? val.pm25,
-              temperatura: val.temperatura ?? val.temp,
-              humedad: val.humedad ?? val.hum,
-              last_update_server: val.last_update_server,
-              origen: val.origen,
-              simulado: val.simulado,
-              hasHistorial: Boolean(val.historial && typeof val.historial === 'object'),
-            }
-          : null,
-      },
-    });
-  };
-
   if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
@@ -2226,8 +1416,6 @@ export function subscribeToRTDBDevicesRaw(
 
     let queryDevices: Record<string, any> = {};
     const explicitDevices: Record<string, any> = {};
-    let benchDiagData: Record<string, any> | null = null;
-
     const emitScoped = () => {
       const merged: Record<string, any> = {};
       const assignIfMatches = (devId: string, val: any, isExplicitAuthorized: boolean) => {
@@ -2250,34 +1438,7 @@ export function subscribeToRTDBDevicesRaw(
       };
       Object.entries(queryDevices).forEach(([k, v]) => assignIfMatches(k, v, false));
       Object.entries(explicitDevices).forEach(([k, v]) => assignIfMatches(k, v, true));
-
-      const rawPhys = merged[PHYSICAL_NODE_DEVICE_ID];
-      updateBenchDiagnostics({
-        devicesListener: {
-          status: 'ok',
-          lastEventAt: Date.now(),
-          devicesCount: Object.keys(merged).length,
-          physicalNodeExists: Boolean(rawPhys),
-          physicalNodeRawTs: normalizeServerTimestampMs(
-            rawPhys?.last_update_server ?? rawPhys?.timestamp_server ?? rawPhys?.timestamp_unix
-          ),
-          physicalNodeRawPM25:
-            typeof rawPhys?.PM2_5 === 'number'
-              ? rawPhys.PM2_5
-              : typeof rawPhys?.pm25 === 'number'
-              ? rawPhys.pm25
-              : null,
-          error: null,
-        },
-      });
-
-      // Fusionar telemetría de /diagnostico/esp32_p087 únicamente si device_38A839E81F84
-      // pertenece al alcance autorizado de la organización/usuario actual (aislamiento estricto).
-      const finalMerged = mergeBenchTelemetryIntoPhysicalNode(merged, benchDiagData, false);
-      if (finalMerged[PHYSICAL_NODE_DEVICE_ID]) {
-        recordDevicePacketArrival(PHYSICAL_NODE_DEVICE_ID, finalMerged[PHYSICAL_NODE_DEVICE_ID]);
-      }
-      callback(finalMerged);
+      callback(merged);
     };
 
     const unsubs: Array<() => void> = [];
@@ -2293,14 +1454,10 @@ export function subscribeToRTDBDevicesRaw(
             emitScoped();
           },
           (fallbackErr) => {
-            const msg = fallbackErr?.message || String(fallbackErr || '');
             console.warn(
               `Error in fallback RTDB /dispositivos listener (${targetOrgId}):`,
-              msg
+              fallbackErr?.message || fallbackErr
             );
-            updateBenchDiagnostics({
-              devicesListener: { status: 'error', lastEventAt: Date.now(), error: msg },
-            });
           }
         )
       );
@@ -2317,9 +1474,6 @@ export function subscribeToRTDBDevicesRaw(
         (err) => {
           const msg = String(err?.message || err || '');
           console.warn(`Error subscribing to scoped RTDB /dispositivos (${targetOrgId}):`, msg);
-          updateBenchDiagnostics({
-            devicesListener: { status: 'error', lastEventAt: Date.now(), error: msg },
-          });
           if (/index/i.test(msg)) {
             attachIndexFallbackIfAllowed();
           } else {
@@ -2350,119 +1504,31 @@ export function subscribeToRTDBDevicesRaw(
       );
     });
 
-    // Suscripción complementaria a /diagnostico/esp32_p087 (si las reglas RTDB lo autorizan)
-    unsubs.push(
-      onValue(
-        ref(rtdb, BENCH_TELEMETRY_PATH),
-        (snapshot) => {
-          benchDiagData = snapshot.exists() ? snapshot.val() || null : null;
-          recordBenchSnapshotForDiag(benchDiagData);
-          emitScoped();
-        },
-        (err) => {
-          // Usuarios de organizaciones sin acceso al nodo físico reciben permission_denied de forma esperada.
-          benchDiagData = null;
-          recordBenchListenerErrorForDiagnostics(err);
-        }
-      )
-    );
-
     return () => {
       unsubs.forEach((fn) => fn());
     };
   }
 
-  let latestDevices: Record<string, any> = {};
-  let latestBenchDiag: Record<string, any> | null = null;
-  let devicesLoaded = false;
-
-  const emitGlobal = () => {
-    const rawPhys = latestDevices[PHYSICAL_NODE_DEVICE_ID];
-    if (devicesLoaded) {
-      updateBenchDiagnostics({
-        devicesListener: {
-          status: 'ok',
-          lastEventAt: Date.now(),
-          devicesCount: Object.keys(latestDevices).length,
-          physicalNodeExists: Boolean(rawPhys),
-          physicalNodeRawTs: normalizeServerTimestampMs(
-            rawPhys?.last_update_server ?? rawPhys?.timestamp_server ?? rawPhys?.timestamp_unix
-          ),
-          physicalNodeRawPM25:
-            typeof rawPhys?.PM2_5 === 'number'
-              ? rawPhys.PM2_5
-              : typeof rawPhys?.pm25 === 'number'
-              ? rawPhys.pm25
-              : null,
-          error: null,
-        },
-      });
-    }
-
-    // Para SuperAdmin / Admin MineSafe, permitir materializar/fusionar inmediatamente
-    // la telemetría viva de /diagnostico/esp32_p087 sobre device_38A839E81F84 incluso
-    // si /dispositivos aún está respondiendo o presentó retraso.
-    const finalMerged = mergeBenchTelemetryIntoPhysicalNode(
-      latestDevices,
-      latestBenchDiag,
-      true
-    );
-    Object.keys(finalMerged).forEach((key) => {
-      recordDevicePacketArrival(key, finalMerged[key]);
-    });
-    callback(finalMerged);
-  };
-
   const devicesRef = buildOrgScopedQuery('dispositivos', scope);
-  const unsubDevices = onValue(
-    devicesRef,
-    (snapshot) => {
-      devicesLoaded = true;
-      latestDevices = snapshot.exists() ? snapshot.val() || {} : {};
-      emitGlobal();
-    },
-    (err) => {
-      const msg = err?.message || String(err || 'Error leyendo /dispositivos');
-      console.warn('Error subscribing to RTDB /dispositivos:', msg);
-      updateBenchDiagnostics({
-        devicesListener: {
-          status: 'error',
-          lastEventAt: Date.now(),
-          error: msg,
-        },
+  const unsub = onValue(devicesRef, (snapshot) => {
+    if (snapshot.exists()) {
+      const incoming = snapshot.val() || {};
+      Object.keys(incoming).forEach((key) => {
+        recordDevicePacketArrival(key, incoming[key]);
       });
-      // Emitir igualmente si ya existe telemetría viva en /diagnostico/esp32_p087
-      if (latestBenchDiag) {
-        emitGlobal();
-      }
+      callback(incoming);
+    } else {
+      callback({});
     }
-  );
-
-  const unsubBench = onValue(
-    ref(rtdb, BENCH_TELEMETRY_PATH),
-    (snapshot) => {
-      latestBenchDiag = snapshot.exists() ? snapshot.val() || null : null;
-      recordBenchSnapshotForDiag(latestBenchDiag);
-      emitGlobal();
-    },
-    (err) => {
-      const msg = err?.message || String(err || `Error leyendo /${BENCH_TELEMETRY_PATH}`);
-      console.warn(`Error subscribing to RTDB /${BENCH_TELEMETRY_PATH}:`, msg);
-      latestBenchDiag = null;
-      recordBenchListenerErrorForDiagnostics(err);
-      emitGlobal();
-    }
-  );
-
-  return () => {
-    unsubDevices();
-    unsubBench();
-  };
+  }, (err) => {
+    console.warn('Error subscribing to RTDB /dispositivos:', err?.message || err);
+  });
+  return unsub;
 }
 
 export function subscribeToRTDBDevices(
   callback: (devices: SensorDevice[]) => void,
-  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+  timeoutSeconds: number = 20,
   scope?: RTDBSubscriptionScope
 ): () => void {
   return subscribeToRTDBDevicesRaw((incoming) => {
@@ -2474,12 +1540,9 @@ export function subscribeToRTDBDevices(
 }
 
 export async function forceRefreshDevicesFromRTDB(
-  timeoutSeconds: number = DEFAULT_DEVICE_TIMEOUT_SECONDS,
+  timeoutSeconds: number = 20,
   scope?: RTDBSubscriptionScope
 ): Promise<{ raw: Record<string, any>; devices: SensorDevice[] }> {
-  const benchSnap = await get(ref(rtdb, BENCH_TELEMETRY_PATH)).catch(() => null);
-  const benchRaw = benchSnap && benchSnap.exists() ? benchSnap.val() : null;
-
   if (scope?.role && !isGlobalMineSafeAdmin(scope.role)) {
     const targetOrgId =
       scope.organizationId && scope.organizationId !== 'all'
@@ -2527,22 +1590,23 @@ export async function forceRefreshDevicesFromRTDB(
       }
     }
 
-    const mergedRaw = mergeBenchTelemetryIntoPhysicalNode(raw, benchRaw, false);
-    const devices = Object.keys(mergedRaw).map((id) => {
-      recordDevicePacketArrival(id, mergedRaw[id]);
-      return mapRTDBDeviceToSensorDevice(id, mergedRaw[id], timeoutSeconds);
+    const devices = Object.keys(raw).map((id) => {
+      recordDevicePacketArrival(id, raw[id]);
+      return mapRTDBDeviceToSensorDevice(id, raw[id], timeoutSeconds);
     });
-    return { raw: mergedRaw, devices };
+    return { raw, devices };
   }
 
   const snapshot = await get(ref(rtdb, 'dispositivos'));
-  const incoming = snapshot.exists() ? snapshot.val() || {} : {};
-  const mergedRaw = mergeBenchTelemetryIntoPhysicalNode(incoming, benchRaw, true);
-  const devices = Object.keys(mergedRaw).map((key) => {
-    recordDevicePacketArrival(key, mergedRaw[key]);
-    return mapRTDBDeviceToSensorDevice(key, mergedRaw[key], timeoutSeconds);
+  if (!snapshot.exists()) {
+    return { raw: {}, devices: [] };
+  }
+  const incoming = snapshot.val() || {};
+  const devices = Object.keys(incoming).map((key) => {
+    recordDevicePacketArrival(key, incoming[key]);
+    return mapRTDBDeviceToSensorDevice(key, incoming[key], timeoutSeconds);
   });
-  return { raw: mergedRaw, devices };
+  return { raw: incoming, devices };
 }
 
 export function extractAlarmAuditRecords(devices: SensorDevice[]): AlarmAuditRecord[] {
@@ -3548,7 +2612,7 @@ export async function toggleGatewayAlarmInRTDB(
     alarma: active,
     alarma_activa: active,
     buzzer: active,
-    // Señalización visual LED (solo simulaciones / comandos web; baliza 12 V retirada del alcance)
+    // La baliza/luz se activa y apaga automáticamente en conjunto con la alarma
     luz: active,
     iluminacion_led: active,
     origen_alarma: active ? 'ACTIVACION_MANUAL_WEB' : 'NINGUNO',
@@ -3598,7 +2662,7 @@ export async function shutdownAlarmCompletelyInRTDB(
     iluminacion_led: false,
     simulacro_activo: false,
     origen_alarma: 'NINGUNO',
-    descripcion_monitoreo: `Alarma y señalización detenidas por ${actorLabel}.`,
+    descripcion_monitoreo: `Alarma y baliza apagadas por ${actorLabel}.`,
     last_update_server: now,
   };
 
@@ -3640,7 +2704,7 @@ export async function toggleGatewayLightInRTDB(
   actingUser?: UserProfile | null
 ): Promise<void> {
   if (actingUser && !isAnyAdminRole(actingUser.role)) {
-    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la señalización LED del nodo.');
+    throw new Error('Acceso denegado: Solo Administrador o SuperAdministrador puede controlar la baliza LED del nodo.');
   }
   const now = Date.now();
   const payload = {
@@ -4341,8 +3405,8 @@ export const DEFAULT_GLOBAL_THRESHOLDS: DeviceThresholdsConfig = {
     unidad: 'µg/m³',
     minVal: 0,
     maxVal: 4095,
-    label: 'Partículas PM2.5 (Sensor óptico OPEN-SMART — estimación sin calibración)',
-    descripcion: 'Estimación de polvo óptico mediante sensor OPEN-SMART sin calibración gravimétrica oficial. Uso referencial en prototipo académico.'
+    label: 'Partículas PM2.5 (Sharp GP2Y1010)',
+    descripcion: 'Densidad estimada en µg/m³ por el firmware con conversión lineal genérica. Sin calibración gravimétrica oficial.'
   },
   mq2: {
     activo: true,
@@ -6187,8 +5251,6 @@ export async function deleteCrewFromRTDB(
 const lastTelemetryWriteMap: Record<string, { ts: number; sig: string }> = {};
 
 export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise<void> {
-  // No duplicar historial operacional para telemetría de banco (/diagnostico/esp32_p087/historial ya es escrito por el ESP32).
-  if (device.isBenchTelemetry) return;
   if (!device.gatewayOnline || device.status === 'desconectado') return;
   if (
     device.rawCO === undefined &&
@@ -6231,7 +5293,7 @@ export async function recordTelemetryHistoryPoint(device: SensorDevice): Promise
 
 export function resolveTelemetryWindowMs(
   rangeOrOptions: number | { startMs: number; endMs?: number; limit?: number },
-  nowMs: number = getEstimatedServerNowMs()
+  nowMs: number = Date.now()
 ): { startMs: number; endMs: number; limit: number } {
   if (typeof rangeOrOptions === 'number') {
     const hours = Math.max(0.25, rangeOrOptions);
@@ -6252,8 +5314,7 @@ export function resolveTelemetryWindowMs(
 export function mapTelemetrySnapshotRaw(
   raw: Record<string, any>,
   startMs: number,
-  endMs: number,
-  source?: TelemetryHistoryPoint['source']
+  endMs: number
 ): TelemetryHistoryPoint[] {
   const toFiniteOrNull = (v: unknown): number | null => {
     if (typeof v === 'number' && Number.isFinite(v)) return v;
@@ -6268,15 +5329,19 @@ export function mapTelemetrySnapshotRaw(
     .map((k) => {
       const item = raw[k];
       if (!item || typeof item !== 'object') return null;
-      const rawCandidate =
-        item.timestamp ??
-        item.last_update_server ??
-        item.timestamp_server ??
-        item.serverTimestamp ??
-        item.timestamp_unix ??
-        k;
-      const ts = normalizeServerTimestampMs(rawCandidate);
-      if (!ts) return null;
+      const rawTs =
+        typeof item.timestamp === 'number'
+          ? item.timestamp
+          : typeof item.timestamp_server === 'number'
+          ? item.timestamp_server
+          : typeof item.serverTimestamp === 'number'
+          ? item.serverTimestamp
+          : Number(k);
+      // Normalize seconds-based timestamps to milliseconds if needed
+      const ts =
+        Number.isFinite(rawTs) && rawTs > 1_000_000_000 && rawTs < 10_000_000_000
+          ? rawTs * 1000
+          : rawTs;
 
       const co = toFiniteOrNull(item.co ?? item.CO ?? item.mq2 ?? item.gas);
       const pm25 = toFiniteOrNull(item.pm25 ?? item.PM2_5 ?? item.polvo ?? item.dust);
@@ -6293,7 +5358,6 @@ export function mapTelemetrySnapshotRaw(
         pm25,
         temperatura,
         humedad,
-        ...(source ? { source } : {}),
         ...(typeof item.originTimestamp === 'number' ? { originTimestamp: item.originTimestamp } : {}),
         ...(typeof item.serverTimestamp === 'number' ? { serverTimestamp: item.serverTimestamp } : {}),
       } as TelemetryHistoryPoint;
@@ -6305,116 +5369,9 @@ export function mapTelemetrySnapshotRaw(
     .sort((a, b) => a.timestamp - b.timestamp);
 }
 
-/**
- * Fusiona series históricas de distintas rutas (/historial_telemetria, /dispositivos/{id}/historial,
- * /diagnostico/esp32_p087/historial) sin borrar ni sobrescribir muestras previas.
- */
-export function mergeTelemetryHistorySeries(
-  ...seriesList: TelemetryHistoryPoint[][]
-): TelemetryHistoryPoint[] {
-  const map = new Map<number, TelemetryHistoryPoint>();
-  for (const series of seriesList) {
-    if (!Array.isArray(series)) continue;
-    for (const pt of series) {
-      if (!pt || !Number.isFinite(pt.timestamp)) continue;
-      if (!map.has(pt.timestamp)) {
-        map.set(pt.timestamp, pt);
-      }
-    }
-  }
-  return Array.from(map.values()).sort((a, b) => a.timestamp - b.timestamp);
-}
-
 function isRTDBIndexMissingError(err: any): boolean {
   const msg = String(err?.message || err || '');
   return /index\s+not\s+defined|\.indexOn|add\s+"\.indexOn"/i.test(msg);
-}
-
-async function fetchBenchDiagnosticHistoryFromRTDB(
-  startMs: number,
-  endMs: number
-): Promise<TelemetryHistoryPoint[]> {
-  const benchEndMs = endMs + 60_000;
-  try {
-    const indexedQuery = query(
-      ref(rtdb, BENCH_HISTORY_PATH),
-      orderByChild('timestamp'),
-      startAt(startMs),
-      endAt(benchEndMs),
-      limitToLast(5000)
-    );
-    const snap = await get(indexedQuery);
-    if (snap.exists()) {
-      const mapped = mapTelemetrySnapshotRaw(snap.val() || {}, startMs, benchEndMs, 'diagnostico_p087');
-      if (mapped.length > 0) {
-        updateBenchDiagnostics({
-          historyListener: {
-            status: 'ok',
-            benchPointsCount: mapped.length,
-            lastError: null,
-          },
-        });
-        return mapped;
-      }
-    }
-    // Respaldo si las muestras usan timestamp en segundos (10 dígitos) o clave push sin índice ms
-    const tailSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(1000)));
-    if (tailSnap.exists()) {
-      const mappedTail = mapTelemetrySnapshotRaw(
-        tailSnap.val() || {},
-        startMs,
-        benchEndMs,
-        'diagnostico_p087'
-      );
-      updateBenchDiagnostics({
-        historyListener: {
-          status: mappedTail.length > 0 ? 'ok' : 'empty',
-          benchPointsCount: mappedTail.length,
-          lastError: null,
-        },
-      });
-      return mappedTail;
-    }
-    updateBenchDiagnostics({
-      historyListener: { status: 'empty', benchPointsCount: 0, lastError: null },
-    });
-    return [];
-  } catch (err: any) {
-    if (isRTDBIndexMissingError(err)) {
-      try {
-        const rawSnap = await get(query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(1000)));
-        if (rawSnap.exists()) {
-          const mapped = mapTelemetrySnapshotRaw(
-            rawSnap.val() || {},
-            startMs,
-            endMs,
-            'diagnostico_p087'
-          );
-          updateBenchDiagnostics({
-            historyListener: {
-              status: mapped.length > 0 ? 'ok' : 'empty',
-              benchPointsCount: mapped.length,
-              lastError: null,
-            },
-          });
-          return mapped;
-        }
-      } catch (fallbackErr: any) {
-        const fbMsg = fallbackErr?.message || String(fallbackErr || '');
-        console.warn(`Fallback read on /${BENCH_HISTORY_PATH} failed:`, fbMsg);
-        updateBenchDiagnostics({
-          historyListener: { status: 'error', lastError: fbMsg },
-        });
-      }
-      return [];
-    }
-    const errMsg = err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`);
-    console.warn(`Read on /${BENCH_HISTORY_PATH} failed:`, errMsg);
-    updateBenchDiagnostics({
-      historyListener: { status: 'error', lastError: errMsg },
-    });
-    return [];
-  }
 }
 
 async function fetchUnindexedTelemetryFallbackFromRTDB(
@@ -6422,38 +5379,31 @@ async function fetchUnindexedTelemetryFallbackFromRTDB(
   startMs: number,
   endMs: number
 ): Promise<TelemetryHistoryPoint[]> {
-  const series: TelemetryHistoryPoint[][] = [];
+  const collected = new Map<number, TelemetryHistoryPoint>();
 
   try {
     const primarySnap = await get(ref(rtdb, `historial_telemetria/${deviceId}`));
     if (primarySnap.exists()) {
-      series.push(
-        mapTelemetrySnapshotRaw(primarySnap.val() || {}, startMs, endMs, 'historial_telemetria')
-      );
+      const pts = mapTelemetrySnapshotRaw(primarySnap.val() || {}, startMs, endMs);
+      pts.forEach((p) => collected.set(p.timestamp, p));
     }
   } catch (err) {
     console.warn('Fallback read on /historial_telemetria failed:', err);
   }
 
-  try {
-    const espSnap = await get(ref(rtdb, `dispositivos/${deviceId}/historial`));
-    if (espSnap.exists()) {
-      series.push(
-        mapTelemetrySnapshotRaw(espSnap.val() || {}, startMs, endMs, 'dispositivos_historial')
-      );
-    }
-  } catch (err) {
-    console.warn('Secondary fallback read on /dispositivos/{id}/historial failed:', err);
-  }
-
-  if (deviceId === PHYSICAL_NODE_DEVICE_ID) {
-    const benchPts = await fetchBenchDiagnosticHistoryFromRTDB(startMs, endMs);
-    if (benchPts.length > 0) {
-      series.push(benchPts);
+  if (collected.size === 0) {
+    try {
+      const espSnap = await get(ref(rtdb, `dispositivos/${deviceId}/historial`));
+      if (espSnap.exists()) {
+        const pts = mapTelemetrySnapshotRaw(espSnap.val() || {}, startMs, endMs);
+        pts.forEach((p) => collected.set(p.timestamp, p));
+      }
+    } catch (err) {
+      console.warn('Secondary fallback read on /dispositivos/{id}/historial failed:', err);
     }
   }
 
-  return mergeTelemetryHistorySeries(...series);
+  return Array.from(collected.values()).sort((a, b) => a.timestamp - b.timestamp);
 }
 
 /**
@@ -6461,8 +5411,6 @@ async function fetchUnindexedTelemetryFallbackFromRTDB(
  * truncamiento silencioso en ventanas extensas de telemetría.
  * Si RTDB no tiene `.indexOn: "timestamp"` definido en reglas, hace fallback automático
  * a lectura directa sin índice + filtrado/ordenamiento en cliente.
- * Para el nodo físico `device_38A839E81F84`, fusiona además `/diagnostico/esp32_p087/historial`
- * preservando el historial legado sin sobrescribirlo.
  */
 export async function fetchPaginatedTelemetryHistory(
   deviceId: string,
@@ -6503,12 +5451,7 @@ export async function fetchPaginatedTelemetryHistory(
         if (!snap.exists()) {
           pagePoints = [];
         } else {
-          pagePoints = mapTelemetrySnapshotRaw(
-            snap.val() || {},
-            cursorTs,
-            endMs,
-            'historial_telemetria'
-          );
+          pagePoints = mapTelemetrySnapshotRaw(snap.val() || {}, cursorTs, endMs);
         }
       }
 
@@ -6536,24 +5479,10 @@ export async function fetchPaginatedTelemetryHistory(
       }
     }
 
-    // Fusionar historial de /diagnostico/esp32_p087/historial para el nodo físico en modo real
-    if (!options?.fetchPage && deviceId === PHYSICAL_NODE_DEVICE_ID) {
-      const benchPoints = await fetchBenchDiagnosticHistoryFromRTDB(startMs, endMs);
-      benchPoints.forEach((pt) => {
-        if (!collectedMap.has(pt.timestamp)) {
-          collectedMap.set(pt.timestamp, pt);
-        }
-      });
-    }
-
-    // Si aún no hay muestras en modo real, revisar /dispositivos/{id}/historial
+    // Si /historial_telemetria devolvió 0 muestras en modo real, revisar /dispositivos/{id}/historial
     if (collectedMap.size === 0 && !options?.fetchPage) {
       const espPoints = await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
-      espPoints.forEach((pt) => {
-        if (!collectedMap.has(pt.timestamp)) {
-          collectedMap.set(pt.timestamp, pt);
-        }
-      });
+      espPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
     }
 
     const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
@@ -6564,11 +5493,7 @@ export async function fetchPaginatedTelemetryHistory(
         const fallbackPoints = options?.fetchUnindexedFallback
           ? await options.fetchUnindexedFallback(startMs, endMs)
           : await fetchUnindexedTelemetryFallbackFromRTDB(deviceId, startMs, endMs);
-        fallbackPoints.forEach((pt) => {
-          if (!collectedMap.has(pt.timestamp)) {
-            collectedMap.set(pt.timestamp, pt);
-          }
-        });
+        fallbackPoints.forEach((pt) => collectedMap.set(pt.timestamp, pt));
         const points = Array.from(collectedMap.values()).sort((a, b) => a.timestamp - b.timestamp);
         return {
           points,
@@ -6608,39 +5533,28 @@ export function subscribeToTelemetryHistory(
   }
   const { startMs, endMs, limit } = resolveTelemetryWindowMs(rangeOrOptions);
   let disposed = false;
-  let primaryUnsub: (() => void) | null = null;
-  let benchUnsub: (() => void) | null = null;
-  let primaryPoints: TelemetryHistoryPoint[] = [];
-  let benchPoints: TelemetryHistoryPoint[] = [];
-  let primaryError: string | null = null;
+  let activeUnsub: (() => void) | null = null;
 
-  const emitMerged = () => {
-    if (disposed) return;
-    const merged = mergeTelemetryHistorySeries(primaryPoints, benchPoints);
-    const sliced = merged.length > limit ? merged.slice(-limit) : merged;
-    // Si existen puntos del historial de banco, no bloquear la vista por un error secundario.
-    callback(sliced, { error: sliced.length > 0 ? null : primaryError });
-  };
-
-  const attachPrimaryFallbackListener = () => {
+  const attachFallbackListener = () => {
     if (disposed) return;
     const rawRef = ref(rtdb, `historial_telemetria/${deviceId}`);
-    primaryUnsub = onValue(
+    activeUnsub = onValue(
       rawRef,
       (snapshot) => {
         if (disposed) return;
-        primaryError = null;
-        primaryPoints = snapshot.exists()
-          ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs, 'historial_telemetria')
-          : [];
-        emitMerged();
+        if (!snapshot.exists()) {
+          callback([], { error: null });
+          return;
+        }
+        const points = mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs);
+        const sliced = points.length > limit ? points.slice(-limit) : points;
+        callback(sliced, { error: null });
       },
       (fallbackErr) => {
         if (disposed) return;
-        primaryError = fallbackErr?.message || 'Error consultando historial de telemetría.';
-        console.warn('Error in fallback telemetry history subscription:', primaryError);
-        primaryPoints = [];
-        emitMerged();
+        const msg = fallbackErr?.message || 'Error consultando historial de telemetría.';
+        console.warn('Error in fallback telemetry history subscription:', msg);
+        callback([], { error: msg });
       }
     );
   };
@@ -6652,154 +5566,46 @@ export function subscribeToTelemetryHistory(
     endAt(endMs),
     limitToLast(limit)
   );
-  primaryUnsub = onValue(
+  activeUnsub = onValue(
     histQuery,
     (snapshot) => {
       if (disposed) return;
-      primaryError = null;
-      primaryPoints = snapshot.exists()
-        ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs, 'historial_telemetria')
-        : [];
-      emitMerged();
+      if (!snapshot.exists()) {
+        callback([], { error: null });
+        return;
+      }
+      const points = mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, endMs);
+      callback(points, { error: null });
     },
     (err) => {
       if (disposed) return;
       if (isRTDBIndexMissingError(err)) {
-        if (primaryUnsub) {
+        if (activeUnsub) {
           try {
-            primaryUnsub();
+            activeUnsub();
           } catch {
             // ignore
           }
-          primaryUnsub = null;
+          activeUnsub = null;
         }
-        attachPrimaryFallbackListener();
+        attachFallbackListener();
         return;
       }
-      primaryError = err?.message || 'Error consultando historial de telemetría.';
-      console.warn('Error subscribing to telemetry history:', primaryError);
-      primaryPoints = [];
-      emitMerged();
+      const msg = err?.message || 'Error consultando historial de telemetría.';
+      console.warn('Error subscribing to telemetry history:', msg);
+      callback([], { error: msg });
     }
   );
 
-  // Para el nodo físico device_38A839E81F84, suscribirse también a /diagnostico/esp32_p087/historial
-  if (deviceId === PHYSICAL_NODE_DEVICE_ID) {
-    const benchEndMs = endMs + 60_000;
-    updateBenchDiagnostics({
-      historyListener: { status: 'listening', lastError: null },
-    });
-    const attachBenchFallbackListener = () => {
-      if (disposed) return;
-      benchUnsub = onValue(
-        query(ref(rtdb, BENCH_HISTORY_PATH), limitToLast(Math.min(limit, 1000))),
-        (snapshot) => {
-          if (disposed) return;
-          benchPoints = snapshot.exists()
-            ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, benchEndMs, 'diagnostico_p087')
-            : [];
-          updateBenchDiagnostics({
-            historyListener: {
-              status: benchPoints.length > 0 ? 'ok' : 'empty',
-              benchPointsCount: benchPoints.length,
-              legacyPointsCount: primaryPoints.length,
-              lastError: null,
-            },
-          });
-          emitMerged();
-        },
-        (fallbackErr) => {
-          if (disposed) return;
-          const msg = fallbackErr?.message || String(fallbackErr || `Error leyendo /${BENCH_HISTORY_PATH}`);
-          updateBenchDiagnostics({
-            historyListener: { status: 'error', lastError: msg },
-          });
-          benchPoints = [];
-          emitMerged();
-        }
-      );
-    };
-
-    const benchQuery = query(
-      ref(rtdb, BENCH_HISTORY_PATH),
-      orderByChild('timestamp'),
-      startAt(startMs),
-      endAt(benchEndMs),
-      limitToLast(limit)
-    );
-    benchUnsub = onValue(
-      benchQuery,
-      (snapshot) => {
-        if (disposed) return;
-        const mapped = snapshot.exists()
-          ? mapTelemetrySnapshotRaw(snapshot.val() || {}, startMs, benchEndMs, 'diagnostico_p087')
-          : [];
-        if (mapped.length === 0 && !snapshot.exists()) {
-          // Si la consulta por índice ms devuelve vacío (p. ej. timestamp en segundos), cambiar a tail por clave
-          if (benchUnsub) {
-            try {
-              benchUnsub();
-            } catch {
-              // ignore
-            }
-            benchUnsub = null;
-          }
-          attachBenchFallbackListener();
-          return;
-        }
-        benchPoints = mapped;
-        updateBenchDiagnostics({
-          historyListener: {
-            status: benchPoints.length > 0 ? 'ok' : 'empty',
-            benchPointsCount: benchPoints.length,
-            legacyPointsCount: primaryPoints.length,
-            lastError: null,
-          },
-        });
-        emitMerged();
-      },
-      (err) => {
-        if (disposed) return;
-        if (isRTDBIndexMissingError(err)) {
-          if (benchUnsub) {
-            try {
-              benchUnsub();
-            } catch {
-              // ignore
-            }
-            benchUnsub = null;
-          }
-          attachBenchFallbackListener();
-          return;
-        }
-        const msg = err?.message || String(err || `Error leyendo /${BENCH_HISTORY_PATH}`);
-        console.warn(`Error subscribing to /${BENCH_HISTORY_PATH}:`, msg);
-        updateBenchDiagnostics({
-          historyListener: { status: 'error', lastError: msg },
-        });
-        benchPoints = [];
-        emitMerged();
-      }
-    );
-  }
-
   return () => {
     disposed = true;
-    if (primaryUnsub) {
+    if (activeUnsub) {
       try {
-        primaryUnsub();
+        activeUnsub();
       } catch {
         // ignore
       }
-      primaryUnsub = null;
-    }
-    if (benchUnsub) {
-      try {
-        benchUnsub();
-      } catch {
-        // ignore
-      }
-      benchUnsub = null;
+      activeUnsub = null;
     }
   };
 }

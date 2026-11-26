@@ -61,10 +61,9 @@ for (const publicFile of ['.nojekyll', 'icon.svg', 'manifest.json', 'sw.js']) {
   const srcPublic = path.join(rootDir, 'public', publicFile);
   if (fs.existsSync(srcPublic)) {
     fs.copyFileSync(srcPublic, path.join(docsDir, publicFile));
-    fs.copyFileSync(srcPublic, path.join(rootDir, publicFile));
   }
 }
 
 console.log(
-  `[syncStaticPages] Synced ${distAssetFiles.length} Vite assets (${entryJs}, ${entryCss}) + PWA assets to /, /assets/, /404.html, and /docs/.`
+  `[syncStaticPages] Synced ${distAssetFiles.length} Vite assets (${entryJs}, ${entryCss}) to /assets/, /404.html, and /docs/.`
 );

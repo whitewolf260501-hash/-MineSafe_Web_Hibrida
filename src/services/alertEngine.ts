@@ -93,11 +93,7 @@ class AlertEngine {
     const newEvents: AlertEventRecord[] = [];
     const recoveredEvents: AlertEventRecord[] = [];
 
-    if (
-      device.isBenchTelemetry === true ||
-      device.status === 'desconectado' ||
-      device.signalStrength === 'sin_conexion'
-    ) {
+    if (device.status === 'desconectado' || device.signalStrength === 'sin_conexion') {
       return {
         highestSeverity: 'normal',
         newEvents: [],
@@ -144,7 +140,7 @@ class AlertEngine {
         continue;
       }
 
-      // Evitar falsas alarmas ante saturación del ADC de 12 bits (4095 = medición no válida, sin asumir desconexión física)
+      // Evitar falsas alarmas de gas/polvo cuando el pin analógico está flotante (4095 ADC = falla física de sensor)
       if ((key === 'mq2' || key === 'pm25') && val === 4095) {
         continue;
       }

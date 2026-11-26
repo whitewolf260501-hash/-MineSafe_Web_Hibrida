@@ -12,15 +12,5 @@ minesafe-ai/.venv/
 minesafe-ai/__pycache__/
 minesafe-ai/.pytest_cache/
 firmware/nodo_esp32/secrets.h
-firmware/**/secrets.h
-firmware/**/secrets.local.h
-**/secrets.h
-**/secrets.local.h
-include/secrets.h
-*firebase-adminsdk*.json
-*service-account*.json
-serviceAccountKey.json
-*.pem
-*.key
-*.p12
-.firebase/
+
+

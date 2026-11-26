@@ -75,6 +75,7 @@ interface DashboardViewProps {
   onChangeUserModal?: () => void;
   platformConfig?: PlatformConfig;
   isFirebaseConnected?: boolean;
+  onReconnectTelemetry?: () => void;
 }
 
 export const DashboardView: React.FC<DashboardViewProps> = ({
@@ -105,6 +106,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
   onChangeUserModal,
   platformConfig,
   isFirebaseConnected = false,
+  onReconnectTelemetry,
 }) => {
   const isSuperAdmin = currentUser?.role === 'superadmin';
   const isOperador = currentUser?.role === 'operador';
@@ -421,6 +423,8 @@ export const DashboardView: React.FC<DashboardViewProps> = ({
                 isFirebaseConnected={isFirebaseConnected}
                 timeoutSeconds={metCfg?.gatewayTimeoutSeconds}
                 onNavigate={safeNavigate}
+                currentUser={currentUser}
+                onReconnectTelemetry={onReconnectTelemetry}
               />
             </div>
           );

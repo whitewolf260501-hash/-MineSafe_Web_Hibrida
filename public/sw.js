@@ -1,7 +1,8 @@
-// MineSafe IoT - Service Worker Self-Unregister & Cache Cleaner
-// Elimina de forma permanente service workers y cachés corruptos para prevenir pantallas en blanco en GitHub Pages.
+// MineSafe IoT (Build P092) - Service Worker Self-Unregister & Cache Cleaner
+// Elimina de forma permanente service workers y cachés antiguos para asegurar carga del bundle P092 en GitHub Pages.
+const SW_CLEANUP_VERSION = 'minesafe-p092';
 
-self.addEventListener('install', (event) => {
+self.addEventListener('install', () => {
   self.skipWaiting();
 });
 

@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import {
   Activity,
   AlertTriangle,
+  CheckCircle2,
   Clock,
   Cpu,
   Database,
@@ -11,6 +12,9 @@ import {
   History,
   Info,
   Radio,
+  RefreshCw,
+  ShieldAlert,
+  Terminal,
   Thermometer,
   Wifi,
   WifiOff,
@@ -21,15 +25,22 @@ import {
   NavigationTab,
   SensorDevice,
   TelemetryHistoryPoint,
+  UserProfile,
 } from '../types';
 import {
+  APP_BUILD_VERSION,
   BENCH_HISTORY_PATH,
   BENCH_TELEMETRY_PATH,
+  BenchTelemetryDiagnostics,
   DEFAULT_DEVICE_TIMEOUT_SECONDS,
   DUST_SENSOR_MODEL_LABEL,
   PHYSICAL_NODE_DEVICE_ID,
   classifyCommunicationLink,
   evaluateDeviceConnectivity,
+  getBenchDiagnosticSnapshot,
+  getEstimatedServerNowMs,
+  runSuperAdminBenchProbe,
+  subscribeToBenchDiagnostics,
   subscribeToTelemetryHistory,
 } from '../services/firebase';
 
@@ -38,6 +49,8 @@ interface BenchTelemetryPanelProps {
   isFirebaseConnected: boolean;
   timeoutSeconds?: number;
   onNavigate?: (tab: NavigationTab) => void;
+  currentUser?: UserProfile | null;
+  onReconnectTelemetry?: () => void;
 }
 
 const LINK_BADGE_MAP: Record<
@@ -72,16 +85,28 @@ export const BenchTelemetryPanel: React.FC<BenchTelemetryPanelProps> = ({
   isFirebaseConnected,
   timeoutSeconds = DEFAULT_DEVICE_TIMEOUT_SECONDS,
   onNavigate,
+  currentUser,
+  onReconnectTelemetry,
 }) => {
-  const [nowTick, setNowTick] = useState<number>(() => Date.now());
+  const isSuperAdmin = currentUser?.role === 'superadmin';
+  const [nowTick, setNowTick] = useState<number>(() => getEstimatedServerNowMs());
   const [historyPoints, setHistoryPoints] = useState<TelemetryHistoryPoint[]>([]);
   const [historyError, setHistoryError] = useState<string | null>(null);
   const [historyLoading, setHistoryLoading] = useState<boolean>(true);
+  const [diagnostics, setDiagnostics] = useState<BenchTelemetryDiagnostics>(() =>
+    getBenchDiagnosticSnapshot()
+  );
+  const [probeLoading, setProbeLoading] = useState<boolean>(false);
 
   useEffect(() => {
-    const id = window.setInterval(() => setNowTick(Date.now()), 1000);
+    const id = window.setInterval(() => setNowTick(getEstimatedServerNowMs()), 1000);
     return () => window.clearInterval(id);
   }, []);
+
+  useEffect(() => {
+    if (!isSuperAdmin) return;
+    return subscribeToBenchDiagnostics(setDiagnostics);
+  }, [isSuperAdmin]);
 
   useEffect(() => {
     setHistoryLoading(true);
@@ -96,6 +121,17 @@ export const BenchTelemetryPanel: React.FC<BenchTelemetryPanelProps> = ({
     );
     return () => unsub();
   }, [device.id]);
+
+  const handleRunProbe = async () => {
+    if (!isSuperAdmin) return;
+    setProbeLoading(true);
+    try {
+      const result = await runSuperAdminBenchProbe(currentUser);
+      setDiagnostics(result);
+    } finally {
+      setProbeLoading(false);
+    }
+  };
 
   const connectivity = useMemo(
     () => evaluateDeviceConnectivity(device.lastUpdateServer || 0, timeoutSeconds, nowTick),
@@ -189,6 +225,9 @@ export const BenchTelemetryPanel: React.FC<BenchTelemetryPanelProps> = ({
           </div>
         </div>
         <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+          <span className="text-[10px] font-mono font-bold px-2 py-1 rounded-full border bg-slate-950/80 text-cyan-300 border-cyan-700/60">
+            Build {APP_BUILD_VERSION}
+          </span>
           <span
             className={`text-[10px] font-bold px-2.5 py-1 rounded-full border ${
               isSimulated
@@ -376,7 +415,8 @@ export const BenchTelemetryPanel: React.FC<BenchTelemetryPanelProps> = ({
           ) : (
             <div>
               <p className="text-2xl font-mono font-black text-white">
-                {pmRaw} <span className="text-xs font-normal text-slate-400">µg/m³ est.</span>
+                {Number.isInteger(pmRaw) ? pmRaw : pmRaw.toFixed(1)}{' '}
+                <span className="text-xs font-normal text-slate-400">µg/m³ est.</span>
               </p>
               <p className="text-[10px] text-slate-400 mt-1">{DUST_SENSOR_MODEL_LABEL}.</p>
             </div>
@@ -668,6 +708,197 @@ export const BenchTelemetryPanel: React.FC<BenchTelemetryPanelProps> = ({
           </div>
         )}
       </div>
+
+      {/* Diagnóstico Real de Firebase Auth y RTDB — Exclusivo SuperAdministrador (P092) */}
+      {isSuperAdmin && (
+        <div
+          aria-label="Diagnóstico Técnico Firebase SuperAdmin"
+          className="bg-slate-950/90 border border-purple-700/50 rounded-xl p-4 space-y-3"
+        >
+          <div className="flex flex-wrap items-center justify-between gap-2 border-b border-slate-800 pb-2.5">
+            <div className="flex items-center gap-2">
+              <Terminal className="w-4 h-4 text-purple-400 shrink-0" />
+              <div>
+                <h3 className="text-xs font-bold text-purple-200 uppercase tracking-wider">
+                  Diagnóstico Real Firebase RTDB &amp; Permisos (Exclusivo SuperAdmin · {APP_BUILD_VERSION})
+                </h3>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  Proyecto: {diagnostics.projectId} · RTDB: {diagnostics.rtdbUrl} · Desfase reloj servidor:{' '}
+                  {diagnostics.serverTimeOffsetMs >= 0
+                    ? `+${diagnostics.serverTimeOffsetMs}`
+                    : diagnostics.serverTimeOffsetMs}{' '}
+                  ms
+                </p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2">
+              {onReconnectTelemetry && (
+                <button
+                  type="button"
+                  onClick={onReconnectTelemetry}
+                  className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 border border-slate-700 transition-colors cursor-pointer"
+                >
+                  <RefreshCw className="w-3.5 h-3.5" />
+                  Reconectar Listeners
+                </button>
+              )}
+              <button
+                type="button"
+                onClick={handleRunProbe}
+                disabled={probeLoading}
+                className="inline-flex items-center gap-1.5 text-[11px] font-semibold px-2.5 py-1.5 rounded-lg bg-purple-900/70 hover:bg-purple-800/80 text-purple-100 border border-purple-600/70 transition-colors disabled:opacity-60 cursor-pointer"
+              >
+                <Activity className={`w-3.5 h-3.5 ${probeLoading ? 'animate-spin' : ''}`} />
+                {probeLoading ? 'Sondeando RTDB...' : 'Ejecutar Sonda Diagnóstica RTDB'}
+              </button>
+            </div>
+          </div>
+
+          {/* Alertas de errores reales detectados */}
+          {(diagnostics.benchListener.error ||
+            diagnostics.devicesListener.error ||
+            diagnostics.historyListener.lastError ||
+            diagnostics.auth.profileReadError ||
+            (diagnostics.auth.authenticated && !diagnostics.auth.emailVerified)) && (
+            <div className="space-y-2">
+              {diagnostics.auth.authenticated && !diagnostics.auth.emailVerified && (
+                <div className="text-[11px] bg-amber-950/50 border border-amber-700/60 text-amber-200 rounded-lg px-3 py-2 flex items-start gap-2">
+                  <ShieldAlert className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                  <div>
+                    <strong className="font-bold">email_verified = false en Firebase Auth:</strong> Si el
+                    perfil <span className="font-mono">/usuarios/{diagnostics.auth.uid}</span> no existe con{' '}
+                    <span className="font-mono">isActive: true</span> y{' '}
+                    <span className="font-mono">isSuperUser: true</span>, las reglas{' '}
+                    <span className="font-mono">database.rules.json</span> rechazarán la lectura con{' '}
+                    <span className="font-mono">PERMISSION_DENIED</span>.
+                  </div>
+                </div>
+              )}
+              {diagnostics.benchListener.error && (
+                <div className="text-[11px] bg-rose-950/50 border border-rose-700/60 text-rose-200 rounded-lg px-3 py-2 font-mono break-all">
+                  <strong className="text-rose-300">Error /{BENCH_TELEMETRY_PATH}:</strong>{' '}
+                  {diagnostics.benchListener.errorCode ? `[${diagnostics.benchListener.errorCode}] ` : ''}
+                  {diagnostics.benchListener.error}
+                </div>
+              )}
+              {diagnostics.devicesListener.error && (
+                <div className="text-[11px] bg-rose-950/50 border border-rose-700/60 text-rose-200 rounded-lg px-3 py-2 font-mono break-all">
+                  <strong className="text-rose-300">Error /dispositivos:</strong>{' '}
+                  {diagnostics.devicesListener.error}
+                </div>
+              )}
+              {diagnostics.historyListener.lastError && (
+                <div className="text-[11px] bg-rose-950/50 border border-rose-700/60 text-rose-200 rounded-lg px-3 py-2 font-mono break-all">
+                  <strong className="text-rose-300">Error /{BENCH_HISTORY_PATH}:</strong>{' '}
+                  {diagnostics.historyListener.lastError}
+                </div>
+              )}
+              {diagnostics.auth.profileReadError && (
+                <div className="text-[11px] bg-amber-950/40 border border-amber-700/50 text-amber-200 rounded-lg px-3 py-2 font-mono break-all">
+                  <strong className="text-amber-300">Perfil /usuarios/&#123;uid&#125;:</strong>{' '}
+                  {diagnostics.auth.profileReadError}
+                </div>
+              )}
+            </div>
+          )}
+
+          {/* Grid de estado de sesión Auth, suscripción /diagnostico/esp32_p087 y decisión de fusión */}
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-3 text-[11px] font-mono">
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+              <p className="text-[10px] font-bold uppercase text-purple-300 mb-1">
+                1. Sesión Firebase Auth &amp; Rol
+              </p>
+              <p className="text-slate-300 truncate">
+                UID: <span className="text-white">{diagnostics.auth.uid || 'Sin sesión Auth'}</span>
+              </p>
+              <p className="text-slate-300 truncate">
+                Email: <span className="text-white">{diagnostics.auth.email || '—'}</span>
+              </p>
+              <p className="text-slate-300">
+                email_verified:{' '}
+                <span className={diagnostics.auth.emailVerified ? 'text-emerald-400 font-bold' : 'text-amber-400 font-bold'}>
+                  {String(diagnostics.auth.emailVerified)}
+                </span>
+              </p>
+              <p className="text-slate-300">
+                Rol UI: <span className="text-purple-300">{currentUser?.role}</span>
+                {diagnostics.auth.profileNodeExists !== null && (
+                  <span className="text-slate-400">
+                    {' '}
+                    · /usuarios/&#123;uid&#125;: {diagnostics.auth.profileNodeExists ? 'OK' : 'NO EXISTE'}
+                  </span>
+                )}
+              </p>
+            </div>
+
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+              <p className="text-[10px] font-bold uppercase text-cyan-300 mb-1">
+                2. Listener /{BENCH_TELEMETRY_PATH}
+              </p>
+              <p className="text-slate-300 flex items-center gap-1.5">
+                Estado:{' '}
+                <span
+                  className={
+                    diagnostics.benchListener.status === 'ok'
+                      ? 'text-emerald-400 font-bold'
+                      : diagnostics.benchListener.status === 'error'
+                      ? 'text-rose-400 font-bold'
+                      : 'text-amber-300 font-bold'
+                  }
+                >
+                  {diagnostics.benchListener.status.toUpperCase()}
+                </span>
+                {diagnostics.benchListener.status === 'ok' && (
+                  <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+                )}
+              </p>
+              <p className="text-slate-300">
+                last_update_server:{' '}
+                <span className="text-white">
+                  {diagnostics.benchListener.normalizedServerTs || '—'}
+                </span>
+              </p>
+              {diagnostics.benchListener.rawPayload ? (
+                <p className="text-slate-400 text-[10px] leading-snug">
+                  CO={String(diagnostics.benchListener.rawPayload.CO ?? '—')} · PM2_5=
+                  {String(diagnostics.benchListener.rawPayload.PM2_5 ?? '—')} · T=
+                  {String(diagnostics.benchListener.rawPayload.temperatura ?? '—')} · H=
+                  {String(diagnostics.benchListener.rawPayload.humedad ?? '—')} · origen=
+                  {String(diagnostics.benchListener.rawPayload.origen ?? '—')}
+                </p>
+              ) : (
+                <p className="text-slate-500 text-[10px]">Sin payload recibido en memoria.</p>
+              )}
+            </div>
+
+            <div className="bg-slate-900/80 border border-slate-800 rounded-lg p-3 space-y-1">
+              <p className="text-[10px] font-bold uppercase text-emerald-300 mb-1">
+                3. Fusión sobre {PHYSICAL_NODE_DEVICE_ID}
+              </p>
+              <p className="text-slate-300">
+                Fusión aplicada:{' '}
+                <span className={diagnostics.mergeDecision.applied ? 'text-emerald-400 font-bold' : 'text-amber-300 font-bold'}>
+                  {diagnostics.mergeDecision.applied ? 'SÍ (Banco activo)' : 'NO'}
+                </span>
+              </p>
+              <p className="text-slate-300">
+                Conectividad:{' '}
+                <span className={connectivity.isOnline ? 'text-emerald-400 font-bold' : 'text-rose-400 font-bold'}>
+                  {connectivity.isOnline ? 'ONLINE' : 'OFFLINE'}
+                </span>{' '}
+                (Δ={connectivity.diffSeconds}s / límite {connectivity.timeoutSeconds}s)
+              </p>
+              <p className="text-slate-400 text-[10px] leading-snug">
+                Motivo: {diagnostics.mergeDecision.reason}
+              </p>
+              <p className="text-slate-500 text-[10px]">
+                Historial banco: {diagnostics.historyListener.benchPointsCount} · Legado:{' '}
+                {diagnostics.historyListener.legacyPointsCount}
+              </p>
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 };

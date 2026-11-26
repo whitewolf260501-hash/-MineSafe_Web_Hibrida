@@ -96,7 +96,13 @@ import {
 
 export { createEmptyTelemetryVariables, resolveScopedCurrentSite };
 
+import { onAuthStateChanged } from 'firebase/auth';
 import { 
+  APP_BUILD_VERSION,
+  auth,
+  getEstimatedServerNowMs,
+  startServerTimeOffsetSync,
+  syncAuthStateIntoBenchDiagnostics,
   testConnection, 
   subscribeToRTDBConnectionState,
   subscribeToRTDBDevicesRaw,
@@ -314,9 +320,28 @@ export default function App({
   const lastActivityRef = React.useRef<number>(Date.now());
   const inactivityLoggedOutRef = React.useRef<boolean>(false);
 
+  const [authSessionUid, setAuthSessionUid] = useState<string>(() => auth.currentUser?.uid || '');
+  const [authSessionReady, setAuthSessionReady] = useState<boolean>(() => Boolean(auth.currentUser));
+  const [telemetryReconnectNonce, setTelemetryReconnectNonce] = useState<number>(0);
+
   useEffect(() => {
     setCurrentUser(authenticatedUser);
   }, [authenticatedUser]);
+
+  // Asegurar que todas las suscripciones RTDB inicien después de confirmar la sesión Firebase Auth
+  useEffect(() => {
+    startServerTimeOffsetSync();
+    const unsub = onAuthStateChanged(auth, (fbUser) => {
+      syncAuthStateIntoBenchDiagnostics(fbUser);
+      setAuthSessionUid(fbUser?.uid || '');
+      setAuthSessionReady(true);
+    });
+    return () => unsub();
+  }, []);
+
+  const handleReconnectTelemetry = useCallback(() => {
+    setTelemetryReconnectNonce((prev) => prev + 1);
+  }, []);
 
   const handleToggleTheme = onToggleTheme;
 
@@ -501,10 +526,11 @@ export default function App({
     () => ({
       role: currentUser?.role,
       uid: currentUser?.id,
+      authUid: authSessionUid || undefined,
       organizationId: effectiveOrgId,
       deviceIds: scopedDeviceIdsKey ? scopedDeviceIdsKey.split(',').filter(Boolean) : [],
     }),
-    [currentUser?.role, currentUser?.id, effectiveOrgId, scopedDeviceIdsKey]
+    [currentUser?.role, currentUser?.id, authSessionUid, effectiveOrgId, scopedDeviceIdsKey]
   );
 
   const recomputeDevicesFromRaw = useCallback(() => {
@@ -515,7 +541,8 @@ export default function App({
       return;
     }
     const timeout = timeoutSecondsRef.current || 20;
-    const mapped = keys.map((key) => mapRTDBDeviceToSensorDevice(key, raw[key], timeout));
+    const serverNowMs = getEstimatedServerNowMs();
+    const mapped = keys.map((key) => mapRTDBDeviceToSensorDevice(key, raw[key], timeout, serverNowMs));
     setDevices(mapped);
     mapped.forEach((dev) => {
       recordTelemetryHistoryPoint(dev).catch(() => {});
@@ -615,8 +642,11 @@ export default function App({
     };
   }, [currentUser?.id, currentUser?.role, currentUser?.status]);
 
-  // Suscripciones operativas en RTDB estrictamente acotadas por rol y organización activa
+  // Suscripciones operativas en RTDB estrictamente acotadas por rol, organización y sesión Auth lista
   useEffect(() => {
+    if (!authSessionReady) {
+      return;
+    }
     const unsubDevices = subscribeToRTDBDevicesRaw((incoming) => {
       rawDevicesRef.current = incoming || {};
       setIsFirebaseConnected(true);
@@ -736,7 +766,7 @@ export default function App({
       unsubSites();
       unsubCrews();
     };
-  }, [subscriptionScope, recomputeDevicesFromRaw, onLogoutRequest]);
+  }, [authSessionReady, subscriptionScope, recomputeDevicesFromRaw, onLogoutRequest, telemetryReconnectNonce]);
 
   // Lista controlada de dispositivos visibles (filtrada además por organización activa y excluyendo inventario sin asignar)
   const visibleDevices = useMemo<SensorDevice[]>(() => {
@@ -1065,6 +1095,18 @@ export default function App({
         return [{ timestamp: 'Actual', value: Number((liveVal || 0).toFixed(1)) }];
       };
 
+      const isBench = targetDev.isBenchTelemetry === true;
+      const coSaturated = coVal === 4095;
+      const pmSaturated = pmVal === 4095;
+      const pmDisplayVal =
+        typeof targetDev.rawPM25 === 'number' && Number.isFinite(targetDev.rawPM25)
+          ? Number(targetDev.rawPM25.toFixed(1))
+          : pmVal;
+      const initialAgeSeconds =
+        targetDev.lastUpdateServer && targetDev.lastUpdateServer > 0
+          ? Math.max(0, Math.floor((getEstimatedServerNowMs() - targetDev.lastUpdateServer) / 1000))
+          : 0;
+
       setVariables([
         {
           id: 'temp',
@@ -1089,8 +1131,8 @@ export default function App({
             : 'Estable',
           thresholdMin: m.tempMin,
           thresholdMax: m.tempPreventivo,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
           historical: buildRealHistory((p) => p.temperatura, tempVal),
         },
         {
@@ -1116,8 +1158,8 @@ export default function App({
             : 'Normal',
           thresholdMin: m.humMin,
           thresholdMax: m.humCritico,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
           historical: buildRealHistory((p) => p.humedad, humVal),
         },
         {
@@ -1126,9 +1168,16 @@ export default function App({
           shortName: 'Gas MQ-2',
           value: coVal,
           unit: 'ADC',
-          trend: !faultSet.has('CO') && coVal >= m.coPreventivo ? 'alza critica' : 'estable',
+          trend:
+            !faultSet.has('CO') && !coSaturated && !isBench && coVal >= m.coPreventivo
+              ? 'alza critica'
+              : 'estable',
           status: faultSet.has('CO')
             ? 'desconectado'
+            : coSaturated
+            ? 'advertencia'
+            : isBench
+            ? 'normal'
             : coVal >= m.coCritico
             ? 'critico'
             : coVal >= m.coAdvertencia
@@ -1138,6 +1187,10 @@ export default function App({
             : 'normal',
           statusLabel: faultSet.has('CO')
             ? 'Sensor en Falla'
+            : coSaturated
+            ? 'Saturación ADC'
+            : isBench
+            ? 'Banco (raw)'
             : coVal >= m.coCritico
             ? 'Crítico'
             : coVal >= m.coAdvertencia
@@ -1147,38 +1200,49 @@ export default function App({
             : 'Seguro',
           thresholdMin: 0,
           thresholdMax: m.coAdvertencia,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
           historical: buildRealHistory((p) => p.co, coVal),
         },
         {
           id: 'lux',
           name: 'MATERIAL PARTICULADO (PM2.5 µg/m³)',
           shortName: 'Polvo PM2.5',
-          value: pmVal,
+          value: pmDisplayVal,
           unit: 'µg/m³',
-          trend: !faultSet.has('PM2_5') && pmVal >= m.pm25Preventivo ? 'alza critica' : 'estable',
+          trend:
+            !faultSet.has('PM2_5') && !pmSaturated && !isBench && pmDisplayVal >= m.pm25Preventivo
+              ? 'alza critica'
+              : 'estable',
           status: faultSet.has('PM2_5')
             ? 'desconectado'
-            : pmVal >= m.pm25Critico
-            ? 'critico'
-            : pmVal >= m.pm25Advertencia
+            : pmSaturated
             ? 'advertencia'
-            : pmVal >= m.pm25Preventivo
+            : isBench
+            ? 'normal'
+            : pmDisplayVal >= m.pm25Critico
+            ? 'critico'
+            : pmDisplayVal >= m.pm25Advertencia
+            ? 'advertencia'
+            : pmDisplayVal >= m.pm25Preventivo
             ? 'preventivo'
             : 'normal',
           statusLabel: faultSet.has('PM2_5')
             ? 'Sensor en Falla'
-            : pmVal >= m.pm25Critico
+            : pmSaturated
+            ? 'Saturación ADC'
+            : isBench
+            ? 'Banco OPEN-SMART'
+            : pmDisplayVal >= m.pm25Critico
             ? 'Polvo Crítico'
-            : pmVal >= m.pm25Preventivo
+            : pmDisplayVal >= m.pm25Preventivo
             ? 'Preventivo'
             : 'Norma OK',
           thresholdMin: 0,
           thresholdMax: m.pm25Advertencia,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
-          historical: buildRealHistory((p) => p.pm25, pmVal),
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
+          historical: buildRealHistory((p) => p.pm25, pmDisplayVal),
         },
         {
           id: 'kwh',
@@ -1191,8 +1255,8 @@ export default function App({
           statusLabel: batVal >= m.batteryMin ? 'Óptima' : 'Recargar',
           thresholdMin: m.batteryMin,
           thresholdMax: 100,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
           historical: [{ timestamp: 'Actual', value: batVal }],
         },
         {
@@ -1206,8 +1270,8 @@ export default function App({
           statusLabel: airVal === 0 ? 'Sin sensor flujo' : airVal < m.airFlowMin ? 'Flujo Insuficiente' : 'Circulación Activa',
           thresholdMin: m.airFlowMin,
           thresholdMax: m.airFlowMax,
-          lastUpdateSeconds: 0,
-          isSimulated: false,
+          lastUpdateSeconds: initialAgeSeconds,
+          isSimulated: Boolean(targetDev.isSimulated),
           historical: [{ timestamp: 'Actual', value: airVal }],
         },
       ]);
@@ -2980,6 +3044,7 @@ export default function App({
                 onChangeUserModal={() => setShowLoginModal(true)}
                 platformConfig={platformConfig}
                 isFirebaseConnected={isFirebaseConnected}
+                onReconnectTelemetry={handleReconnectTelemetry}
               />
             )}
 
@@ -3465,6 +3530,9 @@ export default function App({
         <div className="max-w-[1850px] w-full mx-auto flex flex-col md:flex-row items-center justify-between gap-4">
           <div className="flex items-center gap-2 flex-wrap justify-center">
             <span className="font-bold text-slate-400">MineSafe IoT</span>
+            <span className="px-1.5 py-0.5 rounded bg-slate-900 border border-slate-700 text-[10px] font-mono text-cyan-300">
+              Build {APP_BUILD_VERSION}
+            </span>
             <span>·</span>
             <span>Sistema de Monitoreo y Alertas para Seguridad Minera</span>
           </div>

@@ -164,6 +164,7 @@ import {
   subscribeToSecurityAuditEvents,
   subscribeToCybersecurityIncidents,
   recordUserLegalConsentInRTDB,
+  PHYSICAL_NODE_DEVICE_ID,
   ExperimentalBenchV2State,
   canAccessExperimentalBenchDevice,
   createInitialExperimentalBenchV2State,
@@ -171,6 +172,7 @@ import {
   isExperimentalBenchDevice,
   isSimulatedDevice,
   subscribeToExperimentalBenchV2,
+  watchDeviceShutdownAck,
 } from './services/firebase';
 
 import { soundAlert } from './services/audioAlert';
@@ -355,11 +357,38 @@ export default function App({
 
   const handleToggleTheme = onToggleTheme;
 
+  const [alarmShutdownState, setAlarmShutdownState] = useState<
+    'idle' | 'sending' | 'waiting_ack' | 'confirmed' | 'no_ack'
+  >('idle');
+  const shutdownAckUnsubRef = React.useRef<(() => void) | null>(null);
+  const shutdownAckTimerRef = React.useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const clearShutdownAckWatchers = useCallback(() => {
+    if (shutdownAckUnsubRef.current) {
+      shutdownAckUnsubRef.current();
+      shutdownAckUnsubRef.current = null;
+    }
+    if (shutdownAckTimerRef.current) {
+      clearTimeout(shutdownAckTimerRef.current);
+      shutdownAckTimerRef.current = null;
+    }
+  }, []);
+
+  useEffect(() => {
+    return () => clearShutdownAckWatchers();
+  }, [clearShutdownAckWatchers]);
+
+  useEffect(() => {
+    if (isAlarmActive || isDrillActive) {
+      setAlarmShutdownState('idle');
+    }
+  }, [isAlarmActive, isDrillActive]);
+
   const showAlarmFeedback = useCallback((message: string, tone: 'error' | 'success') => {
     setAlarmFeedback({ message, tone });
     setTimeout(() => {
       setAlarmFeedback((prev) => (prev?.message === message ? null : prev));
-    }, 5000);
+    }, tone === 'error' ? 12000 : 8000);
   }, []);
 
   // Keep timeout ref synchronized with SuperAdmin platform metrics
@@ -1721,7 +1750,7 @@ export default function App({
     [currentUser, collectPropagationDeviceIds, isDrillActive, effectiveOrgId, showAlarmFeedback]
   );
 
-  const handleShutdownAlarmCompletely = useCallback(async () => {
+  const handleShutdownAlarmCompletely = useCallback(async (): Promise<boolean> => {
     const access = canControlMineAlarm(currentUser);
     if (!access.allowed) {
       showAlarmFeedback(
@@ -1729,12 +1758,36 @@ export default function App({
           'Acceso denegado: Solo la Administración de Empresa o MineSafe puede apagar la alarma.',
         'error'
       );
-      return;
+      return false;
     }
 
     const wasDrill = isDrillActive;
-    const targetId = activeTelemetryDeviceId || visibleDevices[0]?.id || 'device_38A839E81F84';
-    const propagationIds = collectPropagationDeviceIds(targetId);
+    const isGlobal = isGlobalMineSafeAdmin(currentUser.role);
+    const activeOperational = operationalVisibleDevices.find((d) => d.id === activeTelemetryDeviceId);
+    const targetId =
+      activeOperational?.id ||
+      operationalVisibleDevices[0]?.id ||
+      (isGlobal ? PHYSICAL_NODE_DEVICE_ID : '') ||
+      activeTelemetryDeviceId ||
+      visibleDevices[0]?.id ||
+      PHYSICAL_NODE_DEVICE_ID;
+
+    const allTargetSet = new Set<string>(collectPropagationDeviceIds(targetId));
+    operationalVisibleDevices.forEach((d) => {
+      if (d.id) allTargetSet.add(d.id);
+    });
+    if (isGlobal) {
+      allTargetSet.add(PHYSICAL_NODE_DEVICE_ID);
+      devices.forEach((d) => {
+        if (d.id && !isExperimentalBenchDevice(d) && !isSimulatedDevice(d)) {
+          allTargetSet.add(d.id);
+        }
+      });
+    }
+    const propagationIds = filterOutExperimentalBenchDeviceIds(Array.from(allTargetSet));
+
+    clearShutdownAckWatchers();
+    setAlarmShutdownState('sending');
 
     try {
       await shutdownAlarmCompletelyInRTDB(targetId, currentUser, {
@@ -1771,14 +1824,45 @@ export default function App({
           : d.metrics,
       } : d));
 
+      const targetSummary = propagationIds.join(', ');
+      setAlarmShutdownState('waiting_ack');
       showAlarmFeedback(
-        `Alarma y señalización (solo simulaciones) detenidas y propagadas a ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        `Comando APAGAR enviado a Firebase (${targetSummary}). Esperando confirmación PROCESADO_OFF del ESP32...`,
         'success'
       );
+
+      shutdownAckUnsubRef.current = watchDeviceShutdownAck(propagationIds, (ackedId) => {
+        if (shutdownAckTimerRef.current) {
+          clearTimeout(shutdownAckTimerRef.current);
+          shutdownAckTimerRef.current = null;
+        }
+        setAlarmShutdownState('confirmed');
+        showAlarmFeedback(
+          `Alarma apagada y confirmada por hardware (${ackedId}: PROCESADO_OFF).`,
+          'success'
+        );
+      });
+
+      shutdownAckTimerRef.current = setTimeout(() => {
+        setAlarmShutdownState((prev) => {
+          if (prev === 'waiting_ack') {
+            showAlarmFeedback(
+              `APAGAR guardado en Firebase (/dispositivos/${targetId}/comando_web), pero el ESP32 no respondió PROCESADO_OFF en 5s. Verifica Wi-Fi/Gateway, que el firmware escuche comando_web, o presiona BOOT en la placa.`,
+              'error'
+            );
+            return 'no_ack';
+          }
+          return prev;
+        });
+      }, 5000);
+
+      return true;
     } catch (err: any) {
+      setAlarmShutdownState('idle');
       showAlarmFeedback(err?.message || 'Error al enviar comando de apagado de alarma.', 'error');
+      return false;
     }
-  }, [currentUser, isDrillActive, activeTelemetryDeviceId, visibleDevices, collectPropagationDeviceIds, effectiveOrgId, showAlarmFeedback]);
+  }, [currentUser, isDrillActive, activeTelemetryDeviceId, operationalVisibleDevices, visibleDevices, devices, collectPropagationDeviceIds, effectiveOrgId, showAlarmFeedback, clearShutdownAckWatchers]);
 
   const handleResetPageLevels = useCallback(async () => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
@@ -1951,50 +2035,79 @@ export default function App({
     }
   }, [currentUser, visibleDevices, activeTelemetryDeviceId, collectPropagationDeviceIds, effectiveOrgId, showAlarmFeedback]);
 
-  const handleToggleAlarm = useCallback(async () => {
-    const dev = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
-    const targetId = activeTelemetryDeviceId || dev?.id;
-    const currentlyActive = Boolean(isAlarmActive || dev?.alarmaActiva);
-
-    if (currentlyActive) {
-      await handleShutdownAlarmCompletely();
-      return;
-    }
-
+  const handleActivateAlarmCompletely = useCallback(async (): Promise<boolean> => {
     const access = canControlMineAlarm(currentUser);
     if (!access.allowed) {
       showAlarmFeedback(
         access.reason || 'Acceso denegado: Solo la Administración de Empresa o MineSafe puede activar la alarma.',
         'error'
       );
-      return;
+      return false;
     }
+
+    const isGlobal = isGlobalMineSafeAdmin(currentUser.role);
+    const activeOperational = operationalVisibleDevices.find((d) => d.id === activeTelemetryDeviceId);
+    const targetId =
+      activeOperational?.id ||
+      operationalVisibleDevices[0]?.id ||
+      (isGlobal ? PHYSICAL_NODE_DEVICE_ID : '') ||
+      activeTelemetryDeviceId ||
+      visibleDevices[0]?.id;
+
     if (!targetId) {
       showAlarmFeedback('No hay ningún dispositivo asignado en esta empresa para activar la alarma.', 'error');
-      return;
+      return false;
     }
 
-    const propagationIds = collectPropagationDeviceIds(targetId);
+    const allTargetSet = new Set<string>(collectPropagationDeviceIds(targetId));
+    operationalVisibleDevices.forEach((d) => {
+      if (d.id) allTargetSet.add(d.id);
+    });
+    if (isGlobal) {
+      allTargetSet.add(PHYSICAL_NODE_DEVICE_ID);
+      devices.forEach((d) => {
+        if (d.id && !isExperimentalBenchDevice(d) && !isSimulatedDevice(d)) {
+          allTargetSet.add(d.id);
+        }
+      });
+    }
+    const propagationIds = filterOutExperimentalBenchDeviceIds(Array.from(allTargetSet));
 
+    clearShutdownAckWatchers();
     try {
       await toggleGatewayAlarmInRTDB(targetId, true, currentUser, {
         targetDeviceIds: propagationIds,
+        organizationId: effectiveOrgId === 'all' ? currentUser.organizationId : effectiveOrgId,
       });
       soundAlert.setMuted(false);
       soundAlert.startContinuousAlarm();
       setIsAlarmActive(true);
       setIsLightActive(true);
       setDismissEmergencyBanner(false);
+      setAlarmShutdownState('idle');
       const propSet = new Set(propagationIds);
       setDevices((prev) => prev.map((d) => (propSet.has(d.id) ? { ...d, alarmaActiva: true } : d)));
       showAlarmFeedback(
-        `Señalización de simulación (Audio I2S / Matriz LED) activada en ${propagationIds.length} ${propagationIds.length === 1 ? 'equipo' : 'equipos'}.`,
+        `Alarma encendida: comando ENCENDER enviado a ${propagationIds.join(', ')}.`,
         'success'
       );
+      return true;
     } catch (err: any) {
       showAlarmFeedback(err?.message || 'Error al activar la alarma en los nodos.', 'error');
+      return false;
     }
-  }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, currentUser, collectPropagationDeviceIds, showAlarmFeedback, handleShutdownAlarmCompletely]);
+  }, [currentUser, operationalVisibleDevices, activeTelemetryDeviceId, visibleDevices, devices, collectPropagationDeviceIds, effectiveOrgId, clearShutdownAckWatchers, showAlarmFeedback]);
+
+  const handleToggleAlarm = useCallback(async () => {
+    const dev = visibleDevices.find(d => d.id === activeTelemetryDeviceId) || visibleDevices[0];
+    const currentlyActive = Boolean(isAlarmActive || dev?.alarmaActiva);
+
+    if (currentlyActive) {
+      await handleShutdownAlarmCompletely();
+      return;
+    }
+    await handleActivateAlarmCompletely();
+  }, [visibleDevices, activeTelemetryDeviceId, isAlarmActive, handleShutdownAlarmCompletely, handleActivateAlarmCompletely]);
 
   const handleToggleLight = useCallback(async () => {
     if (!currentUser || !isAnyAdminRole(currentUser.role)) {
@@ -2895,8 +3008,15 @@ export default function App({
         onToggleSimulation={() => setIsSimulating(!isSimulating)}
         isFirebaseConnected={isFirebaseConnected}
         onResetPageLevels={handleResetPageLevels}
-        isAlarmActive={Boolean(isAlarmActive || activeDevice?.alarmaActiva)}
+        isAlarmActive={Boolean(
+          isAlarmActive ||
+            activeDevice?.alarmaActiva ||
+            operationalVisibleDevices.some((d) => d.alarmaActiva)
+        )}
         onToggleAlarm={handleToggleAlarm}
+        onShutdownAlarmCompletely={handleShutdownAlarmCompletely}
+        onActivateAlarmCompletely={handleActivateAlarmCompletely}
+        alarmShutdownState={alarmShutdownState}
         isLightActive={isLightActive}
         onToggleLight={handleToggleLight}
         isDrillActive={isDrillActive}

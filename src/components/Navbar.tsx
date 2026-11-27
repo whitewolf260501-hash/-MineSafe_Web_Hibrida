@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import { 
   ShieldAlert, 
   Activity, 
@@ -21,6 +21,8 @@ import {
   LogOut,
   BellRing,
   BellOff,
+  CheckCircle2,
+  Loader2,
   Sliders,
   Sun,
   Moon,
@@ -60,6 +62,9 @@ interface NavbarProps {
   onResetPageLevels?: () => void;
   isAlarmActive?: boolean;
   onToggleAlarm?: () => void;
+  onShutdownAlarmCompletely?: () => Promise<boolean | void> | boolean | void;
+  onActivateAlarmCompletely?: () => Promise<boolean | void> | boolean | void;
+  alarmShutdownState?: 'idle' | 'sending' | 'waiting_ack' | 'confirmed' | 'no_ack';
   isLightActive?: boolean;
   onToggleLight?: () => void;
   isDrillActive?: boolean;
@@ -87,6 +92,9 @@ export const Navbar: React.FC<NavbarProps> = ({
   isFirebaseConnected = true,
   isAlarmActive = false,
   onToggleAlarm,
+  onShutdownAlarmCompletely,
+  onActivateAlarmCompletely,
+  alarmShutdownState,
   isDrillActive = false,
   platformConfig,
   theme = 'dark',
@@ -100,10 +108,55 @@ export const Navbar: React.FC<NavbarProps> = ({
 }) => {
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [isMuted, setIsMuted] = useState(soundAlert.getMutedState());
+  const [localAlarmSilenced, setLocalAlarmSilenced] = useState(false);
+  const [isShuttingDownAlarm, setIsShuttingDownAlarm] = useState(false);
 
   const isSuperAdmin = currentUser.role === 'superadmin';
   const isGlobalAdmin = isGlobalMineSafeAdmin(currentUser.role);
   const canControlAlarm = canControlMineAlarm(currentUser).allowed;
+
+  useEffect(() => {
+    if (isAlarmActive || isDrillActive) {
+      setLocalAlarmSilenced(false);
+    }
+  }, [isAlarmActive, isDrillActive]);
+
+  const effectiveShutdownState: 'idle' | 'sending' | 'waiting_ack' | 'confirmed' | 'no_ack' =
+    isShuttingDownAlarm
+      ? 'sending'
+      : alarmShutdownState
+        ? alarmShutdownState
+        : localAlarmSilenced && !isAlarmActive && !isDrillActive
+          ? 'confirmed'
+          : 'idle';
+
+  const handleAlarmControlClick = async () => {
+    if (!canControlAlarm || isShuttingDownAlarm) return;
+    setIsShuttingDownAlarm(true);
+    try {
+      if (effectiveShutdownState === 'confirmed') {
+        if (onActivateAlarmCompletely) {
+          const ok = await onActivateAlarmCompletely();
+          if (ok !== false) {
+            setLocalAlarmSilenced(false);
+          }
+        } else if (onToggleAlarm) {
+          await Promise.resolve(onToggleAlarm());
+          setLocalAlarmSilenced(false);
+        }
+      } else if (onShutdownAlarmCompletely) {
+        const ok = await onShutdownAlarmCompletely();
+        if (ok !== false) {
+          setLocalAlarmSilenced(true);
+        }
+      } else if (onToggleAlarm) {
+        await Promise.resolve(onToggleAlarm());
+        setLocalAlarmSilenced(true);
+      }
+    } finally {
+      setIsShuttingDownAlarm(false);
+    }
+  };
 
   const handleToggleSound = () => {
     if (isAlarmActive && !isMuted && !canControlAlarm) {
@@ -313,28 +366,52 @@ export const Navbar: React.FC<NavbarProps> = ({
                 {isMuted ? <VolumeX className="w-3.5 h-3.5" /> : <Volume2 className="w-3.5 h-3.5" />}
               </button>
 
-              {/* Quick Toggle Alarm Siren + Automatic Beacon Button (Admin de Empresa / SuperAdmin / Admin MineSafe) */}
-              {canControlAlarm && onToggleAlarm && (
+              {/* Dedicated Red Shutdown Alarm Button -> Amber while waiting/no ACK -> Emerald Green (click to re-enable ENCENDER) */}
+              {canControlAlarm && (onShutdownAlarmCompletely || onToggleAlarm) && (
                 <button
-                  onClick={onToggleAlarm}
-                  className={`px-2 py-1 rounded text-xs flex items-center gap-1 transition-colors shrink-0 ${
-                    isAlarmActive
-                      ? 'bg-rose-600 hover:bg-rose-500 text-white animate-pulse font-bold shadow-sm shadow-rose-950'
-                      : 'text-slate-300 hover:text-rose-300 hover:bg-slate-800'
+                  type="button"
+                  onClick={handleAlarmControlClick}
+                  disabled={effectiveShutdownState === 'sending'}
+                  className={`px-2.5 py-1 rounded text-xs flex items-center gap-1.5 font-bold transition-all whitespace-nowrap shrink-0 cursor-pointer ${
+                    effectiveShutdownState === 'confirmed'
+                      ? 'bg-emerald-600 hover:bg-emerald-500 text-white shadow-sm shadow-emerald-950/40'
+                      : effectiveShutdownState === 'waiting_ack' || effectiveShutdownState === 'no_ack'
+                        ? 'bg-amber-600 hover:bg-amber-500 text-white shadow-sm shadow-amber-950/40'
+                        : isAlarmActive || isDrillActive
+                          ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse shadow-md shadow-red-950/60 ring-2 ring-red-400/70'
+                          : 'bg-red-600 hover:bg-red-500 text-white shadow-sm shadow-red-950/40'
                   }`}
                   title={
-                    isAlarmActive
-                      ? 'Alarma y baliza activas - Clic para apagar y propagar a todos los nodos'
-                      : 'Alarma inactiva - Clic para activar sirena y baliza en nodos vinculados'
+                    effectiveShutdownState === 'confirmed'
+                      ? 'Alarma apagada (ESP32 confirmó PROCESADO_OFF) - Clic para volver a ENCENDER la alarma'
+                      : effectiveShutdownState === 'waiting_ack'
+                        ? 'Comando APAGAR enviado a Firebase - Esperando confirmación PROCESADO_OFF del ESP32'
+                        : effectiveShutdownState === 'no_ack'
+                          ? 'APAGAR guardado en Firebase, pero el ESP32 no confirmó PROCESADO_OFF - Clic para reintentar'
+                          : 'Enviar comando APAGAR a la alarma del dispositivo ESP32'
                   }
                 >
-                  {isAlarmActive ? (
-                    <BellRing className="w-3.5 h-3.5 animate-bounce" />
+                  {effectiveShutdownState === 'sending' || effectiveShutdownState === 'waiting_ack' ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : effectiveShutdownState === 'confirmed' ? (
+                    <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                  ) : effectiveShutdownState === 'no_ack' ? (
+                    <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                  ) : isAlarmActive || isDrillActive ? (
+                    <BellRing className="w-3.5 h-3.5 animate-bounce shrink-0" />
                   ) : (
-                    <BellOff className="w-3.5 h-3.5" />
+                    <BellOff className="w-3.5 h-3.5 shrink-0" />
                   )}
                   <span className="text-[11px] font-bold">
-                    {isAlarmActive ? 'Apagar Alarma' : 'Alarma'}
+                    {effectiveShutdownState === 'sending'
+                      ? 'Procesando...'
+                      : effectiveShutdownState === 'waiting_ack'
+                        ? 'Esperando ESP32...'
+                        : effectiveShutdownState === 'no_ack'
+                          ? 'Enviado · Sin ACK'
+                          : effectiveShutdownState === 'confirmed'
+                            ? 'Encender Alarma'
+                            : 'Apagar Alarma'}
                   </span>
                 </button>
               )}
@@ -480,6 +557,42 @@ export const Navbar: React.FC<NavbarProps> = ({
 
           {/* Mobile menu trigger button */}
           <div className="flex md:hidden items-center gap-1.5">
+            {canControlAlarm && (onShutdownAlarmCompletely || onToggleAlarm) && (
+              <button
+                type="button"
+                onClick={handleAlarmControlClick}
+                disabled={effectiveShutdownState === 'sending'}
+                className={`px-2 py-1.5 rounded-lg text-[11px] font-bold flex items-center gap-1 transition-all whitespace-nowrap shrink-0 ${
+                  effectiveShutdownState === 'confirmed'
+                    ? 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                    : effectiveShutdownState === 'waiting_ack' || effectiveShutdownState === 'no_ack'
+                      ? 'bg-amber-600 hover:bg-amber-500 text-white'
+                      : isAlarmActive || isDrillActive
+                        ? 'bg-red-600 hover:bg-red-500 text-white animate-pulse ring-1 ring-red-400'
+                        : 'bg-red-600 hover:bg-red-500 text-white'
+                }`}
+                title={effectiveShutdownState === 'confirmed' ? 'Encender alarma del dispositivo' : 'Apagar alarma del dispositivo'}
+              >
+                {effectiveShutdownState === 'sending' || effectiveShutdownState === 'waiting_ack' ? (
+                  <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                ) : effectiveShutdownState === 'confirmed' ? (
+                  <CheckCircle2 className="w-3.5 h-3.5 shrink-0" />
+                ) : effectiveShutdownState === 'no_ack' ? (
+                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                ) : (
+                  <BellOff className="w-3.5 h-3.5 shrink-0" />
+                )}
+                <span>
+                  {effectiveShutdownState === 'confirmed'
+                    ? 'Encender'
+                    : effectiveShutdownState === 'no_ack'
+                      ? 'Sin ACK'
+                      : effectiveShutdownState === 'waiting_ack'
+                        ? 'Enviado'
+                        : 'Apagar'}
+                </span>
+              </button>
+            )}
             {onOpenTypography && (
               <button
                 type="button"
@@ -662,6 +775,44 @@ export const Navbar: React.FC<NavbarProps> = ({
                 </button>
               )}
             </div>
+
+            {canControlAlarm && (onShutdownAlarmCompletely || onToggleAlarm) && (
+              <button
+                type="button"
+                onClick={handleAlarmControlClick}
+                disabled={effectiveShutdownState === 'sending'}
+                className={`w-full flex items-center justify-center gap-2 py-2.5 px-3 text-xs font-bold rounded-lg transition-all text-white ${
+                  effectiveShutdownState === 'confirmed'
+                    ? 'bg-emerald-600 hover:bg-emerald-500'
+                    : effectiveShutdownState === 'waiting_ack' || effectiveShutdownState === 'no_ack'
+                      ? 'bg-amber-600 hover:bg-amber-500'
+                      : isAlarmActive || isDrillActive
+                        ? 'bg-red-600 hover:bg-red-500 animate-pulse'
+                        : 'bg-red-600 hover:bg-red-500'
+                }`}
+              >
+                {effectiveShutdownState === 'sending' || effectiveShutdownState === 'waiting_ack' ? (
+                  <Loader2 className="w-4 h-4 animate-spin" />
+                ) : effectiveShutdownState === 'confirmed' ? (
+                  <CheckCircle2 className="w-4 h-4" />
+                ) : effectiveShutdownState === 'no_ack' ? (
+                  <AlertTriangle className="w-4 h-4" />
+                ) : (
+                  <BellOff className="w-4 h-4" />
+                )}
+                <span>
+                  {effectiveShutdownState === 'sending'
+                    ? 'Procesando Alarma...'
+                    : effectiveShutdownState === 'waiting_ack'
+                      ? 'Esperando confirmación ESP32...'
+                      : effectiveShutdownState === 'no_ack'
+                        ? 'APAGAR enviado · Sin ACK del ESP32'
+                        : effectiveShutdownState === 'confirmed'
+                          ? 'Alarma Apagada · Clic para Encender'
+                          : 'Apagar Alarma del Dispositivo'}
+                </span>
+              </button>
+            )}
 
             {onOpenTypography && (
               <button

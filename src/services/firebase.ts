@@ -4195,13 +4195,21 @@ export async function toggleGatewayAlarmInRTDB(
     filterOutExperimentalBenchDeviceIds([primaryId, ...(options?.targetDeviceIds || [])])
   );
 
+  const cmdStr = active ? 'ENCENDER' : 'APAGAR';
   await Promise.all(
-    Array.from(targetSet).map((id) =>
-      ensureValidDevicePayload(id, payload).catch((err) => {
-        if (id === primaryId) throw err;
-        console.warn(`No se pudo propagar comando de alarma a nodo subordinado ${id}:`, err);
-      })
-    )
+    Array.from(targetSet).map(async (id) => {
+      try {
+        await ensureValidDevicePayload(id, payload);
+        await set(ref(rtdb, `dispositivos/${id}/comando_web`), cmdStr).catch(() => {});
+      } catch (err) {
+        try {
+          await set(ref(rtdb, `dispositivos/${id}/comando_web`), cmdStr);
+        } catch (directErr) {
+          if (id === primaryId) throw err || directErr;
+          console.warn(`No se pudo propagar comando de alarma a nodo subordinado ${id}:`, err);
+        }
+      }
+    })
   );
 }
 
@@ -4250,12 +4258,19 @@ export async function shutdownAlarmCompletelyInRTDB(
     filterOutExperimentalBenchDeviceIds([primaryId, ...(options?.targetDeviceIds || [])])
   );
   await Promise.all(
-    Array.from(targetSet).map((id) =>
-      ensureValidDevicePayload(id, devPayload).catch((err) => {
-        if (id === primaryId) throw err;
-        console.warn(`No se pudo apagar nodo subordinado ${id}:`, err);
-      })
-    )
+    Array.from(targetSet).map(async (id) => {
+      try {
+        await ensureValidDevicePayload(id, devPayload);
+        await set(ref(rtdb, `dispositivos/${id}/comando_web`), 'APAGAR').catch(() => {});
+      } catch (err) {
+        try {
+          await set(ref(rtdb, `dispositivos/${id}/comando_web`), 'APAGAR');
+        } catch (directErr) {
+          if (id === primaryId) throw err || directErr;
+          console.warn(`No se pudo apagar nodo subordinado ${id}:`, err);
+        }
+      }
+    })
   );
 
   await update(ref(rtdb, `simulacro/${orgScopeId}`), {
@@ -4272,6 +4287,39 @@ export async function shutdownAlarmCompletelyInRTDB(
     detenidoPor: actorLabel,
     timestamp: now,
   }).catch(() => {});
+}
+
+export function watchDeviceShutdownAck(
+  deviceIds: string[],
+  onAck: (ackedDeviceId: string) => void
+): () => void {
+  const uniqueIds = Array.from(new Set(filterOutExperimentalBenchDeviceIds(deviceIds).filter(Boolean)));
+  if (uniqueIds.length === 0) return () => {};
+
+  let alreadyAcked = false;
+  const unsubs = uniqueIds.map((id) => {
+    const cmdRef = ref(rtdb, `dispositivos/${id}/comando_web`);
+    return onValue(
+      cmdRef,
+      (snap) => {
+        if (alreadyAcked) return;
+        const val = snap.val();
+        if (val === 'PROCESADO_OFF') {
+          alreadyAcked = true;
+          onAck(id);
+        }
+      },
+      () => {}
+    );
+  });
+
+  return () => {
+    unsubs.forEach((u) => {
+      try {
+        u();
+      } catch {}
+    });
+  };
 }
 
 export async function toggleGatewayLightInRTDB(

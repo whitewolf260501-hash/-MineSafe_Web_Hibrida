@@ -584,7 +584,8 @@ html.theme-light .from-amber-600.to-orange-700 * {
 
 html.theme-light .bg-cyan-600:disabled,
 html.theme-light .bg-emerald-600:disabled,
-html.theme-light .bg-rose-600:disabled {
+html.theme-light .bg-rose-600:disabled,
+html.theme-light .bg-red-600:disabled {
   opacity: 0.55;
 }
 

@@ -1843,11 +1843,29 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
     || data?.dispositivo?.nombreDispositivo 
     || (key === 'manual_temp_uid_01' ? 'device_38A839E81F84' : '');
 
+  const rawEmail = data?.email || `${key.toLowerCase().replace(/[^a-z0-9]/g, '')}@minesafe.cl`;
+  let resolvedConsentVersion: string | undefined =
+    typeof data?.legalConsentVersion === 'string' ? data.legalConsentVersion : undefined;
+  let resolvedConsentAcceptedAt: number | undefined =
+    typeof data?.legalConsentAcceptedAt === 'number' ? data.legalConsentAcceptedAt : undefined;
+
+  if (resolvedConsentVersion !== CURRENT_LEGAL_CONSENT_VERSION) {
+    const localReceipt = getLocalLegalConsentReceipt(
+      key,
+      rawEmail,
+      CURRENT_LEGAL_CONSENT_VERSION
+    );
+    if (localReceipt) {
+      resolvedConsentVersion = localReceipt.version;
+      resolvedConsentAcceptedAt = localReceipt.acceptedAt;
+    }
+  }
+
   return {
     id: key,
     organizationId: data?.organizationId || DEFAULT_ORGANIZATION.id,
     name: data?.nombre || key,
-    email: data?.email || `${key.toLowerCase().replace(/[^a-z0-9]/g, '')}@minesafe.cl`,
+    email: rawEmail,
     role: role,
     roleLabel: roleLabel,
     rut: data?.codigoId || data?.telefono || 'No registrado',
@@ -1871,10 +1889,8 @@ export function mapRTDBUserToUserProfile(key: string, data: any): UserProfile {
       typeof data?.passwordPolicyVersion === 'number' ? data.passwordPolicyVersion : undefined,
     passwordUpdatedAt:
       typeof data?.passwordUpdatedAt === 'number' ? data.passwordUpdatedAt : undefined,
-    legalConsentVersion:
-      typeof data?.legalConsentVersion === 'string' ? data.legalConsentVersion : undefined,
-    legalConsentAcceptedAt:
-      typeof data?.legalConsentAcceptedAt === 'number' ? data.legalConsentAcceptedAt : undefined,
+    legalConsentVersion: resolvedConsentVersion,
+    legalConsentAcceptedAt: resolvedConsentAcceptedAt,
     anonymizedAt:
       typeof data?.anonymizedAt === 'number' ? data.anonymizedAt : undefined,
     anonymizedBy:
@@ -9929,13 +9945,14 @@ export async function logSecurityAuditEventInRTDB(
 ): Promise<SecurityAuditEvent | null> {
   const now = Date.now();
   const eventId = `aud_${now}_${Math.random().toString(36).slice(2, 8)}`;
+  const authUid = auth.currentUser?.uid;
   const event: SecurityAuditEvent = {
     id: eventId,
     timestamp: now,
     fechaHora: new Date(now).toISOString(),
     action: input.action,
     severity: input.severity || 'info',
-    actorId: actingUser?.id || 'anonymous',
+    actorId: authUid || actingUser?.id || 'anonymous',
     actorName: actingUser?.name || input.anonymousEmail || 'Acceso Público / Sin Sesión',
     actorEmail: actingUser?.email || input.anonymousEmail || 'sin-correo',
     actorRole: actingUser?.role || 'anonimo',
@@ -10164,31 +10181,112 @@ export function subscribeToCybersecurityIncidents(
   );
 }
 
+const LEGAL_CONSENT_STORAGE_PREFIX = 'minesafe_legal_consent_v1:';
+
+function getLocalLegalConsentReceipt(
+  userId: string,
+  email?: string,
+  expectedVersion: string = CURRENT_LEGAL_CONSENT_VERSION
+): { version: string; acceptedAt: number } | null {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return null;
+  const candidateKeys = Array.from(
+    new Set([userId, auth.currentUser?.uid].filter((v): v is string => Boolean(v)))
+  );
+  const normalizedEmail = (email || '').trim().toLowerCase();
+  for (const candidateId of candidateKeys) {
+    try {
+      const raw = localStorage.getItem(`${LEGAL_CONSENT_STORAGE_PREFIX}${candidateId}`);
+      if (!raw) continue;
+      const parsed = JSON.parse(raw);
+      const storedEmail = String(parsed?.email || '').trim().toLowerCase();
+      if (normalizedEmail && storedEmail && storedEmail !== normalizedEmail) continue;
+      if (
+        parsed?.version === expectedVersion &&
+        typeof parsed?.acceptedAt === 'number' &&
+        parsed.acceptedAt > 0
+      ) {
+        return { version: parsed.version, acceptedAt: parsed.acceptedAt };
+      }
+    } catch {
+      // Ignore corrupted local storage entry
+    }
+  }
+  return null;
+}
+
+function saveLocalLegalConsentReceipt(
+  userIds: string[],
+  email: string,
+  version: string,
+  acceptedAt: number
+): void {
+  if (typeof window === 'undefined' || typeof localStorage === 'undefined') return;
+  const payload = JSON.stringify({
+    email: (email || '').trim().toLowerCase(),
+    version,
+    acceptedAt,
+  });
+  for (const id of Array.from(new Set(userIds.filter(Boolean)))) {
+    try {
+      localStorage.setItem(`${LEGAL_CONSENT_STORAGE_PREFIX}${id}`, payload);
+    } catch {
+      // Ignore storage quota / private mode restrictions
+    }
+  }
+}
+
 export async function recordUserLegalConsentInRTDB(
   user: UserProfile,
   version: string = CURRENT_LEGAL_CONSENT_VERSION
 ): Promise<UserProfile> {
   const now = Date.now();
-  await update(ref(rtdb, `usuarios/${user.id}`), {
-    legalConsentVersion: version,
-    legalConsentAcceptedAt: now,
-  });
-  await logSecurityAuditEventInRTDB(
+  const targetUid = auth.currentUser?.uid || user.id;
+  let profileSynced = false;
+
+  try {
+    await update(ref(rtdb, `usuarios/${targetUid}`), {
+      legalConsentVersion: version,
+      legalConsentAcceptedAt: now,
+    });
+    profileSynced = true;
+  } catch (err: any) {
+    const errMsg = String(err?.message || err?.code || '');
+    const isPermissionError = /permission_denied|permission denied/i.test(errMsg);
+    if (!isPermissionError) {
+      throw err;
+    }
+    console.warn(
+      `[MineSafe][LegalConsent] RTDB /usuarios/${targetUid} denegó escritura directa de consentimiento (reglas remotas pendientes de despliegue). Se registrará en /auditoria_seguridad y respaldo local.`,
+      errMsg
+    );
+  }
+
+  const auditEvent = await logSecurityAuditEventInRTDB(
     {
       action: 'consentimiento_legal',
       severity: 'info',
       summary: `Consentimiento informado aceptado (Política de Privacidad y Términos v${version})`,
       organizationId: user.organizationId,
       targetType: 'usuario',
-      targetId: user.id,
+      targetId: targetUid,
       targetLabel: user.name,
       metadata: {
         version,
         acceptedAt: now,
+        profileSynced,
       },
     },
     user
   );
+
+  saveLocalLegalConsentReceipt([targetUid, user.id], user.email, version, now);
+
+  if (!profileSynced && !auditEvent) {
+    console.warn(
+      '[MineSafe][LegalConsent] Consentimiento guardado localmente mientras se actualizan reglas RTDB en el proyecto.'
+    );
+  }
+
   return {
     ...user,
     legalConsentVersion: version,

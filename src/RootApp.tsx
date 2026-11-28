@@ -131,7 +131,16 @@ export const RootApp: React.FC = () => {
           return;
         }
         if (updatedProfile) {
-          setCurrentUser((prev) => (prev ? { ...prev, ...updatedProfile } : updatedProfile));
+          setCurrentUser((prev) => {
+            if (!prev) return updatedProfile;
+            return {
+              ...prev,
+              ...updatedProfile,
+              legalConsentVersion: updatedProfile.legalConsentVersion || prev.legalConsentVersion,
+              legalConsentAcceptedAt:
+                updatedProfile.legalConsentAcceptedAt ?? prev.legalConsentAcceptedAt,
+            };
+          });
         }
       }
     );

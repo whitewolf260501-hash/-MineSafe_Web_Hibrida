@@ -726,7 +726,43 @@ async function runTests() {
     false,
     'Admin MineSafe self-escalation denied'
   );
-  console.log('✅ 4. Privilege escalation attempts blocked across all roles');
+  // Self-service legal consent leaf fields: allowed for own active profile, denied for others or blocked users
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-op-a/legalConsentVersion', '2026.1', ctx.operadorAlpha),
+    true,
+    'Active Operador can record own legalConsentVersion'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-op-a/legalConsentAcceptedAt', Date.now(), ctx.operadorAlpha),
+    true,
+    'Active Operador can record own legalConsentAcceptedAt'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-admin-a/legalConsentVersion', '2026.1', ctx.adminAlpha),
+    true,
+    'Active Company Admin can record own legalConsentVersion'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-admin-ms/legalConsentVersion', '2026.1', ctx.adminMineSafe),
+    true,
+    'Active Admin MineSafe can record own legalConsentVersion'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-sup-a/legalConsentVersion', '2026.1', ctx.operadorAlpha),
+    false,
+    'Operador cannot modify another user legalConsentVersion'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-blocked-a/legalConsentVersion', '2026.1', ctx.blockedAdminAlpha),
+    false,
+    'Blocked user cannot modify own legalConsentVersion'
+  );
+  assert.equal(
+    canWriteRTDB(rtdbRules, baseDb, 'usuarios/uid-op-a/tipoUsuario', 'superadmin', ctx.operadorAlpha),
+    false,
+    'Operador cannot modify own tipoUsuario leaf'
+  );
+  console.log('✅ 4. Privilege escalation attempts blocked across all roles + self-service legal consent verified');
 
   // ---------------------------------------------------------------------------
   // 5. Compatibilidad segura ESP32 (Nodo físico, Gateway y Nodo simulado)
